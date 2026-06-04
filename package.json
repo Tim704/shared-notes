@@ -1,0 +1,22 @@
+{
+  "name": "shared-notes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Live collaborative sticky notes for you and your friends, self-hosted on a Raspberry Pi.",
+  "scripts": {
+    "build": "node build.js",
+    "start": "node server.js",
+    "dev": "node build.js && node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "lib0": "^0.2.94",
+    "ws": "^8.18.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.18"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.1"
+  }
+}

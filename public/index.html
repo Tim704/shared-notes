@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0e1014" />
+    <title>notes</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/bundle.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">notes</span>
+      </div>
+
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"></circle>
+          <line x1="16.5" y1="16.5" x2="21" y2="21"></line>
+        </svg>
+        <input id="search" type="search" placeholder="Search notes" autocomplete="off" />
+      </div>
+
+      <div class="bar-right">
+        <div id="people" class="people"></div>
+        <span id="conn-dot" class="conn-dot" title="Reconnecting..."></span>
+        <div class="you-chip">
+          <span id="you-name" class="you-name"></span>
+          <button id="rename" class="icon-btn" title="Change your name">&#9998;</button>
+        </div>
+        <button id="add" class="add-btn">
+          <span class="plus">+</span><span class="add-label">Note</span>
+        </button>
+      </div>
+    </header>
+
+    <main id="board" class="board"></main>
+
+    <div id="empty" class="empty">
+      <div class="empty-card">
+        <p class="empty-title">No notes yet</p>
+        <p class="empty-sub">Hit <b>+ Note</b> and start typing. Anyone on the board sees it appear, letter by letter.</p>
+      </div>
+    </div>
+  </body>
+</html>

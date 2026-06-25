@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0e1014" />
     <title>notes</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -21,12 +25,12 @@
         <span class="brand-name">notes</span>
       </div>
 
-      <div class="search-wrap">
+      <div id="search-wrap" class="search-wrap">
         <svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true">
           <circle cx="11" cy="11" r="7"></circle>
           <line x1="16.5" y1="16.5" x2="21" y2="21"></line>
         </svg>
-        <input id="search" type="search" placeholder="Search notes" autocomplete="off" />
+        <input id="search" type="search" placeholder="Search this tab" autocomplete="off" />
       </div>
 
       <div class="bar-right">
@@ -42,7 +46,14 @@
       </div>
     </header>
 
+    <nav id="tabs" class="tabbar"></nav>
+
     <main id="board" class="board"></main>
+
+    <section id="draw-view" class="draw-view">
+      <div id="draw-bar" class="draw-bar"></div>
+      <div id="canvas-host" class="canvas-host"></div>
+    </section>
 
     <div id="empty" class="empty">
       <div class="empty-card">

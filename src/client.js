@@ -9,10 +9,12 @@ import { createDrawSurface } from './draw.js'
 import {
   genId,
   clamp,
+  rafThrottle,
   relTime,
   initials,
   PAPER,
   PRESENCE,
+  PEN_COLORS,
   getFavorites,
   addFavorite,
   removeFavorite,
@@ -238,6 +240,11 @@ const yTabs = doc.getArray('tabs') // [{ id, name, kind }, ...]
 const yDrawings = doc.getMap('drawings') // tabId -> Y.Array<stroke>
 
 const SIZES = { s: 'size-s', m: 'size-m', l: 'size-l' }
+const SIZE_W = { s: 190, m: 250, l: 366 } // preset → pixel width (free layout)
+const W_MIN = 150
+const H_MIN = 90
+const W_DEFAULT = 250
+const H_DEFAULT = 200
 const FS_MIN = 11
 const FS_MAX = 26
 const FS_DEFAULT = 13
@@ -275,7 +282,9 @@ const drawBar = document.getElementById('draw-bar')
 youName.textContent = me.name
 youName.style.setProperty('--me', me.color)
 
+let everConnected = false
 provider.onStatus((connected) => {
+  if (connected) everConnected = true
   dot.classList.toggle('on', connected)
   dot.title = connected ? 'Connected' : 'Reconnecting...'
 })
@@ -321,6 +330,42 @@ function ensureDefaultTab() {
       if (!n.get('tabId')) n.set('tabId', id)
     })
   })
+}
+
+// Migration for the corkboard: give any note without x/y a tidy grid slot so
+// legacy boards don't stack every note at 0,0. Deterministic (ordered by
+// creation, grouped by tab) and idempotent, so it's safe if two clients run it.
+function ensureNotePositions() {
+  const ordered = yOrder.toArray().slice().reverse() // oldest first → stable grids
+  const missing = ordered.some((id) => {
+    const n = yNotes.get(id)
+    return n && (n.get('x') == null || n.get('y') == null)
+  })
+  if (!missing) return
+  const COLS = 4
+  const COL_W = 260
+  const ROW_H = 220
+  doc.transact(() => {
+    const perTab = new Map()
+    for (const id of ordered) {
+      const n = yNotes.get(id)
+      if (!n) continue
+      if (n.get('x') != null && n.get('y') != null) continue // already placed; leave it
+      const tab = n.get('tabId') || '_'
+      const idx = perTab.get(tab) || 0 // only count notes that actually get a slot
+      perTab.set(tab, idx + 1)
+      n.set('x', 16 + (idx % COLS) * COL_W)
+      n.set('y', 16 + Math.floor(idx / COLS) * ROW_H)
+      if (n.get('w') == null) n.set('w', SIZE_W[n.get('size')] || W_DEFAULT)
+      if (n.get('h') == null) n.set('h', H_DEFAULT)
+      if (n.get('z') == null) n.set('z', idx + 1)
+    }
+  })
+}
+
+function migrateBoard() {
+  ensureDefaultTab()
+  ensureNotePositions()
 }
 
 // ---- tab operations ----
@@ -481,7 +526,10 @@ const openMenus = []
 function closeMenus() {
   while (openMenus.length) openMenus.pop().remove()
 }
-document.addEventListener('click', closeMenus)
+document.addEventListener('click', () => {
+  closeMenus()
+  closeAllPopovers() // an outside click dismisses an open options popover
+})
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeMenus()
@@ -493,6 +541,8 @@ document.addEventListener('keydown', (e) => {
 function createNote(color) {
   const id = genId()
   const active = activeTab()
+  const pos = nextNotePos()
+  const z = maxZ() + 1
   doc.transact(() => {
     const n = new Y.Map()
     n.set('title', new Y.Text())
@@ -502,6 +552,12 @@ function createNote(color) {
     n.set('tabId', active ? active.id : null)
     n.set('fontSize', FS_DEFAULT)
     n.set('size', 'm')
+    n.set('kind', 'note')
+    n.set('x', pos.x)
+    n.set('y', pos.y)
+    n.set('w', SIZE_W.m)
+    n.set('h', H_DEFAULT)
+    n.set('z', z)
     yNotes.set(id, n)
     yOrder.unshift([id])
   })
@@ -515,6 +571,67 @@ function deleteNote(id) {
     if (i >= 0) yOrder.delete(i, 1)
     yNotes.delete(id)
   })
+}
+
+// Flip a note between prose and checklist, carrying the text across. prose→todo
+// splits the body into items (one per non-blank line); todo→prose joins items
+// back into the body. Done-state is dropped on the way back to prose.
+function setNoteKind(note, kind) {
+  const cur = note.get('kind') || 'note'
+  if (cur === kind) return
+  note.doc.transact(() => {
+    if (kind === 'todo') {
+      const lines = note
+        .get('body')
+        .toString()
+        .split('\n')
+        .map((s) => s.replace(/\s+$/, ''))
+        .filter((s) => s.trim() !== '')
+      const arr = new Y.Array()
+      note.set('items', arr)
+      const use = lines.length ? lines : ['']
+      for (const line of use) {
+        const it = new Y.Map()
+        const t = new Y.Text()
+        it.set('id', genId())
+        it.set('text', t)
+        it.set('done', false)
+        arr.push([it])
+        if (line) t.insert(0, line)
+      }
+      note.set('kind', 'todo')
+    } else {
+      const items = note.get('items')
+      const text = items
+        ? items
+            .toArray()
+            .map((it) => it.get('text').toString())
+            .join('\n')
+        : ''
+      const body = note.get('body')
+      if (body.length) body.delete(0, body.length)
+      if (text) body.insert(0, text)
+      note.set('kind', 'note')
+    }
+  })
+}
+
+// Searchable text for a note (title + body, or title + item texts for a list).
+function noteHay(note) {
+  const title = note.get('title').toString()
+  let body = ''
+  if ((note.get('kind') || 'note') === 'todo') {
+    const items = note.get('items')
+    body = items
+      ? items
+          .toArray()
+          .map((it) => it.get('text').toString())
+          .join(' ')
+      : ''
+  } else {
+    body = note.get('body').toString()
+  }
+  return (title + ' ' + body).toLowerCase()
 }
 
 function belongsToActive(note, active) {
@@ -538,6 +655,88 @@ function applyNoteStyle(el, note) {
   el.classList.add(SIZES[note.get('size')] || SIZES.m)
 }
 
+// ---- free-floating "corkboard" layout -------------------------------------
+// Desktop: notes are absolutely positioned — drag the header to move, drag the
+// corner grip to resize. Narrow screens fall back to the stacked flow layout
+// (x/y/w/h are ignored there so a phone stays usable).
+const mqStack = window.matchMedia('(max-width: 560px)')
+let freeLayout = !mqStack.matches
+
+function applyNoteLayout(el, note) {
+  el.classList.toggle('free', freeLayout)
+  if (!freeLayout) {
+    el.style.left = ''
+    el.style.top = ''
+    el.style.width = ''
+    el.style.height = ''
+    el.style.zIndex = ''
+    return
+  }
+  const w = clamp(note.get('w') || SIZE_W[note.get('size')] || W_DEFAULT, W_MIN, 4000)
+  const h = Math.max(H_MIN, note.get('h') || H_DEFAULT)
+  const bw = board.clientWidth || window.innerWidth
+  const x = clamp(note.get('x') || 0, 0, Math.max(0, bw - w))
+  const y = Math.max(0, note.get('y') || 0)
+  el.style.left = x + 'px'
+  el.style.top = y + 'px'
+  el.style.width = w + 'px'
+  el.style.height = h + 'px'
+  el.style.zIndex = String(note.get('z') || 1)
+}
+
+function maxZ() {
+  let m = 0
+  yNotes.forEach((n) => {
+    const z = n.get('z')
+    if (typeof z === 'number' && z > m) m = z
+  })
+  return m
+}
+
+function bringToFront(note) {
+  if (!freeLayout) return
+  const topZ = maxZ()
+  if ((note.get('z') || 0) < topZ) note.doc.transact(() => note.set('z', topZ + 1))
+}
+
+function updateBoardExtent() {
+  if (!freeLayout) {
+    board.style.minHeight = ''
+    return
+  }
+  let maxB = 0
+  for (const [, c] of cards) {
+    const n = c.note
+    const y = Math.max(0, n.get('y') || 0)
+    const h = Math.max(H_MIN, n.get('h') || H_DEFAULT)
+    if (y + h > maxB) maxB = y + h
+  }
+  board.style.minHeight = maxB + 60 + 'px'
+}
+
+function relayoutAll() {
+  board.classList.toggle('free', freeLayout)
+  for (const [, c] of cards) applyNoteLayout(c.el, c.note)
+  updateBoardExtent()
+}
+
+function nextNotePos() {
+  const n = cards.size
+  const step = 28
+  return { x: 24 + (n % 7) * step, y: 24 + (n % 7) * step }
+}
+
+mqStack.addEventListener('change', () => {
+  freeLayout = !mqStack.matches
+  relayoutAll()
+})
+window.addEventListener(
+  'resize',
+  rafThrottle(() => {
+    if (freeLayout) relayoutAll()
+  })
+)
+
 function createCard(id) {
   const note = yNotes.get(id)
   const el = document.createElement('article')
@@ -553,7 +752,7 @@ function createCard(id) {
 
   const optBtn = document.createElement('button')
   optBtn.className = 'icon-btn opt'
-  optBtn.title = 'Colour, size & text'
+  optBtn.title = 'Type, colour, size & text'
   optBtn.innerHTML = '&#9881;'
 
   const del = document.createElement('button')
@@ -572,7 +771,7 @@ function createCard(id) {
   titleEl.placeholder = 'Title'
   titleEl.maxLength = 120
 
-  // formatting toolbar (appears while the note is focused)
+  // formatting toolbar (prose notes only; appears while the note is focused)
   const fmt = document.createElement('div')
   fmt.className = 'card-fmt'
   const fmtBtns = {}
@@ -588,15 +787,15 @@ function createCard(id) {
     b.title = tip
     b.addEventListener('mousedown', (e) => {
       e.preventDefault() // keep the body's selection
-      rich.toggleMark(mark)
+      if (card.body && card.body.rich) card.body.rich.toggleMark(mark)
     })
     fmt.appendChild(b)
     fmtBtns[mark] = b
   })
 
-  const bodyEl = document.createElement('div')
-  bodyEl.className = 'card-body'
-  bodyEl.setAttribute('data-ph', 'Take a note…')
+  // body region: either the rich-text editor or a checklist (depends on kind)
+  const bodyHost = document.createElement('div')
+  bodyHost.className = 'card-bodyhost'
 
   const meta = document.createElement('div')
   meta.className = 'card-meta'
@@ -604,36 +803,188 @@ function createCard(id) {
   timeEl.textContent = relTime(note.get('created') || Date.now())
   meta.appendChild(timeEl)
 
-  el.append(top, titleEl, fmt, bodyEl, meta)
+  // corner grip for resizing (free layout only — hidden via CSS otherwise)
+  const grip = document.createElement('div')
+  grip.className = 'resize-grip'
+  grip.title = 'Drag to resize'
+
+  el.append(top, titleEl, bodyHost, fmt, meta, grip)
 
   applyNoteStyle(el, note)
+  applyNoteLayout(el, note)
 
-  // bindings
+  // ---- drag to move (header) + drag to resize (grip), free layout only ----
+  // `card.interacting` lets noteObs skip re-laying-out while WE drive the inline
+  // style; `card.abortInteraction` lets destroyCard tear down an in-flight drag.
+  let pendingPos = null
+  let pendingSize = null
+  const commitPos = () => {
+    if (!pendingPos) return
+    const p = pendingPos
+    pendingPos = null
+    if (!yNotes.has(id)) return // note was deleted mid-drag; don't resurrect keys
+    note.doc.transact(() => {
+      note.set('x', p.x)
+      note.set('y', p.y)
+    })
+  }
+  const commitSize = () => {
+    if (!pendingSize) return
+    const s = pendingSize
+    pendingSize = null
+    if (!yNotes.has(id)) return
+    note.doc.transact(() => {
+      note.set('w', s.w)
+      note.set('h', s.h)
+    })
+  }
+  const schedulePos = rafThrottle(commitPos)
+  const scheduleSize = rafThrottle(commitSize)
+
+  top.addEventListener('pointerdown', (e) => {
+    if (!freeLayout) return
+    if (e.button != null && e.button !== 0 && e.pointerType === 'mouse') return
+    if (e.target.closest('.card-tools')) return // let the gear / delete buttons work
+    e.preventDefault()
+    bringToFront(note)
+    const sx = e.clientX
+    const sy = e.clientY
+    const ox = note.get('x') || 0
+    const oy = note.get('y') || 0
+    const bw = board.clientWidth
+    const w = note.get('w') || W_DEFAULT
+    try {
+      top.setPointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+    card.interacting = true
+    el.classList.add('dragging')
+    const move = (ev) => {
+      const nx = clamp(ox + (ev.clientX - sx), 0, Math.max(0, bw - w))
+      const ny = Math.max(0, oy + (ev.clientY - sy))
+      el.style.left = nx + 'px'
+      el.style.top = ny + 'px'
+      pendingPos = { x: nx, y: ny }
+      schedulePos()
+    }
+    const end = (ev) => {
+      top.removeEventListener('pointermove', move)
+      top.removeEventListener('pointerup', end)
+      top.removeEventListener('pointercancel', end)
+      if (ev) {
+        try {
+          top.releasePointerCapture(ev.pointerId)
+        } catch {
+          /* ignore */
+        }
+      }
+      card.interacting = false
+      card.abortInteraction = null
+      el.classList.remove('dragging')
+      commitPos()
+      updateBoardExtent()
+    }
+    card.abortInteraction = end
+    top.addEventListener('pointermove', move)
+    top.addEventListener('pointerup', end)
+    top.addEventListener('pointercancel', end)
+  })
+
+  grip.addEventListener('pointerdown', (e) => {
+    if (!freeLayout) return
+    if (e.button != null && e.button !== 0 && e.pointerType === 'mouse') return
+    e.preventDefault()
+    e.stopPropagation()
+    bringToFront(note)
+    const sx = e.clientX
+    const sy = e.clientY
+    const ow = note.get('w') || W_DEFAULT
+    const oh = note.get('h') || H_DEFAULT
+    const x = note.get('x') || 0
+    const bw = board.clientWidth
+    try {
+      grip.setPointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+    card.interacting = true
+    el.classList.add('resizing')
+    const move = (ev) => {
+      const nw = clamp(ow + (ev.clientX - sx), W_MIN, Math.max(W_MIN, bw - x))
+      const nh = Math.max(H_MIN, oh + (ev.clientY - sy))
+      el.style.width = nw + 'px'
+      el.style.height = nh + 'px'
+      pendingSize = { w: nw, h: nh }
+      scheduleSize()
+    }
+    const end = (ev) => {
+      grip.removeEventListener('pointermove', move)
+      grip.removeEventListener('pointerup', end)
+      grip.removeEventListener('pointercancel', end)
+      if (ev) {
+        try {
+          grip.releasePointerCapture(ev.pointerId)
+        } catch {
+          /* ignore */
+        }
+      }
+      card.interacting = false
+      card.abortInteraction = null
+      el.classList.remove('resizing')
+      commitSize()
+      updateBoardExtent()
+    }
+    card.abortInteraction = end
+    grip.addEventListener('pointermove', move)
+    grip.addEventListener('pointerup', end)
+    grip.addEventListener('pointercancel', end)
+  })
+
   const unbinds = []
   unbinds.push(bindInput(note.get('title'), titleEl, () => applyFilter()))
-  const rich = bindRichText(note.get('body'), bodyEl, {
-    onChange: () => applyFilter(),
-    onState: (marks) => {
-      for (const m of ['b', 'i', 'u', 's']) fmtBtns[m].classList.toggle('on', !!marks[m])
-    },
-  })
+
+  const card = {
+    el,
+    unbinds,
+    body: null,
+    fmtBtns,
+    titleEl,
+    bodyHost,
+    presenceEl,
+    timeEl,
+    note,
+    noteObs: null,
+    id,
+    pop: null,
+    interacting: false, // a drag/resize is in progress (suppresses observer relayout)
+    abortInteraction: null, // teardown for an in-flight drag/resize (called on destroy)
+  }
+
+  mountBody(card)
 
   optBtn.addEventListener('click', (e) => {
     e.stopPropagation()
+    bringToFront(note) // raise the card so its popover isn't trapped under a neighbour
     togglePopover(card)
   })
 
-  const focusOn = () => awareness.setLocalStateField('focus', id)
-  const focusOff = () => {
+  // presence focus follows any field inside the card (title, body, list items)
+  el.addEventListener('focusin', () => {
+    awareness.setLocalStateField('focus', id)
+    bringToFront(note)
+  })
+  el.addEventListener('focusout', (e) => {
+    if (el.contains(e.relatedTarget)) return
     if (awareness.getLocalState()?.focus === id) awareness.setLocalStateField('focus', null)
-  }
-  titleEl.addEventListener('focus', focusOn)
-  bodyEl.addEventListener('focus', focusOn)
-  titleEl.addEventListener('blur', focusOff)
-  bodyEl.addEventListener('blur', focusOff)
+  })
 
   const noteObs = (e) => {
     if (!e.keysChanged) return
+    if (e.keysChanged.has('kind')) {
+      rebuildCard(id)
+      return
+    }
     if (
       e.keysChanged.has('color') ||
       e.keysChanged.has('fontSize') ||
@@ -642,17 +993,212 @@ function createCard(id) {
       applyNoteStyle(el, note)
       if (card.pop) refreshPopover(card)
     }
+    if (
+      !card.interacting && // while WE drag/resize, the pointer handler owns the inline style
+      (e.keysChanged.has('x') ||
+        e.keysChanged.has('y') ||
+        e.keysChanged.has('w') ||
+        e.keysChanged.has('h') ||
+        e.keysChanged.has('z') ||
+        e.keysChanged.has('size'))
+    ) {
+      applyNoteLayout(el, note)
+      updateBoardExtent()
+    }
     if (e.keysChanged.has('tabId')) scheduleReconcile()
   }
   note.observe(noteObs)
+  card.noteObs = noteObs
 
-  const card = { el, unbinds, rich, titleEl, bodyEl, presenceEl, timeEl, note, noteObs, id, pop: null }
   return card
 }
 
+// Switching a note between prose and checklist swaps its whole body, so the
+// simplest correct thing is to tear the card down and let reconcile rebuild it.
+function rebuildCard(id) {
+  queueMicrotask(() => {
+    const c = cards.get(id)
+    if (!c) return
+    destroyCard(c)
+    cards.delete(id)
+    scheduleReconcile()
+  })
+}
+
+function ensureItems(note) {
+  if (note.get('items')) return
+  note.doc.transact(() => {
+    if (!note.get('items')) note.set('items', new Y.Array())
+  })
+}
+
+function mountBody(card) {
+  if (card.body) {
+    card.body.destroy()
+    card.body = null
+  }
+  card.bodyHost.replaceChildren()
+  const note = card.note
+  const kind = note.get('kind') || 'note'
+  card.el.classList.toggle('is-todo', kind === 'todo')
+  if (kind === 'todo') {
+    ensureItems(note)
+    card.body = bindTodo(card, note.get('items'))
+  } else {
+    const bodyEl = document.createElement('div')
+    bodyEl.className = 'card-body'
+    bodyEl.setAttribute('data-ph', 'Take a note…')
+    card.bodyHost.appendChild(bodyEl)
+    const rich = bindRichText(note.get('body'), bodyEl, {
+      onChange: () => applyFilter(),
+      onState: (marks) => {
+        for (const m of ['b', 'i', 'u', 's']) card.fmtBtns[m].classList.toggle('on', !!marks[m])
+      },
+    })
+    card.body = { kind: 'note', rich, destroy: () => rich.destroy() }
+  }
+}
+
+// Checklist body: items live in a Y.Array<Y.Map{ id, text:Y.Text, done }>.
+// Text edits flow through bindInput per item; structural (add/remove) changes
+// re-render the rows; `done` changes update a single checkbox in place.
+function bindTodo(card, items) {
+  const host = document.createElement('div')
+  host.className = 'card-todo'
+  card.bodyHost.appendChild(host)
+  const list = document.createElement('div')
+  list.className = 'todo-list'
+  const addBtn = document.createElement('button')
+  addBtn.className = 'todo-add'
+  addBtn.textContent = '+ Add item'
+  addBtn.addEventListener('click', () => addItem(items.length, '', true))
+  host.append(list, addBtn)
+
+  const rowCleanups = []
+  let focusAfter = null // item id to focus once the next render lands
+
+  function indexOfItem(item) {
+    for (let i = 0; i < items.length; i++) if (items.get(i) === item) return i
+    return -1
+  }
+
+  function addItem(at, text, focus) {
+    const iid = genId()
+    if (focus) focusAfter = iid
+    const it = new Y.Map()
+    items.doc.transact(() => {
+      const t = new Y.Text()
+      it.set('id', iid)
+      it.set('text', t)
+      it.set('done', false)
+      items.insert(at, [it])
+      if (text) t.insert(0, text)
+    })
+  }
+
+  function removeItem(item) {
+    const idx = indexOfItem(item)
+    if (idx >= 0) items.doc.transact(() => items.delete(idx, 1))
+  }
+
+  function onItemKey(e, item, txt) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      addItem(indexOfItem(item) + 1, '', true)
+    } else if (e.key === 'Backspace' && txt.value === '' && txt.selectionStart === 0) {
+      e.preventDefault()
+      if (items.length <= 1) return // never delete the last row — keep an editable item
+      const idx = indexOfItem(item)
+      focusAfter = (idx > 0 ? items.get(idx - 1) : items.get(idx + 1)).get('id')
+      removeItem(item)
+    }
+  }
+
+  function buildRow(item) {
+    const row = document.createElement('div')
+    row.className = 'todo-item'
+    row.dataset.iid = item.get('id')
+    const cb = document.createElement('input')
+    cb.type = 'checkbox'
+    cb.className = 'todo-check'
+    cb.checked = !!item.get('done')
+    cb.addEventListener('change', () => item.doc.transact(() => item.set('done', cb.checked)))
+    const txt = document.createElement('input')
+    txt.className = 'todo-text'
+    txt.maxLength = 280
+    const unbindText = bindInput(item.get('text'), txt, () => applyFilter())
+    txt.addEventListener('keydown', (e) => onItemKey(e, item, txt))
+    const delB = document.createElement('button')
+    delB.className = 'todo-del'
+    delB.textContent = '×'
+    delB.title = 'Remove item'
+    delB.addEventListener('click', () => removeItem(item))
+    const obs = (e) => {
+      if (e.keysChanged && e.keysChanged.has('done')) {
+        cb.checked = !!item.get('done')
+        row.classList.toggle('done', cb.checked)
+      }
+    }
+    item.observe(obs)
+    rowCleanups.push(() => {
+      unbindText()
+      item.unobserve(obs)
+    })
+    row.classList.toggle('done', !!item.get('done'))
+    row.append(cb, txt, delB)
+    return row
+  }
+
+  function render() {
+    // A structural change (often a remote peer adding/removing an item) rebuilds
+    // every row. Capture the caret of whatever item is being typed in so a peer's
+    // edit can't eject the local user from the field they're in.
+    let keep = null
+    const active = document.activeElement
+    if (active && active.classList && active.classList.contains('todo-text') && list.contains(active)) {
+      const row = active.closest('.todo-item')
+      keep = { iid: row && row.dataset.iid, start: active.selectionStart, end: active.selectionEnd }
+    }
+    rowCleanups.forEach((f) => f())
+    rowCleanups.length = 0
+    list.replaceChildren()
+    items.forEach((item) => list.appendChild(buildRow(item)))
+    const want = focusAfter || (keep && keep.iid)
+    focusAfter = null
+    if (want) {
+      const elx = list.querySelector('[data-iid="' + want + '"] .todo-text')
+      if (elx) {
+        elx.focus()
+        const caret = keep && keep.iid === want ? keep : null
+        const s = caret ? caret.start : elx.value.length
+        const en = caret ? caret.end : elx.value.length
+        try {
+          elx.setSelectionRange(s, en)
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  const itemsObs = () => render()
+  items.observe(itemsObs)
+  render()
+
+  return {
+    kind: 'todo',
+    destroy() {
+      items.unobserve(itemsObs)
+      rowCleanups.forEach((f) => f())
+      host.remove()
+    },
+  }
+}
+
 function destroyCard(card) {
+  if (card.abortInteraction) card.abortInteraction() // tear down an in-flight drag/resize
   card.unbinds.forEach((fn) => fn())
-  card.rich.destroy()
+  if (card.body) card.body.destroy()
   card.note.unobserve(card.noteObs)
   if (card.pop) {
     card.pop.remove()
@@ -676,13 +1222,43 @@ function togglePopover(card) {
   if (wasOpen) return
   if (!card.pop) buildPopover(card)
   refreshPopover(card)
-  card.pop.classList.add('open')
+  const pop = card.pop
+  // reset any prior on-screen flip, then keep it within the viewport
+  pop.style.left = ''
+  pop.style.right = ''
+  pop.classList.add('open')
+  const r = pop.getBoundingClientRect()
+  if (r.left < 8) {
+    pop.style.right = 'auto'
+    pop.style.left = '6px' // flip to anchor on the card's left edge
+  } else if (r.right > window.innerWidth - 8) {
+    pop.style.right = '6px'
+    pop.style.left = 'auto'
+  }
 }
 
 function buildPopover(card) {
   const pop = document.createElement('div')
   pop.className = 'card-pop'
   pop.addEventListener('click', (e) => e.stopPropagation())
+
+  // Type (prose note vs checklist)
+  const kSec = section('Type')
+  const kRow = document.createElement('div')
+  kRow.className = 'pop-row pop-sizes'
+  const kindBtns = {}
+  ;[
+    ['note', 'Note'],
+    ['todo', 'Checklist'],
+  ].forEach(([k, label]) => {
+    const b = document.createElement('button')
+    b.className = 'pop-btn size-btn'
+    b.textContent = label
+    b.addEventListener('click', () => setNoteKind(card.note, k))
+    kRow.appendChild(b)
+    kindBtns[k] = b
+  })
+  kSec.append(kRow)
 
   // Colour
   const cSec = section('Colour')
@@ -737,16 +1313,21 @@ function buildPopover(card) {
     const b = document.createElement('button')
     b.className = 'pop-btn size-btn'
     b.textContent = label
-    b.addEventListener('click', () => card.note.set('size', k))
+    b.addEventListener('click', () =>
+      card.note.doc.transact(() => {
+        card.note.set('size', k)
+        card.note.set('w', SIZE_W[k]) // quick-resize width in the corkboard layout
+      })
+    )
     wRow.appendChild(b)
     sizeBtns[k] = b
   })
   wSec.append(wRow)
 
-  pop.append(cSec, tSec, wSec)
+  pop.append(kSec, cSec, tSec, wSec)
   card.el.appendChild(pop)
   card.pop = pop
-  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns }
+  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, kindBtns }
   renderFavs(card)
 
   function section(name) {
@@ -795,11 +1376,13 @@ function renderFavs(card) {
 
 function refreshPopover(card) {
   if (!card.popRefs) return
-  const { colorInput, fsVal, sizeBtns } = card.popRefs
+  const { colorInput, fsVal, sizeBtns, kindBtns } = card.popRefs
   colorInput.value = normalizeHex(card.note.get('color') || PAPER[0])
   fsVal.textContent = (card.note.get('fontSize') || FS_DEFAULT) + 'px'
   const sz = card.note.get('size') || 'm'
   for (const k of Object.keys(sizeBtns)) sizeBtns[k].classList.toggle('on', k === sz)
+  const kind = card.note.get('kind') || 'note'
+  for (const k of Object.keys(kindBtns)) kindBtns[k].classList.toggle('on', k === kind)
   renderFavs(card)
 }
 
@@ -867,6 +1450,15 @@ function unmountDraw() {
   drawBar.innerHTML = ''
 }
 
+function setPenColor(surface, value) {
+  drawTool.color = value
+  drawTool.mode = 'pen'
+  surface.setColor(value)
+  surface.setMode('pen')
+  saveDrawTool()
+  syncDrawBar()
+}
+
 function buildDrawBar(surface) {
   drawBar.innerHTML = ''
 
@@ -875,14 +1467,21 @@ function buildDrawBar(surface) {
   color.className = 'draw-color'
   color.value = normalizeHex(drawTool.color)
   color.title = 'Pen colour'
-  color.addEventListener('input', () => {
-    drawTool.color = color.value
-    drawTool.mode = 'pen'
-    surface.setColor(color.value)
-    surface.setMode('pen')
-    saveDrawTool()
-    syncDrawBar()
-  })
+  color.addEventListener('input', () => setPenColor(surface, color.value))
+
+  // quick preset pen colours
+  const swatches = document.createElement('div')
+  swatches.className = 'draw-swatches'
+  const swatchRefs = []
+  for (const c of PEN_COLORS) {
+    const b = document.createElement('button')
+    b.className = 'draw-swatch'
+    b.style.background = c
+    b.title = c
+    b.addEventListener('click', () => setPenColor(surface, c))
+    swatches.appendChild(b)
+    swatchRefs.push({ el: b, color: c })
+  }
 
   const width = document.createElement('input')
   width.type = 'range'
@@ -890,7 +1489,7 @@ function buildDrawBar(surface) {
   width.max = '40'
   width.value = String(drawTool.width)
   width.className = 'draw-width'
-  width.title = 'Pen size'
+  width.title = 'Pen / text size'
   width.addEventListener('input', () => {
     drawTool.width = Number(width.value)
     surface.setWidth(drawTool.width)
@@ -903,6 +1502,13 @@ function buildDrawBar(surface) {
     syncDrawBar()
   })
   penBtn.dataset.mode = 'pen'
+
+  const textBtn = drawBtn('T Text', () => {
+    drawTool.mode = 'text'
+    surface.setMode('text')
+    syncDrawBar()
+  })
+  textBtn.dataset.mode = 'text'
 
   const eraseBtn = drawBtn('⌫ Eraser', () => {
     drawTool.mode = 'erase'
@@ -917,14 +1523,21 @@ function buildDrawBar(surface) {
   })
   clearBtn.classList.add('danger')
 
-  drawBar.append(color, width, penBtn, eraseBtn, undoBtn, clearBtn)
-  drawBar._modeBtns = [penBtn, eraseBtn]
+  drawBar.append(color, swatches, width, penBtn, textBtn, eraseBtn, undoBtn, clearBtn)
+  drawBar._modeBtns = [penBtn, textBtn, eraseBtn]
+  drawBar._swatches = swatchRefs
+  drawBar._colorInput = color
   syncDrawBar()
 }
 
 function syncDrawBar() {
   if (!drawBar._modeBtns) return
   for (const b of drawBar._modeBtns) b.classList.toggle('on', b.dataset.mode === drawTool.mode)
+  if (drawBar._colorInput) drawBar._colorInput.value = normalizeHex(drawTool.color)
+  if (drawBar._swatches) {
+    const cur = normalizeHex(drawTool.color)
+    for (const s of drawBar._swatches) s.el.classList.toggle('on', normalizeHex(s.color) === cur)
+  }
 }
 
 function drawBtn(label, fn) {
@@ -968,6 +1581,7 @@ function reconcile() {
   }
 
   unmountDraw()
+  board.classList.toggle('free', freeLayout)
 
   const order = yOrder
     .toArray()
@@ -994,6 +1608,7 @@ function reconcile() {
   }
 
   empty.style.display = order.length ? 'none' : 'flex'
+  updateBoardExtent()
   renderTabs()
   renderPresence()
   applyFilter()
@@ -1056,8 +1671,7 @@ function applyFilter() {
     }
     const n = yNotes.get(id)
     if (!n) continue
-    const hay = (n.get('title').toString() + ' ' + n.get('body').toString()).toLowerCase()
-    card.el.classList.toggle('hidden', !hay.includes(q))
+    card.el.classList.toggle('hidden', !noteHay(n).includes(q))
   }
 }
 search.addEventListener('input', applyFilter)
@@ -1088,8 +1702,11 @@ setInterval(() => {
 // Run the one-time migration only after the server's state has arrived, so we
 // never race a populated board into a duplicate default tab. If we never reach
 // the server (offline first run), seed a tab after a short grace period.
-provider.onSync(ensureDefaultTab)
+provider.onSync(migrateBoard)
+// Offline first-run only: if we never even connected, seed a starter board. If we
+// HAVE connected but sync is just slow, wait for onSync — seeding here would race
+// the server's real tabs and leave a duplicate "Ideas" tab.
 setTimeout(() => {
-  if (!provider.synced) ensureDefaultTab()
+  if (!provider.synced && !everConnected) migrateBoard()
 }, 2500)
 reconcile()

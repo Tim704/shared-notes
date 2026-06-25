@@ -377,6 +377,63 @@ body {
   display: none;
 }
 
+/* free-floating corkboard layout (desktop / wide screens) */
+.board.free {
+  display: block;
+  position: relative;
+}
+.card.free {
+  position: absolute;
+  margin: 0;
+  /* left / top / width / height / z-index are set inline */
+}
+.card.free:hover {
+  transform: none; /* no lift while absolutely positioned */
+}
+.card.free .card-top {
+  cursor: grab;
+  touch-action: none;
+}
+.card.free.dragging .card-top {
+  cursor: grabbing;
+}
+.card.free.dragging,
+.card.free.resizing {
+  user-select: none;
+  box-shadow: var(--shadow-hi);
+}
+.card.free .card-bodyhost {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.card.free .card-body {
+  max-height: none;
+}
+.resize-grip {
+  display: none;
+}
+.card.free .resize-grip {
+  display: block;
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-radius: 0 0 var(--radius) 0;
+  background: linear-gradient(
+    135deg,
+    transparent 50%,
+    var(--note-ink-dim, rgba(0, 0, 0, 0.35)) 50%
+  );
+  opacity: 0.5;
+}
+.card.free .resize-grip:hover {
+  opacity: 0.9;
+}
+
 .card-top {
   display: flex;
   align-items: center;
@@ -429,14 +486,27 @@ body {
   background: transparent;
 }
 
-/* formatting toolbar — only while editing this note */
+/* formatting toolbar — only while editing this note, pinned near the bottom */
 .card-fmt {
   display: none;
   gap: 4px;
-  margin: 1px 0 5px;
+  margin: 6px 0 0;
 }
 .card:focus-within .card-fmt {
   display: flex;
+}
+/* In the fixed-height corkboard card, keep the toolbar row reserved (hidden, not
+   removed) so focusing the body doesn't shrink/jump the editable area. */
+.card.free .card-fmt {
+  display: flex;
+  visibility: hidden;
+}
+.card.free:focus-within .card-fmt {
+  visibility: visible;
+}
+/* checklist notes have no rich body, so never show the B/I/U/S bar */
+.card.is-todo .card-fmt {
+  display: none !important;
 }
 .fmt-btn {
   width: 25px;
@@ -505,6 +575,85 @@ body {
 .card-body::-webkit-scrollbar-thumb {
   background: rgba(127, 127, 127, 0.3);
   border-radius: 3px;
+}
+
+.card-bodyhost {
+  min-height: 0;
+}
+
+/* checklist body */
+.card-todo {
+  display: flex;
+  flex-direction: column;
+}
+.todo-list {
+  display: flex;
+  flex-direction: column;
+}
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.todo-check {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin: 0;
+  accent-color: #2d7ff9;
+  cursor: pointer;
+}
+.todo-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--note-ink, #20242b);
+  font: inherit;
+  font-size: var(--note-fs, 13px);
+  line-height: 1.4;
+  padding: 1px 0;
+  outline: none;
+}
+.todo-text::placeholder {
+  color: var(--note-ink-dim, #5b626d);
+}
+.todo-item.done .todo-text {
+  text-decoration: line-through;
+  color: var(--note-ink-dim, #5b626d);
+}
+.todo-del {
+  flex: none;
+  opacity: 0;
+  border: none;
+  background: transparent;
+  color: var(--note-ink-dim, #5b626d);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  transition: opacity 0.12s ease;
+}
+.todo-item:hover .todo-del,
+.todo-item:focus-within .todo-del {
+  opacity: 1;
+}
+.todo-del:hover {
+  color: #b91c1c;
+}
+.todo-add {
+  align-self: flex-start;
+  margin-top: 4px;
+  border: none;
+  background: transparent;
+  color: var(--note-ink-dim, #5b626d);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.todo-add:hover {
+  color: var(--note-ink, #20242b);
 }
 
 .card-meta {
@@ -683,10 +832,48 @@ body {
   background: #b91c1c;
   border-color: #b91c1c;
 }
+.draw-swatches {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.draw-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.draw-swatch:hover {
+  transform: scale(1.12);
+}
+.draw-swatch.on {
+  box-shadow: 0 0 0 2px var(--bg-2), 0 0 0 4px var(--accent);
+}
 .canvas-host {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
+}
+/* overlay editor for placing/editing canvas text labels */
+.draw-text-input {
+  position: absolute;
+  margin: 0;
+  padding: 0 1px;
+  border: 1px dashed rgba(20, 24, 30, 0.55);
+  background: rgba(251, 250, 245, 0.9);
+  color: #1f2228;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  line-height: 1.25;
+  font-family: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+  min-width: 8px;
+  z-index: 5;
 }
 .draw-canvas {
   display: block;

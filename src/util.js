@@ -102,6 +102,19 @@ export const PRESENCE = [
   '#f97316',
 ]
 
+// Quick pen colours for the sketch toolbar — a few inks that read on the light
+// canvas, the brand yellow, and a couple of brights.
+export const PEN_COLORS = [
+  '#1f2228',
+  '#e23b3b',
+  '#f5a623',
+  '#ffd23f',
+  '#2ca24c',
+  '#2d7ff9',
+  '#8b5cf6',
+  '#ffffff',
+]
+
 // ---- per-user favourites (local only) -------------------------------------
 const FAV_KEY = 'notesFavColors'
 

@@ -141,7 +141,18 @@ try {
 
   await c.send('Runtime.enable')
   await c.send('Page.enable')
-  await sleep(2800) // let it connect, sync, and run the default-tab migration
+  // Headless can't answer the first-run identity window.prompt(); seed an identity
+  // before the bundle runs and auto-dismiss any dialog, then reload cleanly.
+  c.on((m) => {
+    if (m.method === 'Page.javascriptDialogOpening')
+      c.send('Page.handleJavaScriptDialog', { accept: true, promptText: 'Tester' })
+  })
+  await c.send('Page.addScriptToEvaluateOnNewDocument', {
+    source:
+      "try{localStorage.setItem('notesUser', JSON.stringify({name:'Tester',color:'#3b82f6'}))}catch(e){}",
+  })
+  await c.send('Page.reload')
+  await sleep(2800) // let it reload, connect, sync, and run migrations
 
   const evaluate = async (expr) => {
     const r = await c.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
@@ -160,9 +171,11 @@ try {
   check('a tab exists after migration', initial.tabs >= 1)
   check('add-tab control rendered', initial.tabAdd === true)
 
-  // create a note and inspect its structure
+  // create a note and inspect its structure (reconcile runs on a microtask, so
+  // wait a beat after clicking before snapshotting the DOM)
+  await evaluate(`document.getElementById('add').click()`)
+  await sleep(200)
   const made = await evaluate(`(() => {
-    document.getElementById('add').click()
     const card = document.querySelector('.card')
     const body = card && card.querySelector('.card-body')
     return {
@@ -200,12 +213,59 @@ try {
   check('Ctrl+B wraps the selection in <strong>', afterBold.strong === true)
   check('bolding preserves the text', afterBold.text === 'hello world')
 
-  // open the options popover and switch to a sketch tab to mount the canvas
+  // free corkboard layout: the card is absolutely positioned with a resize grip
+  const layout = await evaluate(`(() => {
+    const card = document.querySelector('.card')
+    return {
+      boardFree: document.getElementById('board').classList.contains('free'),
+      cardFree: !!(card && card.classList.contains('free')),
+      grip: !!(card && card.querySelector('.resize-grip')),
+      positioned: !!(card && card.style.left !== '' && card.style.width !== ''),
+    }
+  })()`)
+  check('board is in free (corkboard) layout', layout.boardFree === true)
+  check('card is absolutely positioned with a grip', layout.cardFree && layout.grip && layout.positioned)
+
+  // open the options popover
   const popover = await evaluate(`(() => {
     document.querySelector('.card .icon-btn.opt').click()
     return !!document.querySelector('.card-pop.open')
   })()`)
   check('options popover opens', popover === true)
+
+  // an outside click closes the popover
+  await evaluate(`document.body.click()`)
+  await sleep(60)
+  const closed = await evaluate(`!document.querySelector('.card-pop.open')`)
+  check('outside click closes the popover', closed === true)
+
+  // convert the note into a checklist via the options popover
+  const found = await evaluate(`(() => {
+    document.querySelector('.card .icon-btn.opt').click()
+    const btn = [...document.querySelectorAll('.card-pop .pop-btn')].find(
+      (b) => b.textContent.trim() === 'Checklist'
+    )
+    if (btn) btn.click()
+    return !!btn
+  })()`)
+  check('checklist toggle found in popover', found === true)
+  await sleep(250) // rebuildCard runs on a microtask
+  const todoState = await evaluate(`(() => {
+    const card = document.querySelector('.card.is-todo')
+    return {
+      isTodo: !!card,
+      hasCheck: !!(card && card.querySelector('.todo-item .todo-check')),
+      addBtn: !!(card && card.querySelector('.todo-add')),
+    }
+  })()`)
+  check('note converts to a checklist', todoState.isTodo === true)
+  check('checklist has a checkbox item and an add control', todoState.hasCheck && todoState.addBtn)
+
+  // '+ Add item' adds a row
+  await evaluate(`document.querySelector('.card.is-todo .todo-add').click()`)
+  await sleep(120)
+  const rows = await evaluate(`document.querySelectorAll('.card.is-todo .todo-item').length`)
+  check('add-item adds a checklist row', rows >= 2)
 
   check('no console errors or uncaught exceptions', errors.length === 0)
   if (errors.length) errors.slice(0, 8).forEach((e) => console.log('   !! ' + e))

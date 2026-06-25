@@ -12,14 +12,22 @@ browser at it.
 - **Tabs**: organise everything into tabs — separate lists of notes ("Ideas", "Work",
   "Shopping", …) and **sketch** tabs for free-hand drawing. Add, rename (double-click),
   reorder (drag), and delete tabs. Tabs are shared; your last-open tab is remembered per device.
-- A board of colored notes (title + rich body), newest first.
+- **A real corkboard**: notes float wherever you put them. Drag a note by its header to move
+  it, and drag the bottom-right corner to resize it like a window. Positions and sizes are
+  shared, so everyone sees the same board. (On phones the board falls back to a simple stacked
+  layout so it stays usable.)
 - **Rich text** in the note body: **bold**, *italic*, underline, and strikethrough, with
   keyboard shortcuts. Formatting is part of the CRDT, so it merges and syncs like the text does.
+- **Checklists**: turn any note into a to-do list of tickable items (or back into prose) from
+  the **⚙** menu. Press Enter to add the next item, Backspace on an empty item to remove it.
+  Checked-off state syncs and persists. (Checklist items are plain text, so converting a
+  formatted note to a list keeps the words but not their bold/italic styling.)
 - **Per-note styling**: full-range colour picker with quick swatches and your own saved
-  favourites, adjustable text size, and three note widths (S / M / L).
-- **Sketch boards**: draw together on a shared canvas with a pen, adjustable size, colour,
-  eraser, undo, and clear. Strokes sync live and persist.
-- Real-time editing: when a friend types or draws, you see it happen as they go.
+  favourites, adjustable text size, and three width presets (S / M / L).
+- **Sketch boards**: draw together on a shared canvas with a pen (quick colour swatches +
+  adjustable size), an **eraser**, undo, and clear — and drop **text labels** anywhere on the
+  canvas. Everything syncs live and persists.
+- Real-time editing: when a friend types, draws, or moves a note, you see it happen as they go.
 - Concurrent edits merge cleanly. Two people in the same note do not clobber each other
   (this uses a CRDT, [Yjs](https://github.com/yjs/yjs), so there are no "last write wins"
   surprises).
@@ -37,8 +45,9 @@ browser at it.
 | Strikethrough | Ctrl/Cmd + Shift + S |
 | Undo / Redo | Ctrl/Cmd + Z / Ctrl/Cmd + Shift + Z |
 
-You can also use the little **B / I / U / S** toolbar that appears under the title while a
-note is focused. Set colour, text size and note width from the **⚙** button on each note.
+You can also use the little **B / I / U / S** toolbar that appears along the bottom of a note
+while it is focused. Set the note **type** (note vs checklist), colour, text size and width from
+the **⚙** button on each note; an outside click dismisses that menu.
 
 ## Requirements
 
@@ -210,9 +219,16 @@ directly.
   and bound to a `Y.Text` that carries inline formatting *attributes* (bold/italic/etc.), so
   formatting travels with the characters under concurrent edits. No editor framework is
   pulled in — it stays small and pure-JS for the Pi.
-- Sketches are stored as a Yjs array of strokes (each a colour, width, mode and a list of
-  points in a fixed logical coordinate space, scaled to fit any screen).
-- The first time an old board loads, its notes are migrated into a default "Ideas" tab.
+- Notes carry their own `x`/`y`/`w`/`h`/`z` (position, size and stacking) on the shared doc,
+  so the corkboard layout is collaborative; drags and resizes are committed at most once per
+  animation frame to keep the CRDT traffic light. Checklist notes store their items as a
+  `Y.Array` of `{ text, done }` so ticks and item text sync like everything else.
+- Sketches are stored as a Yjs array of strokes and text labels (strokes: colour, width, mode
+  and a list of points; text: position, colour, size and the string) in a fixed logical
+  coordinate space, scaled to fit any screen. Text is always drawn on top of strokes.
+- The first time an old board loads, its notes are migrated into a default "Ideas" tab and
+  given tidy grid positions for the corkboard. Old notes without the newer fields still load
+  and render with sensible defaults.
 
 ## Project layout
 
@@ -220,9 +236,9 @@ directly.
 shared-notes/
   server.js          Express static server + WebSocket sync + disk persistence
   build.js           esbuild bundling step (src/client.js -> public/bundle.js)
-  src/client.js      Browser app: tabs, cards, popovers, presence, sync wiring
+  src/client.js      Browser app: tabs, cards, drag/resize, checklists, popovers, sync wiring
   src/richbody.js    contentEditable <-> Y.Text rich-text formatting binding
-  src/draw.js        Collaborative canvas sketch surface
+  src/draw.js        Collaborative canvas sketch surface (strokes + text labels)
   src/util.js        Helpers: ids, time, colour/contrast, favourites
   tools/make-icons.mjs  Regenerates the raster favicons (pure JS, no deps)
   public/index.html  Markup
@@ -242,8 +258,16 @@ tear it down:
 # end-to-end: live typing sync, concurrent merge, presence
 PORT=3902 node server.js & SRV=$!; sleep 1; PORT=3902 node test/e2e.mjs; kill $SRV
 
-# features: tabs, per-note fields, rich-text attributes, drawing strokes
+# features: tabs, per-note fields, position/size, checklists, rich-text attributes,
+#           drawing strokes and canvas text labels
 PORT=3902 node server.js & SRV=$!; sleep 1; PORT=3902 node test/features.mjs; kill $SRV
+```
+
+There is also a real-browser smoke test (headless Chrome/Edge) that loads the app and drives
+the corkboard, rich text, checklist and popover paths, asserting there are no console errors:
+
+```bash
+node test/browser-smoke.mjs   # set CHROME=path if it can't find a browser
 ```
 
 If you ever change the brand mark, regenerate the raster icons with

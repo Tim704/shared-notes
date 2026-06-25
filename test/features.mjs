@@ -94,6 +94,83 @@ await sleep(200)
 const bPts2 = B.doc.getMap('drawings').get(tabId).get(0).get('points').toArray()
 check('B sees streamed points', bPts2.length === 8 && bPts2[6] === 55 && bPts2[7] === 60)
 
+// --- corkboard: note position/size fields sync ---
+A.doc.transact(() => {
+  const n = A.doc.getMap('notes').get(id)
+  n.set('x', 120)
+  n.set('y', 80)
+  n.set('w', 300)
+  n.set('h', 220)
+  n.set('z', 5)
+})
+await sleep(200)
+const bpos = B.doc.getMap('notes').get(id)
+check('B note carries x/y', bpos.get('x') === 120 && bpos.get('y') === 80)
+check('B note carries w/h/z', bpos.get('w') === 300 && bpos.get('h') === 220 && bpos.get('z') === 5)
+
+// --- checklist note: kind + items (text + done) ---
+const todoId = 'note_' + Math.random().toString(36).slice(2, 8)
+A.doc.transact(() => {
+  const n = new Y.Map()
+  n.set('title', new Y.Text())
+  n.set('body', new Y.Text())
+  n.set('color', '#caffbf')
+  n.set('created', Date.now())
+  n.set('tabId', tabId)
+  n.set('kind', 'todo')
+  const items = new Y.Array()
+  n.set('items', items)
+  const it = new Y.Map()
+  const t = new Y.Text()
+  it.set('id', 'i1')
+  it.set('text', t)
+  it.set('done', false)
+  items.push([it])
+  t.insert(0, 'Buy milk')
+  A.doc.getMap('notes').set(todoId, n)
+  A.doc.getArray('order').unshift([todoId])
+})
+await sleep(200)
+const bTodo = B.doc.getMap('notes').get(todoId)
+check('B checklist note has kind=todo', bTodo && bTodo.get('kind') === 'todo')
+const bItems = bTodo && bTodo.get('items')
+check(
+  'B sees one item with its text',
+  bItems && bItems.length === 1 && bItems.get(0).get('text').toString() === 'Buy milk'
+)
+check('B item starts not done', bItems.get(0).get('done') === false)
+
+// ticking the item syncs
+A.doc.transact(() => {
+  A.doc.getMap('notes').get(todoId).get('items').get(0).set('done', true)
+})
+await sleep(200)
+check(
+  'B sees the item checked',
+  B.doc.getMap('notes').get(todoId).get('items').get(0).get('done') === true
+)
+
+// --- sketch text label syncs (lives alongside strokes) ---
+A.doc.transact(() => {
+  const strokes = A.doc.getMap('drawings').get(tabId)
+  const t = new Y.Map()
+  t.set('type', 'text')
+  t.set('x', 200)
+  t.set('y', 150)
+  t.set('text', 'hello canvas')
+  t.set('color', '#1f2228')
+  t.set('size', 32)
+  strokes.push([t])
+})
+await sleep(200)
+const bDrawings = B.doc.getMap('drawings').get(tabId)
+const bTextObj = bDrawings && bDrawings.get(bDrawings.length - 1)
+check('B received a text object', bTextObj && bTextObj.get('type') === 'text')
+check(
+  'B text object carries text + position',
+  bTextObj.get('text') === 'hello canvas' && bTextObj.get('x') === 200 && bTextObj.get('y') === 150
+)
+
 A.close()
 B.close()
 await sleep(150)

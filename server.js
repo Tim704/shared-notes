@@ -4,6 +4,9 @@
 //   (the board) using the standard y-protocols sync + awareness messages.
 // - Persists the board to data/board.bin (pure JS, no native deps so it builds
 //   cleanly on a Raspberry Pi).
+// - Mirrors the board to data/export/ as Markdown (+ git history when git is
+//   installed), serves a small JSON API under /api, purges old trash, and can
+//   optionally sit behind a shared password (NOTES_PASSWORD). See server/*.js.
 
 import express from 'express'
 import http from 'http'
@@ -16,18 +19,33 @@ import * as syncProtocol from 'y-protocols/sync'
 import * as awarenessProtocol from 'y-protocols/awareness'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
+import { createMirror } from './server/mirror.js'
+import { initHistory, scheduleCommit } from './server/history.js'
+import { createApi } from './server/api.js'
+import { createAuth } from './server/auth.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT || 3000)
 const HOST = process.env.HOST || '0.0.0.0'
-const DATA_DIR = path.join(__dirname, 'data')
+const DATA_DIR = process.env.NOTES_DATA_DIR
+  ? path.resolve(process.env.NOTES_DATA_DIR)
+  : path.join(__dirname, 'data')
 const DATA_FILE = path.join(DATA_DIR, 'board.bin')
+const EXPORT_DIR = process.env.NOTES_EXPORT_DIR
+  ? path.resolve(process.env.NOTES_EXPORT_DIR)
+  : path.join(DATA_DIR, 'export')
+const MIRROR_MS = Number(process.env.NOTES_MIRROR_MS) > 0 ? Number(process.env.NOTES_MIRROR_MS) : 3000
+const COMMIT_MS = Number(process.env.NOTES_COMMIT_MS) > 0 ? Number(process.env.NOTES_COMMIT_MS) : 60000
+const TRASH_DAYS = Number(process.env.NOTES_TRASH_DAYS) >= 0 ? Number(process.env.NOTES_TRASH_DAYS) : 30
+const HISTORY_ENABLED = process.env.NOTES_HISTORY !== '0'
+const PASSWORD = process.env.NOTES_PASSWORD || ''
 fs.mkdirSync(DATA_DIR, { recursive: true })
 
 const MESSAGE_SYNC = 0
 const MESSAGE_AWARENESS = 1
 const HEARTBEAT_MS = 30000
 const SAVE_DEBOUNCE_MS = 1500
+const PURGE_INTERVAL_MS = 60 * 60 * 1000
 
 // ---- the single shared board document ----------------------------------
 const ydoc = new Y.Doc()
@@ -80,7 +98,53 @@ ydoc.on('update', (update, origin) => {
     if (conn !== origin) send(conn, message)
   })
   scheduleSave()
+  mirror.schedule()
 })
+
+// ---- markdown mirror + git history ---------------------------------------
+// Regenerated a few seconds after the last change; history commits a while
+// after each mirror write. Both are best-effort and log rather than throw.
+const mirror = createMirror({
+  ydoc,
+  exportDir: EXPORT_DIR,
+  debounceMs: MIRROR_MS,
+  onWritten: () => scheduleCommit(),
+})
+initHistory({ exportDir: EXPORT_DIR, enabled: HISTORY_ENABLED, commitMs: COMMIT_MS })
+  .catch((err) => console.error('History setup failed:', err.message))
+  .then(() => mirror.schedule()) // first mirror (and, with git, a baseline commit) shortly after boot
+
+// ---- trash purge -----------------------------------------------------------
+// Notes carry `deleted: <ms>` while in the trash. Anything older than
+// NOTES_TRASH_DAYS is removed for good, on boot and then hourly.
+function purgeTrash() {
+  try {
+    const cutoff = Date.now() - TRASH_DAYS * 24 * 60 * 60 * 1000
+    const yNotes = ydoc.getMap('notes')
+    const yOrder = ydoc.getArray('order')
+    const gone = []
+    yNotes.forEach((note, id) => {
+      if (!note || typeof note.get !== 'function') return
+      const deleted = note.get('deleted')
+      if (typeof deleted === 'number' && deleted < cutoff) gone.push(id)
+    })
+    if (!gone.length) return
+    const goneSet = new Set(gone)
+    ydoc.transact(() => {
+      gone.forEach((id) => yNotes.delete(id))
+      // walk backwards so indexes stay valid while deleting
+      for (let i = yOrder.length - 1; i >= 0; i--) {
+        if (goneSet.has(yOrder.get(i))) yOrder.delete(i, 1)
+      }
+    }, 'purge')
+    console.log(`Trash: purged ${gone.length} note(s) deleted more than ${TRASH_DAYS} day(s) ago`)
+  } catch (err) {
+    console.error('Trash purge failed:', err.message)
+  }
+}
+purgeTrash()
+const purgeTimer = setInterval(purgeTrash, PURGE_INTERVAL_MS)
+purgeTimer.unref()
 
 // Broadcast and bookkeep awareness (presence) changes.
 awareness.on('update', ({ added, updated, removed }, origin) => {
@@ -104,11 +168,36 @@ awareness.on('update', ({ added, updated, removed }, origin) => {
 
 // ---- http + websocket ---------------------------------------------------
 const app = express()
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }))
+const auth = createAuth(PASSWORD)
+if (auth.enabled) console.log('Password protection is ON (NOTES_PASSWORD is set)')
 app.get('/health', (_req, res) => res.json({ ok: true, peers: conns.size }))
+app.use(auth.router) // /login (no-op when no password is set)
+app.use(auth.middleware) // gate everything below (no-op when no password is set)
+app.use('/api', createApi({ ydoc }))
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }))
 
 const server = http.createServer(app)
-const wss = new WebSocketServer({ server, path: '/ws' })
+// noServer so we can check the password cookie before completing the handshake
+const wss = new WebSocketServer({ noServer: true })
+server.on('upgrade', (req, socket, head) => {
+  let pathname = ''
+  try {
+    pathname = new URL(req.url, 'http://localhost').pathname
+  } catch {
+    /* fall through: not /ws */
+  }
+  const reject = (code, text) => {
+    try {
+      socket.write(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
+    } catch {
+      /* the socket is already gone */
+    }
+    socket.destroy()
+  }
+  if (pathname !== '/ws') return reject(404, 'Not Found')
+  if (!auth.isAuthed(req)) return reject(401, 'Unauthorized')
+  wss.handleUpgrade(req, socket, head, (conn) => wss.emit('connection', conn, req))
+})
 
 wss.on('connection', (conn) => {
   conn.binaryType = 'arraybuffer'

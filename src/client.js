@@ -4,8 +4,11 @@ import * as awarenessProtocol from 'y-protocols/awareness'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 
+import { IndexeddbPersistence } from 'y-indexeddb'
 import { bindRichText } from './richbody.js'
 import { createDrawSurface } from './draw.js'
+import { getSettings, setSetting, onSettingChange } from './settings.js'
+import * as ui from './ui.js'
 import {
   genId,
   clamp,
@@ -236,8 +239,27 @@ const provider = new WSProvider(wsUrl, doc, awareness)
 
 const yNotes = doc.getMap('notes') // id -> Y.Map { title:Y.Text, body:Y.Text, color, created, tabId, fontSize, size }
 const yOrder = doc.getArray('order') // [id, ...] newest first
-const yTabs = doc.getArray('tabs') // [{ id, name, kind }, ...]
+const yTabs = doc.getArray('tabs') // Y.Map{ id, name, kind, archived } (legacy entries are plain objects)
 const yDrawings = doc.getMap('drawings') // tabId -> Y.Array<stroke>
+
+// Keep a copy of the whole board in this browser (IndexedDB) so it opens
+// instantly and still works when the Pi is off. Per-device switch in settings.
+let localStore = null
+function applyOfflineSetting() {
+  const want = getSettings().offline
+  if (want && !localStore) {
+    try {
+      localStore = new IndexeddbPersistence('shared-notes', doc)
+    } catch {
+      localStore = null
+    }
+  } else if (!want && localStore) {
+    const ls = localStore
+    localStore = null
+    ls.clearData().catch(() => {})
+  }
+}
+applyOfflineSetting()
 
 const SIZES = { s: 'size-s', m: 'size-m', l: 'size-l' }
 const SIZE_W = { s: 190, m: 250, l: 366 } // preset → pixel width (free layout)
@@ -257,11 +279,27 @@ try {
   me = null
 }
 if (!me || !me.name) {
-  const name = (window.prompt('Pick a name (so friends know who is typing):', '') || 'Anon')
-    .trim()
-    .slice(0, 24) || 'Anon'
-  me = { name, color: PRESENCE[Math.floor(Math.random() * PRESENCE.length)] }
-  localStorage.setItem('notesUser', JSON.stringify(me))
+  me = { name: 'Anon', color: PRESENCE[Math.floor(Math.random() * PRESENCE.length)], fresh: true }
+}
+if (!me.id) me.id = genId() // stable per-browser id, used for "edited by"
+function saveMe() {
+  const { fresh, ...rest } = me
+  localStorage.setItem('notesUser', JSON.stringify(rest))
+}
+saveMe()
+if (me.fresh) {
+  // first run: ask in-app (the old window.prompt blocked the whole page)
+  ui.prompt('Pick a name so friends know who is typing:', '', { title: 'Welcome', maxLength: 24 }).then((name) => {
+    const n = (name || '').trim().slice(0, 24)
+    if (n) {
+      me = { ...me, name: n }
+      delete me.fresh
+      saveMe()
+      awareness.setLocalStateField('user', me)
+      youName.textContent = me.name
+    }
+  })
+  delete me.fresh
 }
 awareness.setLocalStateField('user', me)
 awareness.setLocalStateField('focus', null)
@@ -297,17 +335,26 @@ try {
   activeTabId = null
 }
 
+// Tab entries: new ones are Y.Maps (so a rename is one field write and merges
+// cleanly); old boards still hold plain objects. Everything reads through tabRec.
+function tabRec(t) {
+  if (!t) return null
+  if (typeof t.get === 'function') {
+    return { id: t.get('id'), name: t.get('name') || '', kind: t.get('kind') || 'notes', archived: !!t.get('archived') }
+  }
+  return { id: t.id, name: t.name || '', kind: t.kind || 'notes', archived: !!t.archived }
+}
 function tabsList() {
-  return yTabs.toArray()
+  return yTabs.toArray().map(tabRec).filter((t) => t && t.id)
 }
 function tabIndex(id) {
-  return tabsList().findIndex((t) => t && t.id === id)
+  return tabsList().findIndex((t) => t.id === id)
 }
 function activeTab() {
   const list = tabsList()
   if (list.length === 0) return null
-  const found = list.find((t) => t && t.id === activeTabId)
-  return found || list[0]
+  const found = list.find((t) => t.id === activeTabId)
+  return found || list.find((t) => !t.archived) || list[0]
 }
 function setActiveTab(id) {
   activeTabId = id
@@ -316,7 +363,37 @@ function setActiveTab(id) {
   } catch {
     /* ignore */
   }
+  awareness.setLocalStateField('tab', id)
+  closeHome()
   scheduleReconcile()
+}
+
+function makeTabMap(rec) {
+  const m = new Y.Map()
+  m.set('id', rec.id)
+  m.set('name', rec.name)
+  m.set('kind', rec.kind || 'notes')
+  if (rec.archived) m.set('archived', true)
+  return m
+}
+
+// Change a field on a tab. Y.Map tabs get a plain set; a legacy plain-object
+// entry is upgraded to a Y.Map in place (delete + insert, the same as before).
+function updateTab(id, patch) {
+  const i = tabIndex(id)
+  if (i < 0) return
+  const raw = yTabs.get(i)
+  doc.transact(() => {
+    if (typeof raw.get === 'function') {
+      for (const [k, v] of Object.entries(patch)) {
+        if (v == null || v === false) raw.delete(k)
+        else raw.set(k, v)
+      }
+    } else {
+      yTabs.delete(i, 1)
+      yTabs.insert(i, [makeTabMap({ ...tabRec(raw), ...patch })])
+    }
+  })
 }
 
 // One-time migration: make sure a tab exists and legacy notes land in it.
@@ -325,7 +402,7 @@ function ensureDefaultTab() {
   doc.transact(() => {
     if (yTabs.length > 0) return
     const id = genId()
-    yTabs.push([{ id, name: 'Ideas', kind: 'notes' }])
+    yTabs.push([makeTabMap({ id, name: 'Ideas', kind: 'notes' })])
     yNotes.forEach((n) => {
       if (!n.get('tabId')) n.set('tabId', id)
     })
@@ -366,42 +443,62 @@ function ensureNotePositions() {
 function migrateBoard() {
   ensureDefaultTab()
   ensureNotePositions()
+  if (getSettings().launch === 'home' && !location.hash) openHome()
 }
 
 // ---- tab operations ----
-function addTab(kind) {
+async function addTab(kind) {
   const label = kind === 'draw' ? 'Sketch' : 'List'
-  const name = (window.prompt(`Name this ${label.toLowerCase()} tab:`, label) || label).trim().slice(0, 28)
-  if (!name) return
+  const typed = await ui.prompt(`Name this ${label.toLowerCase()} tab:`, label, { title: 'New tab', maxLength: 28 })
+  if (typed == null) return
+  const name = typed.trim().slice(0, 28) || label
   const id = genId()
   doc.transact(() => {
-    yTabs.push([{ id, name, kind }])
+    yTabs.push([makeTabMap({ id, name, kind })])
   })
   setActiveTab(id)
 }
 
-function renameTab(id) {
-  const i = tabIndex(id)
-  if (i < 0) return
-  const t = yTabs.get(i)
-  const name = (window.prompt('Rename tab:', t.name) || t.name).trim().slice(0, 28)
-  if (!name || name === t.name) return
-  doc.transact(() => {
-    yTabs.delete(i, 1)
-    yTabs.insert(i, [{ ...t, name }])
-  })
+function renameTab(id, name) {
+  const t = tabsList().find((x) => x.id === id)
+  if (!t) return
+  const next = (name || '').trim().slice(0, 28)
+  if (!next || next === t.name) return
+  updateTab(id, { name: next })
 }
 
-function deleteTab(id) {
-  const list = tabsList()
-  if (list.length <= 1) {
-    window.alert('Keep at least one tab.')
-    return
+function setTabArchived(id, archived) {
+  updateTab(id, { archived: !!archived })
+  if (archived && activeTabId === id) {
+    const next = tabsList().find((t) => !t.archived && t.id !== id)
+    if (next) setActiveTab(next.id)
   }
+  ui.toast(archived ? 'Tab archived. Find it on the home page.' : 'Tab restored.')
+}
+
+async function deleteTab(id) {
+  const list = tabsList()
   const t = list.find((x) => x.id === id)
   if (!t) return
+  if (list.filter((x) => !x.archived).length <= 1 && !t.archived) {
+    ui.toast('Keep at least one tab. Archive it instead if you want it out of the way.')
+    return
+  }
   const kindWord = t.kind === 'draw' ? 'sketch and all its strokes' : 'tab and all its notes'
-  if (!window.confirm(`Delete "${t.name}"? This removes the ${kindWord} for everyone.`)) return
+  const choice = await ui.dialog({
+    title: `Delete "${t.name}"?`,
+    message: `This removes the ${kindWord} for everyone. Archiving keeps it around but out of the way.`,
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: t.archived ? 'Unarchive' : 'Archive instead', value: 'archive' },
+      { label: 'Delete', value: 'delete', primary: true, danger: true },
+    ],
+  })
+  if (choice === 'archive') {
+    setTabArchived(id, !t.archived)
+    return
+  }
+  if (choice !== 'delete') return
   const i = tabIndex(id)
   doc.transact(() => {
     // remove notes that belong to this tab
@@ -416,60 +513,108 @@ function deleteTab(id) {
     if (yDrawings.has(id)) yDrawings.delete(id)
     if (i >= 0) yTabs.delete(i, 1)
   })
-  const remaining = tabsList()
-  setActiveTab(remaining[Math.max(0, Math.min(i, remaining.length - 1))].id)
+  const remaining = tabsList().filter((x) => !x.archived)
+  if (remaining.length) setActiveTab(remaining[Math.max(0, Math.min(i, remaining.length - 1))].id)
 }
 
 function moveTab(fromId, toId) {
   if (fromId === toId) return
   const from = tabIndex(fromId)
   if (from < 0) return
-  const t = yTabs.get(from)
+  const raw = yTabs.get(from)
+  const rec = tabRec(raw)
   doc.transact(() => {
     yTabs.delete(from, 1)
     let to = tabIndex(toId) // target index after the removal
     if (to < 0) to = yTabs.length
-    yTabs.insert(clamp(to, 0, yTabs.length), [t])
+    yTabs.insert(clamp(to, 0, yTabs.length), [makeTabMap(rec)])
   })
 }
 
 // ---- tab bar rendering ----
 let dragTabId = null
+let renamingTabId = null
 function renderTabs() {
-  const list = tabsList()
+  const all = tabsList()
   const active = activeTab()
+  const list = all.filter((t) => !t.archived || (active && t.id === active.id))
   tabsEl.innerHTML = ''
+
+  const home = document.createElement('button')
+  home.className = 'tab-home'
+  home.title = 'All tabs (home)'
+  home.innerHTML = '&#8962;'
+  home.addEventListener('click', (e) => {
+    e.stopPropagation()
+    toggleHome()
+  })
+  tabsEl.appendChild(home)
+
   for (const t of list) {
     const isActive = active && t.id === active.id
     const tab = document.createElement('div')
-    tab.className = 'tab' + (isActive ? ' on' : '')
-    tab.draggable = true
+    tab.className = 'tab' + (isActive ? ' on' : '') + (t.archived ? ' archived' : '')
+    tab.draggable = renamingTabId !== t.id
     tab.dataset.id = t.id
 
     const icon = document.createElement('span')
     icon.className = 'tab-icon'
     icon.textContent = t.kind === 'draw' ? '✎' : '☰' // pencil / list
+    tab.appendChild(icon)
+
+    if (renamingTabId === t.id) {
+      // inline rename: type in place, Enter/blur saves, Escape cancels
+      const inp = document.createElement('input')
+      inp.className = 'tab-rename'
+      inp.value = t.name
+      inp.maxLength = 28
+      inp.spellcheck = false
+      let done = false
+      const finish = (save) => {
+        if (done) return
+        done = true
+        renamingTabId = null
+        if (save) renameTab(t.id, inp.value)
+        renderTabs()
+      }
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') finish(true)
+        else if (e.key === 'Escape') finish(false)
+        e.stopPropagation()
+      })
+      inp.addEventListener('blur', () => finish(true))
+      inp.addEventListener('click', (e) => e.stopPropagation())
+      tab.appendChild(inp)
+      tabsEl.appendChild(tab)
+      requestAnimationFrame(() => {
+        inp.focus()
+        inp.select()
+      })
+      continue
+    }
+
     const label = document.createElement('span')
     label.className = 'tab-name'
     label.textContent = t.name
-    tab.append(icon, label)
+    tab.appendChild(label)
 
-    if (isActive && list.length > 1) {
-      const close = document.createElement('button')
-      close.className = 'tab-x'
-      close.textContent = '×'
-      close.title = 'Delete tab'
-      close.addEventListener('click', (e) => {
+    if (isActive) {
+      const more = document.createElement('button')
+      more.className = 'tab-x'
+      more.textContent = '⋯'
+      more.title = 'Tab options'
+      more.addEventListener('click', (e) => {
         e.stopPropagation()
-        deleteTab(t.id)
+        openTabMenu(more, t)
       })
-      tab.appendChild(close)
+      tab.appendChild(more)
     }
 
     tab.addEventListener('click', () => setActiveTab(t.id))
     tab.addEventListener('dblclick', (e) => {
       e.preventDefault()
-      renameTab(t.id)
+      renamingTabId = t.id
+      renderTabs()
     })
     tab.addEventListener('dragstart', (e) => {
       dragTabId = t.id
@@ -498,6 +643,65 @@ function renderTabs() {
     openAddMenu(add)
   })
   tabsEl.appendChild(add)
+
+  // right side: collapse-all + hidden notes (trash / archived) for this tab
+  const right = document.createElement('div')
+  right.className = 'tab-right'
+  if (active && active.kind !== 'draw') {
+    const hidden = hiddenCounts(active.id)
+    const fold = document.createElement('button')
+    fold.className = 'tab-tool'
+    const allCollapsed = cards.size > 0 && Array.from(cards.keys()).every((id) => collapsed.has(id))
+    fold.textContent = allCollapsed ? '⌄ Expand all' : '⌃ Collapse all'
+    fold.title = 'Collapse or expand every note on this tab (just for you)'
+    fold.addEventListener('click', (e) => {
+      e.stopPropagation()
+      setAllCollapsed(!allCollapsed)
+    })
+    right.appendChild(fold)
+    if (hidden.trash + hidden.archived > 0) {
+      const hb = document.createElement('button')
+      hb.className = 'tab-tool'
+      const parts = []
+      if (hidden.archived) parts.push(hidden.archived + ' archived')
+      if (hidden.trash) parts.push(hidden.trash + ' in trash')
+      hb.textContent = parts.join(' · ')
+      hb.title = 'Show archived and deleted notes'
+      hb.addEventListener('click', (e) => {
+        e.stopPropagation()
+        openHiddenPanel(active.id)
+      })
+      right.appendChild(hb)
+    }
+  }
+  tabsEl.appendChild(right)
+}
+
+function openTabMenu(anchor, t) {
+  closeMenus()
+  const menu = document.createElement('div')
+  menu.className = 'menu'
+  const r = anchor.getBoundingClientRect()
+  menu.style.left = Math.min(r.left, window.innerWidth - 190) + 'px'
+  menu.style.top = r.bottom + 4 + 'px'
+  const item = (label, fn, cls) => {
+    const b = document.createElement('button')
+    b.className = 'menu-item' + (cls ? ' ' + cls : '')
+    b.textContent = label
+    b.addEventListener('click', () => {
+      closeMenus()
+      fn()
+    })
+    menu.appendChild(b)
+  }
+  item('Rename', () => {
+    renamingTabId = t.id
+    renderTabs()
+  })
+  item(t.archived ? 'Unarchive' : 'Archive', () => setTabArchived(t.id, !t.archived))
+  item('Delete…', () => deleteTab(t.id), 'danger')
+  document.body.appendChild(menu)
+  openMenus.push(menu)
 }
 
 function openAddMenu(anchor) {
@@ -538,6 +742,16 @@ document.addEventListener('keydown', (e) => {
 })
 
 // ---- note operations ----
+function stamp(note) {
+  // "edited by" bookkeeping; throttled so typing doesn't spam the doc
+  const now = Date.now()
+  if (now - (note.get('lastEditedAt') || 0) < 4000 && (note.get('lastEditedBy') || {}).id === me.id) return
+  note.doc.transact(() => {
+    note.set('lastEditedAt', now)
+    note.set('lastEditedBy', { id: me.id, name: me.name })
+  })
+}
+
 function createNote(color) {
   const id = genId()
   const active = activeTab()
@@ -558,19 +772,77 @@ function createNote(color) {
     n.set('w', SIZE_W.m)
     n.set('h', H_DEFAULT)
     n.set('z', z)
+    n.set('lastEditedAt', Date.now())
+    n.set('lastEditedBy', { id: me.id, name: me.name })
     yNotes.set(id, n)
     yOrder.unshift([id])
   })
   return id
 }
 
+// Delete is soft: the note goes to the tab's trash and a toast offers Undo.
+// The server purges trash after 30 days; "Delete forever" is hardDeleteNote.
 function deleteNote(id) {
+  const n = yNotes.get(id)
+  if (!n) return
+  const title = n.get('title').toString().trim() || 'Note'
+  doc.transact(() => n.set('deleted', Date.now()))
+  ui.toast(`"${title.slice(0, 30)}" moved to trash`, {
+    action: 'Undo',
+    ms: 7000,
+    onAction: () => restoreNote(id),
+  })
+}
+
+function restoreNote(id) {
+  const n = yNotes.get(id)
+  if (!n) return
+  doc.transact(() => {
+    n.delete('deleted')
+    n.delete('archived')
+  })
+}
+
+function hardDeleteNote(id) {
   doc.transact(() => {
     const arr = yOrder.toArray()
     const i = arr.indexOf(id)
     if (i >= 0) yOrder.delete(i, 1)
     yNotes.delete(id)
   })
+}
+
+function setNoteArchived(id, archived) {
+  const n = yNotes.get(id)
+  if (!n) return
+  doc.transact(() => {
+    if (archived) n.set('archived', true)
+    else n.delete('archived')
+  })
+  if (archived) ui.toast('Note archived', { action: 'Undo', onAction: () => setNoteArchived(id, false) })
+}
+
+function moveNoteToTab(id, tabId) {
+  const n = yNotes.get(id)
+  if (!n || n.get('tabId') === tabId) return
+  doc.transact(() => n.set('tabId', tabId))
+  const t = tabsList().find((x) => x.id === tabId)
+  ui.toast('Moved to ' + (t ? t.name : 'tab'), { action: 'Open', onAction: () => goToNote(id) })
+}
+
+function isHidden(n) {
+  return !!(n.get('deleted') || n.get('archived'))
+}
+
+function hiddenCounts(tabId) {
+  let trash = 0
+  let archived = 0
+  yNotes.forEach((n) => {
+    if (n.get('tabId') !== tabId) return
+    if (n.get('deleted')) trash++
+    else if (n.get('archived')) archived++
+  })
+  return { trash, archived }
 }
 
 // Flip a note between prose and checklist, carrying the text across. prose→todo
@@ -616,6 +888,29 @@ function setNoteKind(note, kind) {
   })
 }
 
+// Single page or a two-page "book" (body + body2 side by side).
+function setNoteLayout(note, layout) {
+  const cur = note.get('layout') || 'single'
+  if (cur === layout) return
+  note.doc.transact(() => {
+    if (layout === 'book') {
+      if (!note.get('body2')) note.set('body2', new Y.Text())
+      note.set('layout', 'book')
+      if ((note.get('w') || 0) < 440) note.set('w', 480)
+    } else {
+      // fold the right page back into the body so nothing is lost
+      const b2 = note.get('body2')
+      const extra = b2 ? b2.toString() : ''
+      if (extra.trim()) {
+        const body = note.get('body')
+        body.insert(body.length, (body.length ? '\n\n' : '') + extra)
+        if (b2.length) b2.delete(0, b2.length)
+      }
+      note.set('layout', 'single')
+    }
+  })
+}
+
 // Searchable text for a note (title + body, or title + item texts for a list).
 function noteHay(note) {
   const title = note.get('title').toString()
@@ -630,15 +925,128 @@ function noteHay(note) {
       : ''
   } else {
     body = note.get('body').toString()
+    const b2 = note.get('body2')
+    if (b2) body += ' ' + b2.toString()
   }
   return (title + ' ' + body).toLowerCase()
 }
 
 function belongsToActive(note, active) {
+  if (isHidden(note)) return false
   if (!active) return true
   const tid = note.get('tabId')
   if (!tid) return active.id === (tabsList()[0] && tabsList()[0].id)
   return tid === active.id
+}
+
+// ---- per-device collapsed notes (title only) ----
+const collapsed = new Set()
+try {
+  JSON.parse(localStorage.getItem('notesCollapsed') || '[]').forEach((id) => collapsed.add(id))
+} catch {
+  /* ignore */
+}
+function saveCollapsed() {
+  try {
+    localStorage.setItem('notesCollapsed', JSON.stringify(Array.from(collapsed)))
+  } catch {
+    /* ignore */
+  }
+}
+function setCollapsed(id, on) {
+  if (on) collapsed.add(id)
+  else collapsed.delete(id)
+  saveCollapsed()
+  const c = cards.get(id)
+  if (c) {
+    c.el.classList.toggle('collapsed', on)
+    applyNoteLayout(c.el, c.note)
+    updateBoardExtent()
+  }
+  renderTabs()
+}
+function setAllCollapsed(on) {
+  for (const id of cards.keys()) {
+    if (on) collapsed.add(id)
+    else collapsed.delete(id)
+  }
+  saveCollapsed()
+  relayoutAll()
+  renderTabs()
+}
+
+// ---- navigation to a note (links, home page, toasts) ----
+function goToNote(id, opts = {}) {
+  const n = yNotes.get(id)
+  if (!n) return false
+  const tid = n.get('tabId')
+  if (tid && activeTabId !== tid) setActiveTab(tid)
+  closeHome()
+  if (n.get('deleted')) restoreNote(id)
+  if (n.get('archived') && opts.unarchive !== false) setNoteArchived(id, false)
+  if (collapsed.has(id)) setCollapsed(id, false)
+  try {
+    history.replaceState(null, '', '#note=' + id)
+  } catch {
+    /* ignore */
+  }
+  // the card may not exist until reconcile has run
+  const tryFlash = (left) => {
+    const c = cards.get(id)
+    if (c) {
+      c.el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      c.el.classList.add('flash')
+      setTimeout(() => c.el.classList.remove('flash'), 1400)
+      return
+    }
+    if (left > 0) setTimeout(() => tryFlash(left - 1), 60)
+  }
+  tryFlash(20)
+  return true
+}
+
+// [[Title]] → the note or tab with that title (notes first, current tab first)
+function resolveLink(label) {
+  const want = label.trim().toLowerCase()
+  if (!want) return null
+  let best = null
+  yNotes.forEach((n, id) => {
+    if (n.get('deleted')) return
+    if (n.get('title').toString().trim().toLowerCase() !== want) return
+    if (!best || (n.get('tabId') === activeTabId && best.tabId !== activeTabId)) best = { noteId: id, tabId: n.get('tabId') }
+  })
+  if (best) return best
+  const t = tabsList().find((x) => x.name.trim().toLowerCase() === want)
+  return t ? { tabId: t.id } : null
+}
+
+function followLink(href) {
+  if (!href) return
+  if (href[0] === '[') {
+    const target = resolveLink(href.slice(2, -2))
+    if (!target) {
+      ui.toast('No note or tab called ' + href)
+      return
+    }
+    if (target.noteId) goToNote(target.noteId)
+    else setActiveTab(target.tabId)
+    return
+  }
+  window.open(href, '_blank', 'noopener')
+}
+
+function linkCandidates() {
+  const out = []
+  const tabsById = new Map(tabsList().map((t) => [t.id, t]))
+  yNotes.forEach((n) => {
+    if (isHidden(n)) return
+    const title = n.get('title').toString().trim()
+    if (!title) return
+    const t = tabsById.get(n.get('tabId'))
+    out.push({ label: title, hint: t ? t.name : '' })
+  })
+  for (const t of tabsById.values()) if (t.name.trim()) out.push({ label: t.name.trim(), hint: 'tab' })
+  return out
 }
 
 // ---- card construction ----
@@ -651,6 +1059,12 @@ function applyNoteStyle(el, note) {
   el.style.setProperty('--note-ink-dim', inkDimFor(color))
   el.style.setProperty('--note-line', hairlineFor(color))
   el.style.setProperty('--note-fs', (note.get('fontSize') || FS_DEFAULT) + 'px')
+  // title follows the body (+1px) unless the note opted into its own size
+  const ts = note.get('titleSize')
+  if (ts) el.style.setProperty('--title-fs', ts + 'px')
+  else el.style.removeProperty('--title-fs')
+  el.classList.toggle('autogrow', !!note.get('autoGrow'))
+  el.classList.toggle('book', note.get('layout') === 'book')
   for (const cls of Object.values(SIZES)) el.classList.remove(cls)
   el.classList.add(SIZES[note.get('size')] || SIZES.m)
 }
@@ -680,7 +1094,9 @@ function applyNoteLayout(el, note) {
   el.style.left = x + 'px'
   el.style.top = y + 'px'
   el.style.width = w + 'px'
-  el.style.height = h + 'px'
+  // collapsed (title only) and auto-growing notes size themselves to content
+  const fluid = collapsed.has(el.dataset.id) || note.get('autoGrow')
+  el.style.height = fluid ? '' : h + 'px'
   el.style.zIndex = String(note.get('z') || 1)
 }
 
@@ -696,7 +1112,21 @@ function maxZ() {
 function bringToFront(note) {
   if (!freeLayout) return
   const topZ = maxZ()
-  if ((note.get('z') || 0) < topZ) note.doc.transact(() => note.set('z', topZ + 1))
+  if ((note.get('z') || 0) >= topZ) return
+  // z only ever grew before; renumber everyone by rank when it drifts far above
+  // the note count so the values stay small (the board is also its own stacking
+  // context now, so the chrome is safe whatever these are).
+  if (topZ > yNotes.size + 200) {
+    const all = []
+    yNotes.forEach((n, id) => all.push({ id, n, z: n.get('z') || 0 }))
+    all.sort((a, b) => a.z - b.z)
+    note.doc.transact(() => {
+      all.forEach((e, i) => e.n.set('z', i + 1))
+      note.set('z', all.length + 1)
+    })
+    return
+  }
+  note.doc.transact(() => note.set('z', topZ + 1))
 }
 
 function updateBoardExtent() {
@@ -705,10 +1135,11 @@ function updateBoardExtent() {
     return
   }
   let maxB = 0
-  for (const [, c] of cards) {
+  for (const [id, c] of cards) {
     const n = c.note
     const y = Math.max(0, n.get('y') || 0)
-    const h = Math.max(H_MIN, n.get('h') || H_DEFAULT)
+    const fluid = collapsed.has(id) || n.get('autoGrow')
+    const h = fluid ? c.el.offsetHeight || H_MIN : Math.max(H_MIN, n.get('h') || H_DEFAULT)
     if (y + h > maxB) maxB = y + h
   }
   board.style.minHeight = maxB + 60 + 'px'
@@ -759,17 +1190,36 @@ function createCard(id) {
   del.className = 'icon-btn del'
   del.title = 'Delete note'
   del.textContent = '×'
-  del.addEventListener('click', () => {
-    if (window.confirm('Delete this note for everyone?')) deleteNote(id)
+  del.addEventListener('click', () => deleteNote(id)) // soft delete + Undo toast
+
+  const fold = document.createElement('button')
+  fold.className = 'icon-btn fold'
+  fold.title = 'Collapse / expand (just for you)'
+  fold.textContent = '⌄'
+  fold.addEventListener('click', (e) => {
+    e.stopPropagation()
+    setCollapsed(id, !collapsed.has(id))
   })
 
-  tools.append(optBtn, del)
+  tools.append(fold, optBtn, del)
   top.append(presenceEl, tools)
+  if (collapsed.has(id)) el.classList.add('collapsed')
 
   const titleEl = document.createElement('input')
   titleEl.className = 'card-title'
   titleEl.placeholder = 'Title'
   titleEl.maxLength = 120
+  titleEl.spellcheck = getSettings().spellcheck
+  titleEl.addEventListener('keydown', (e) => {
+    // Tab from the title goes into the body, never out of the note
+    if (e.key === 'Tab' && !e.shiftKey) {
+      const body = card.bodyHost.querySelector('.card-body, .todo-text')
+      if (body) {
+        e.preventDefault()
+        body.focus()
+      }
+    }
+  })
 
   // formatting toolbar (prose notes only; appears while the note is focused)
   const fmt = document.createElement('div')
@@ -787,7 +1237,8 @@ function createCard(id) {
     b.title = tip
     b.addEventListener('mousedown', (e) => {
       e.preventDefault() // keep the body's selection
-      if (card.body && card.body.rich) card.body.rich.toggleMark(mark)
+      const rich = card.activeRich || (card.body && card.body.rich)
+      if (rich) rich.toggleMark(mark)
     })
     fmt.appendChild(b)
     fmtBtns[mark] = b
@@ -800,8 +1251,15 @@ function createCard(id) {
   const meta = document.createElement('div')
   meta.className = 'card-meta'
   const timeEl = document.createElement('span')
-  timeEl.textContent = relTime(note.get('created') || Date.now())
   meta.appendChild(timeEl)
+  const setMeta = () => {
+    const at = note.get('lastEditedAt')
+    const by = note.get('lastEditedBy')
+    if (at && by && by.name && by.id !== me.id) timeEl.textContent = 'edited ' + relTime(at) + ' by ' + by.name
+    else if (at) timeEl.textContent = 'edited ' + relTime(at)
+    else timeEl.textContent = relTime(note.get('created') || Date.now())
+  }
+  setMeta()
 
   // corner grip for resizing (free layout only — hidden via CSS otherwise)
   const grip = document.createElement('div')
@@ -836,6 +1294,7 @@ function createCard(id) {
     note.doc.transact(() => {
       note.set('w', s.w)
       note.set('h', s.h)
+      if (note.get('autoGrow')) note.delete('autoGrow')
     })
   }
   const schedulePos = rafThrottle(commitPos)
@@ -943,6 +1402,8 @@ function createCard(id) {
 
   const unbinds = []
   unbinds.push(bindInput(note.get('title'), titleEl, () => applyFilter()))
+  el.addEventListener('input', () => stamp(note))
+  el.addEventListener('change', () => stamp(note))
 
   const card = {
     el,
@@ -953,10 +1414,12 @@ function createCard(id) {
     bodyHost,
     presenceEl,
     timeEl,
+    setMeta,
     note,
     noteObs: null,
     id,
     pop: null,
+    activeRich: null,
     interacting: false, // a drag/resize is in progress (suppresses observer relayout)
     abortInteraction: null, // teardown for an in-flight drag/resize (called on destroy)
   }
@@ -981,17 +1444,28 @@ function createCard(id) {
 
   const noteObs = (e) => {
     if (!e.keysChanged) return
-    if (e.keysChanged.has('kind')) {
+    if (e.keysChanged.has('kind') || e.keysChanged.has('layout')) {
       rebuildCard(id)
       return
     }
+    if (e.keysChanged.has('deleted') || e.keysChanged.has('archived')) {
+      scheduleReconcile()
+      return
+    }
+    if (e.keysChanged.has('lastEditedAt')) setMeta()
     if (
       e.keysChanged.has('color') ||
       e.keysChanged.has('fontSize') ||
-      e.keysChanged.has('size')
+      e.keysChanged.has('size') ||
+      e.keysChanged.has('titleSize') ||
+      e.keysChanged.has('autoGrow')
     ) {
       applyNoteStyle(el, note)
       if (card.pop) refreshPopover(card)
+      if (e.keysChanged.has('autoGrow') && !card.interacting) {
+        applyNoteLayout(el, note)
+        updateBoardExtent()
+      }
     }
     if (
       !card.interacting && // while WE drag/resize, the pointer handler owns the inline style
@@ -1009,6 +1483,15 @@ function createCard(id) {
   }
   note.observe(noteObs)
   card.noteObs = noteObs
+
+  if (typeof ResizeObserver !== 'undefined') {
+    card.ro = new ResizeObserver(
+      rafThrottle(() => {
+        if (freeLayout && (collapsed.has(id) || note.get('autoGrow'))) updateBoardExtent()
+      })
+    )
+    card.ro.observe(el)
+  }
 
   return card
 }
@@ -1037,6 +1520,7 @@ function mountBody(card) {
     card.body.destroy()
     card.body = null
   }
+  card.activeRich = null
   card.bodyHost.replaceChildren()
   const note = card.note
   const kind = note.get('kind') || 'note'
@@ -1044,19 +1528,45 @@ function mountBody(card) {
   if (kind === 'todo') {
     ensureItems(note)
     card.body = bindTodo(card, note.get('items'))
-  } else {
+    return
+  }
+
+  const book = note.get('layout') === 'book'
+  const pages = book ? [note.get('body'), note.get('body2') || ensureBody2(note)] : [note.get('body')]
+  const editors = pages.map((ytext, i) => {
     const bodyEl = document.createElement('div')
-    bodyEl.className = 'card-body'
-    bodyEl.setAttribute('data-ph', 'Take a note…')
+    bodyEl.className = 'card-body' + (book ? ' page page-' + (i ? 'r' : 'l') : '')
+    bodyEl.setAttribute('data-ph', book ? (i ? 'Right page…' : 'Left page…') : 'Take a note…')
     card.bodyHost.appendChild(bodyEl)
-    const rich = bindRichText(note.get('body'), bodyEl, {
+    const rich = bindRichText(ytext, bodyEl, {
       onChange: () => applyFilter(),
+      onLocal: () => stamp(note),
+      onLink: followLink,
+      linkCandidates,
+      arrows: () => getSettings().arrows,
+      spellcheck: () => getSettings().spellcheck,
       onState: (marks) => {
         for (const m of ['b', 'i', 'u', 's']) card.fmtBtns[m].classList.toggle('on', !!marks[m])
       },
     })
-    card.body = { kind: 'note', rich, destroy: () => rich.destroy() }
+    bodyEl.addEventListener('focus', () => {
+      card.activeRich = rich
+    })
+    return rich
+  })
+  card.body = {
+    kind: 'note',
+    rich: editors[0],
+    editors,
+    destroy: () => editors.forEach((r) => r.destroy()),
   }
+}
+
+function ensureBody2(note) {
+  note.doc.transact(() => {
+    if (!note.get('body2')) note.set('body2', new Y.Text())
+  })
+  return note.get('body2')
 }
 
 // Checklist body: items live in a Y.Array<Y.Map{ id, text:Y.Text, done }>.
@@ -1102,7 +1612,16 @@ function bindTodo(card, items) {
   }
 
   function onItemKey(e, item, txt) {
-    if (e.key === 'Enter') {
+    if (e.key === 'Tab') {
+      // Tab / Shift+Tab walk the list instead of leaving the note
+      e.preventDefault()
+      const idx = indexOfItem(item)
+      const next = e.shiftKey ? idx - 1 : idx + 1
+      if (next >= 0 && next < items.length) {
+        const elx = list.querySelector('[data-iid="' + items.get(next).get('id') + '"] .todo-text')
+        if (elx) elx.focus()
+      } else if (!e.shiftKey) addItem(items.length, '', true)
+    } else if (e.key === 'Enter') {
       e.preventDefault()
       addItem(indexOfItem(item) + 1, '', true)
     } else if (e.key === 'Backspace' && txt.value === '' && txt.selectionStart === 0) {
@@ -1126,6 +1645,7 @@ function bindTodo(card, items) {
     const txt = document.createElement('input')
     txt.className = 'todo-text'
     txt.maxLength = 280
+    txt.spellcheck = getSettings().spellcheck
     const unbindText = bindInput(item.get('text'), txt, () => applyFilter())
     txt.addEventListener('keydown', (e) => onItemKey(e, item, txt))
     const delB = document.createElement('button')
@@ -1197,6 +1717,7 @@ function bindTodo(card, items) {
 
 function destroyCard(card) {
   if (card.abortInteraction) card.abortInteraction() // tear down an in-flight drag/resize
+  if (card.ro) card.ro.disconnect()
   card.unbinds.forEach((fn) => fn())
   if (card.body) card.body.destroy()
   card.note.unobserve(card.noteObs)
@@ -1324,10 +1845,92 @@ function buildPopover(card) {
   })
   wSec.append(wRow)
 
-  pop.append(kSec, cSec, tSec, wSec)
+  // Layout: one page or a two-page book (prose notes only)
+  const lSec = section('Layout')
+  const lRow = document.createElement('div')
+  lRow.className = 'pop-row pop-sizes'
+  const layoutBtns = {}
+  ;[
+    ['single', 'Single'],
+    ['book', 'Book'],
+  ].forEach(([k, label]) => {
+    const b = document.createElement('button')
+    b.className = 'pop-btn size-btn'
+    b.textContent = label
+    b.title = k === 'book' ? 'Two pages side by side' : 'One page'
+    b.addEventListener('click', () => setNoteLayout(card.note, k))
+    lRow.appendChild(b)
+    layoutBtns[k] = b
+  })
+  lSec.append(lRow)
+
+  // Title size (opt in) + auto-grow
+  const oSec = section('Options')
+  const tsRow = document.createElement('label')
+  tsRow.className = 'pop-row pop-check'
+  const tsChk = document.createElement('input')
+  tsChk.type = 'checkbox'
+  tsChk.addEventListener('change', () => {
+    if (tsChk.checked) card.note.set('titleSize', (card.note.get('fontSize') || FS_DEFAULT) + 3)
+    else card.note.delete('titleSize')
+  })
+  tsRow.append(tsChk, document.createTextNode(' Size title separately'))
+  const tsStep = document.createElement('div')
+  tsStep.className = 'pop-row pop-stepper'
+  const tMinus = stepBtn('A', 'smaller title', () => bumpTitle(card, -1))
+  tMinus.classList.add('a-small')
+  const tsVal = document.createElement('span')
+  tsVal.className = 'pop-val'
+  const tPlus = stepBtn('A', 'larger title', () => bumpTitle(card, 1))
+  tPlus.classList.add('a-big')
+  tsStep.append(tMinus, tsVal, tPlus)
+  const agRow = document.createElement('label')
+  agRow.className = 'pop-row pop-check'
+  const agChk = document.createElement('input')
+  agChk.type = 'checkbox'
+  agChk.addEventListener('change', () => {
+    if (agChk.checked) card.note.set('autoGrow', true)
+    else card.note.delete('autoGrow')
+  })
+  agRow.append(agChk, document.createTextNode(' Grow with content (no inner scroll)'))
+  oSec.append(tsRow, tsStep, agRow)
+
+  // Move to another tab
+  const mSec = section('Move to tab')
+  const mSel = document.createElement('select')
+  mSel.className = 'pop-select'
+  mSel.addEventListener('change', () => {
+    if (mSel.value && mSel.value !== card.note.get('tabId')) moveNoteToTab(card.id, mSel.value)
+  })
+  mSec.append(mSel)
+
+  // Actions
+  const aSec = section('More')
+  const aRow = document.createElement('div')
+  aRow.className = 'pop-row pop-sizes'
+  const archiveBtn = document.createElement('button')
+  archiveBtn.className = 'pop-btn'
+  archiveBtn.textContent = 'Archive'
+  archiveBtn.title = 'Hide this note without deleting it'
+  archiveBtn.addEventListener('click', () => {
+    closeAllPopovers()
+    setNoteArchived(card.id, true)
+  })
+  const histBtn = document.createElement('button')
+  histBtn.className = 'pop-btn'
+  histBtn.textContent = 'History'
+  histBtn.title = 'Earlier versions of this note'
+  histBtn.addEventListener('click', () => {
+    closeAllPopovers()
+    openHistoryPanel(card.id)
+  })
+  aRow.append(archiveBtn, histBtn)
+  aSec.append(aRow)
+
+  pop.append(kSec, lSec, cSec, tSec, wSec, oSec, mSec, aSec)
   card.el.appendChild(pop)
   card.pop = pop
-  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, kindBtns }
+  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, kindBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec }
   renderFavs(card)
 
   function section(name) {
@@ -1383,7 +1986,31 @@ function refreshPopover(card) {
   for (const k of Object.keys(sizeBtns)) sizeBtns[k].classList.toggle('on', k === sz)
   const kind = card.note.get('kind') || 'note'
   for (const k of Object.keys(kindBtns)) kindBtns[k].classList.toggle('on', k === kind)
+  const { layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec } = card.popRefs
+  const layout = card.note.get('layout') || 'single'
+  for (const k of Object.keys(layoutBtns)) layoutBtns[k].classList.toggle('on', k === layout)
+  lSec.style.display = kind === 'todo' ? 'none' : ''
+  const ts = card.note.get('titleSize')
+  tsChk.checked = !!ts
+  tsStep.style.display = ts ? '' : 'none'
+  tsVal.textContent = (ts || (card.note.get('fontSize') || FS_DEFAULT) + 1) + 'px'
+  agChk.checked = !!card.note.get('autoGrow')
+  mSel.replaceChildren()
+  for (const t of tabsList()) {
+    if (t.kind === 'draw') continue
+    const o = document.createElement('option')
+    o.value = t.id
+    o.textContent = (t.archived ? '(archived) ' : '') + t.name
+    o.selected = t.id === card.note.get('tabId')
+    mSel.appendChild(o)
+  }
   renderFavs(card)
+}
+
+function bumpTitle(card, dir) {
+  const cur = card.note.get('titleSize') || (card.note.get('fontSize') || FS_DEFAULT) + 1
+  const next = clamp(cur + dir, FS_MIN, FS_MAX + 10)
+  if (next !== cur) card.note.set('titleSize', next)
 }
 
 function bumpFont(card, dir) {
@@ -1519,7 +2146,30 @@ function buildDrawBar(surface) {
 
   const undoBtn = drawBtn('↶ Undo', () => surface.undoLast())
   const clearBtn = drawBtn('Clear', () => {
-    if (window.confirm('Clear the whole sketch for everyone?')) surface.clear()
+    // no confirm: clear now, offer Undo (rebuilds the strokes from a snapshot)
+    const strokes = drawState && getStrokeArray(drawState.tabId)
+    if (!strokes || !strokes.length) return
+    const snap = strokes.toArray().map((m) => m.toJSON())
+    surface.clear()
+    ui.toast('Sketch cleared', {
+      action: 'Undo',
+      ms: 8000,
+      onAction: () => {
+        doc.transact(() => {
+          for (const o of snap) {
+            const m = new Y.Map()
+            for (const [k, v] of Object.entries(o)) {
+              if (k === 'points') {
+                const pts = new Y.Array()
+                pts.push(v)
+                m.set('points', pts)
+              } else m.set(k, v)
+            }
+            strokes.push([m])
+          }
+        })
+      },
+    })
   })
   clearBtn.classList.add('danger')
 
@@ -1616,7 +2266,464 @@ function reconcile() {
 
 yOrder.observe(scheduleReconcile)
 yNotes.observe(scheduleReconcile)
-yTabs.observe(scheduleReconcile)
+yTabs.observeDeep(scheduleReconcile)
+// note field changes that affect what is visible (deleted / archived / tab)
+// are handled by each card's observer; hidden notes have no card, so watch
+// the map deeply for restores too.
+yNotes.observeDeep((events) => {
+  for (const e of events) {
+    if (e.target !== yNotes && e.keysChanged && (e.keysChanged.has('deleted') || e.keysChanged.has('archived') || e.keysChanged.has('tabId'))) {
+      scheduleReconcile()
+      return
+    }
+  }
+})
+
+// ---- overlays: home page, hidden notes (trash / archived), history ----------
+const overlay = document.getElementById('overlay')
+let overlayKind = null // 'home' | 'hidden' | 'history'
+
+function closeOverlay() {
+  overlay.hidden = true
+  overlay.replaceChildren()
+  overlayKind = null
+}
+function closeHome() {
+  if (overlayKind === 'home') closeOverlay()
+}
+function openPanel(kind, title, build) {
+  closeMenus()
+  closeAllPopovers()
+  overlay.replaceChildren()
+  overlayKind = kind
+  const panel = document.createElement('div')
+  panel.className = 'panel panel-' + kind
+  const head = document.createElement('div')
+  head.className = 'panel-head'
+  const h = document.createElement('div')
+  h.className = 'panel-title'
+  h.textContent = title
+  const x = document.createElement('button')
+  x.className = 'panel-x'
+  x.textContent = '×'
+  x.title = 'Close (Esc)'
+  x.addEventListener('click', closeOverlay)
+  head.append(h, x)
+  const body = document.createElement('div')
+  body.className = 'panel-body'
+  panel.append(head, body)
+  overlay.appendChild(panel)
+  overlay.hidden = false
+  build(body, panel)
+  return body
+}
+overlay.addEventListener('pointerdown', (e) => {
+  if (e.target === overlay) closeOverlay()
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !overlay.hidden) closeOverlay()
+})
+
+function toggleHome() {
+  if (overlayKind === 'home') closeOverlay()
+  else openHome()
+}
+
+function noteSnippet(n, max = 90) {
+  const kind = n.get('kind') || 'note'
+  let text = ''
+  if (kind === 'todo') {
+    const items = n.get('items')
+    text = items ? items.toArray().map((it) => (it.get('done') ? '☑ ' : '☐ ') + it.get('text').toString()).join('  ') : ''
+  } else text = n.get('body').toString()
+  text = text.replace(/\s+/g, ' ').trim()
+  return text.length > max ? text.slice(0, max - 1) + '…' : text
+}
+
+// Home: every tab as a card (with who is on it), archived tabs below, and a
+// search box that looks across every tab.
+function openHome() {
+  openPanel('home', 'All tabs', (body) => {
+    const search = document.createElement('input')
+    search.className = 'home-search'
+    search.type = 'search'
+    search.placeholder = 'Search every tab…'
+    search.autocomplete = 'off'
+    const results = document.createElement('div')
+    results.className = 'home-results'
+    const grid = document.createElement('div')
+    grid.className = 'home-grid'
+    const archWrap = document.createElement('div')
+    archWrap.className = 'home-archived'
+    body.append(search, results, grid, archWrap)
+
+    const render = () => {
+      grid.replaceChildren()
+      archWrap.replaceChildren()
+      const counts = new Map()
+      const edited = new Map()
+      yNotes.forEach((n) => {
+        if (isHidden(n)) return
+        const t = n.get('tabId')
+        counts.set(t, (counts.get(t) || 0) + 1)
+        const at = n.get('lastEditedAt') || n.get('created') || 0
+        if (at > (edited.get(t) || 0)) edited.set(t, at)
+      })
+      const here = new Map()
+      for (const [cid, st] of awareness.getStates()) {
+        if (cid === doc.clientID || !st || !st.user || !st.tab) continue
+        if (!here.has(st.tab)) here.set(st.tab, [])
+        here.get(st.tab).push(st.user)
+      }
+      const list = tabsList()
+      const live = list.filter((t) => !t.archived)
+      const arch = list.filter((t) => t.archived)
+      for (const t of live) grid.appendChild(tabCard(t, counts.get(t.id) || 0, edited.get(t.id), here.get(t.id) || []))
+      if (arch.length) {
+        const h = document.createElement('div')
+        h.className = 'home-h'
+        h.textContent = 'Archived'
+        archWrap.appendChild(h)
+        const g = document.createElement('div')
+        g.className = 'home-grid'
+        for (const t of arch) g.appendChild(tabCard(t, counts.get(t.id) || 0, edited.get(t.id), []))
+        archWrap.appendChild(g)
+      }
+    }
+
+    const tabCard = (t, count, at, people) => {
+      const c = document.createElement('button')
+      c.className = 'home-tab' + (t.archived ? ' archived' : '') + (t.id === activeTabId ? ' on' : '')
+      const top = document.createElement('div')
+      top.className = 'home-tab-top'
+      const name = document.createElement('span')
+      name.className = 'home-tab-name'
+      name.textContent = (t.kind === 'draw' ? '✎ ' : '☰ ') + t.name
+      top.appendChild(name)
+      if (people.length) {
+        const pp = document.createElement('span')
+        pp.className = 'home-people'
+        people.slice(0, 4).forEach((u) => {
+          const d = document.createElement('span')
+          d.className = 'editor-dot'
+          d.style.setProperty('--c', u.color || '#888')
+          d.title = u.name + ' is here'
+          d.textContent = initials(u.name || '?')
+          pp.appendChild(d)
+        })
+        top.appendChild(pp)
+      }
+      const sub = document.createElement('div')
+      sub.className = 'home-tab-sub'
+      sub.textContent =
+        t.kind === 'draw' ? 'Sketch board' : count + (count === 1 ? ' note' : ' notes') + (at ? ' · edited ' + relTime(at) : '')
+      c.append(top, sub)
+      if (t.archived) {
+        const un = document.createElement('span')
+        un.className = 'home-unarchive'
+        un.textContent = 'Unarchive'
+        un.addEventListener('click', (e) => {
+          e.stopPropagation()
+          setTabArchived(t.id, false)
+          render()
+        })
+        c.appendChild(un)
+      }
+      c.addEventListener('click', () => setActiveTab(t.id))
+      return c
+    }
+
+    const doSearch = () => {
+      const q = search.value.trim().toLowerCase()
+      results.replaceChildren()
+      grid.style.display = q ? 'none' : ''
+      archWrap.style.display = q ? 'none' : ''
+      if (!q) return
+      const tabsById = new Map(tabsList().map((t) => [t.id, t]))
+      const hits = []
+      yOrder.toArray().forEach((id) => {
+        const n = yNotes.get(id)
+        if (!n || n.get('deleted')) return
+        if (noteHay(n).includes(q)) hits.push({ id, n })
+      })
+      if (!hits.length) {
+        const e = document.createElement('div')
+        e.className = 'home-empty'
+        e.textContent = 'Nothing matches.'
+        results.appendChild(e)
+        return
+      }
+      for (const { id, n } of hits.slice(0, 60)) {
+        const row = document.createElement('button')
+        row.className = 'home-hit'
+        const t = tabsById.get(n.get('tabId'))
+        const title = document.createElement('div')
+        title.className = 'home-hit-title'
+        title.textContent = n.get('title').toString().trim() || 'Untitled'
+        const meta = document.createElement('div')
+        meta.className = 'home-hit-meta'
+        meta.textContent = (t ? t.name : '?') + (n.get('archived') ? ' · archived' : '')
+        const snip = document.createElement('div')
+        snip.className = 'home-hit-snip'
+        snip.textContent = noteSnippet(n)
+        row.append(title, meta, snip)
+        row.addEventListener('click', () => goToNote(id))
+        results.appendChild(row)
+      }
+    }
+    search.addEventListener('input', doSearch)
+    render()
+    requestAnimationFrame(() => search.focus())
+    // keep it live while open
+    const refresh = () => {
+      if (overlayKind !== 'home') return
+      if (!search.value.trim()) render()
+      else doSearch()
+    }
+    const stop1 = () => awareness.off('change', refresh)
+    awareness.on('change', refresh)
+    yTabs.observeDeep(refresh)
+    const obs = new MutationObserver(() => {
+      if (overlay.hidden || overlayKind !== 'home') {
+        stop1()
+        yTabs.unobserveDeep(refresh)
+        obs.disconnect()
+      }
+    })
+    obs.observe(overlay, { attributes: true, childList: true })
+  })
+}
+
+// Trash + archived notes for one tab.
+function openHiddenPanel(tabId) {
+  const t = tabsList().find((x) => x.id === tabId)
+  openPanel('hidden', 'Hidden notes · ' + (t ? t.name : ''), (body) => {
+    const render = () => {
+      body.replaceChildren()
+      const archived = []
+      const trash = []
+      yOrder.toArray().forEach((id) => {
+        const n = yNotes.get(id)
+        if (!n || n.get('tabId') !== tabId) return
+        if (n.get('deleted')) trash.push({ id, n })
+        else if (n.get('archived')) archived.push({ id, n })
+      })
+      const sectionEl = (title, hint, items, actions) => {
+        const h = document.createElement('div')
+        h.className = 'home-h'
+        h.textContent = title
+        body.appendChild(h)
+        if (hint) {
+          const p = document.createElement('div')
+          p.className = 'panel-hint'
+          p.textContent = hint
+          body.appendChild(p)
+        }
+        if (!items.length) {
+          const e = document.createElement('div')
+          e.className = 'home-empty'
+          e.textContent = 'Nothing here.'
+          body.appendChild(e)
+          return
+        }
+        for (const { id, n } of items) {
+          const row = document.createElement('div')
+          row.className = 'hidden-row'
+          const txt = document.createElement('div')
+          txt.className = 'hidden-txt'
+          const title = document.createElement('div')
+          title.className = 'home-hit-title'
+          title.textContent = n.get('title').toString().trim() || 'Untitled'
+          const snip = document.createElement('div')
+          snip.className = 'home-hit-snip'
+          snip.textContent = noteSnippet(n)
+          txt.append(title, snip)
+          row.appendChild(txt)
+          const btns = document.createElement('div')
+          btns.className = 'hidden-btns'
+          for (const [label, fn, danger] of actions) {
+            const b = document.createElement('button')
+            b.className = 'pop-btn' + (danger ? ' danger' : '')
+            b.textContent = label
+            b.addEventListener('click', () => fn(id, n))
+            btns.appendChild(b)
+          }
+          row.appendChild(btns)
+          body.appendChild(row)
+        }
+      }
+      sectionEl('Archived', 'Out of the way, but kept.', archived, [
+        ['Unarchive', (id) => setNoteArchived(id, false)],
+        ['Delete', (id) => deleteNote(id)],
+      ])
+      sectionEl('Trash', 'Deleted notes stay here for 30 days, then the Pi removes them.', trash, [
+        ['Restore', (id) => restoreNote(id)],
+        [
+          'Delete forever',
+          async (id, n) => {
+            const ok = await ui.confirm('Delete this note for everyone, permanently?', {
+              title: n.get('title').toString().trim() || 'Untitled',
+              okLabel: 'Delete forever',
+              danger: true,
+            })
+            if (ok) hardDeleteNote(id)
+          },
+          true,
+        ],
+      ])
+    }
+    render()
+    const refresh = () => {
+      if (overlayKind === 'hidden') render()
+      else yNotes.unobserveDeep(refresh)
+    }
+    yNotes.observeDeep(refresh)
+  })
+}
+
+// Earlier versions of a note, read from the Pi's git history of the Markdown
+// mirror. Restore writes the old text back as a normal edit.
+function openHistoryPanel(noteId) {
+  const n = yNotes.get(noteId)
+  if (!n) return
+  openPanel('history', 'History · ' + (n.get('title').toString().trim() || 'Untitled'), async (body) => {
+    const status = document.createElement('div')
+    status.className = 'panel-hint'
+    status.textContent = 'Loading…'
+    body.appendChild(status)
+    let data = null
+    try {
+      const r = await fetch('/api/history/' + encodeURIComponent(noteId))
+      data = await r.json()
+    } catch {
+      data = null
+    }
+    if (!data || data.available === false) {
+      status.textContent = data
+        ? 'History is not available on this server (git is not set up on the Pi).'
+        : 'Could not reach the server. History needs the Pi.'
+      return
+    }
+    const versions = data.versions || []
+    if (!versions.length) {
+      status.textContent = 'No saved versions yet. The Pi snapshots the board about once a minute after edits.'
+      return
+    }
+    status.textContent = versions.length + ' version' + (versions.length === 1 ? '' : 's') + '. Pick one to preview.'
+    const wrap = document.createElement('div')
+    wrap.className = 'hist-wrap'
+    const list = document.createElement('div')
+    list.className = 'hist-list'
+    const view = document.createElement('div')
+    view.className = 'hist-view'
+    view.textContent = 'Select a version on the left.'
+    wrap.append(list, view)
+    body.appendChild(wrap)
+    for (const v of versions) {
+      const b = document.createElement('button')
+      b.className = 'hist-item'
+      const when = new Date(v.ts)
+      b.textContent = when.toLocaleString()
+      b.title = v.commit
+      b.addEventListener('click', async () => {
+        list.querySelectorAll('.hist-item').forEach((x) => x.classList.toggle('on', x === b))
+        view.textContent = 'Loading…'
+        let ver = null
+        try {
+          const r = await fetch('/api/history/' + encodeURIComponent(noteId) + '/' + encodeURIComponent(v.commit))
+          ver = r.ok ? await r.json() : null
+        } catch {
+          ver = null
+        }
+        if (!ver) {
+          view.textContent = 'Could not load that version.'
+          return
+        }
+        view.replaceChildren()
+        const t = document.createElement('div')
+        t.className = 'hist-title'
+        t.textContent = ver.title || 'Untitled'
+        const pre = document.createElement('pre')
+        pre.className = 'hist-body'
+        pre.textContent = (ver.body || '') + (ver.body2 ? '\n\n— right page —\n' + ver.body2 : '')
+        const act = document.createElement('div')
+        act.className = 'pop-row'
+        const restore = document.createElement('button')
+        restore.className = 'pop-btn primary'
+        restore.textContent = 'Restore this version'
+        restore.addEventListener('click', async () => {
+          const ok = await ui.confirm('Replace the current text with this version? (You can undo by restoring a newer one.)', {
+            okLabel: 'Restore',
+          })
+          if (ok) restoreVersion(noteId, ver)
+        })
+        act.appendChild(restore)
+        view.append(t, pre, act)
+      })
+      list.appendChild(b)
+    }
+  })
+}
+
+function stripMd(text) {
+  return String(text || '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g, '$1$2')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/<\/?u>/g, '')
+}
+
+function restoreVersion(noteId, ver) {
+  const n = yNotes.get(noteId)
+  if (!n) return
+  const title = stripMd(ver.title)
+  const bodyText = stripMd(ver.body)
+  const body2Text = stripMd(ver.body2)
+  doc.transact(() => {
+    const t = n.get('title')
+    if (t.length) t.delete(0, t.length)
+    if (title) t.insert(0, title)
+    if ((n.get('kind') || 'note') === 'todo' || /^- \[[ xX]\] /m.test(bodyText)) {
+      // rebuild the checklist from "- [ ] item" lines
+      const arr = new Y.Array()
+      for (const line of bodyText.split('\n')) {
+        const m = /^- \[([ xX])\] (.*)$/.exec(line)
+        if (!m) continue
+        const it = new Y.Map()
+        const tx = new Y.Text()
+        it.set('id', genId())
+        it.set('text', tx)
+        it.set('done', m[1] !== ' ')
+        arr.push([it])
+        if (m[2]) tx.insert(0, m[2])
+      }
+      if (arr.length === 0) {
+        const it = new Y.Map()
+        it.set('id', genId())
+        it.set('text', new Y.Text())
+        it.set('done', false)
+        arr.push([it])
+      }
+      n.set('items', arr)
+      n.set('kind', 'todo')
+    } else {
+      const b = n.get('body')
+      if (b.length) b.delete(0, b.length)
+      if (bodyText) b.insert(0, bodyText, {})
+      if (n.get('kind') === 'todo') n.set('kind', 'note')
+      if (body2Text) {
+        const b2 = n.get('body2') || ensureBody2(n)
+        if (b2.length) b2.delete(0, b2.length)
+        b2.insert(0, body2Text, {})
+        n.set('layout', 'book')
+      }
+    }
+    n.set('lastEditedAt', Date.now())
+    n.set('lastEditedBy', { id: me.id, name: me.name })
+  })
+  closeOverlay()
+  ui.toast('Version restored')
+}
 
 // ---- presence rendering ----
 function renderPresence() {
@@ -1682,27 +2789,124 @@ addBtn.addEventListener('click', () => {
   requestAnimationFrame(() => cards.get(id)?.titleEl.focus())
 })
 
-document.getElementById('rename').addEventListener('click', () => {
-  const name = (window.prompt('Display name:', me.name) || me.name).trim().slice(0, 24)
+document.getElementById('rename').addEventListener('click', async () => {
+  const typed = await ui.prompt('Display name:', me.name, { title: 'Your name', maxLength: 24 })
+  if (typed == null) return
+  const name = typed.trim().slice(0, 24)
   if (!name) return
   me = { ...me, name }
-  localStorage.setItem('notesUser', JSON.stringify(me))
+  saveMe()
   awareness.setLocalStateField('user', me)
   youName.textContent = me.name
 })
 
+// ---- settings (per device) ----
+document.getElementById('settings').addEventListener('click', (e) => {
+  e.stopPropagation()
+  openSettingsMenu(e.currentTarget)
+})
+
+function openSettingsMenu(anchor) {
+  closeMenus()
+  const st = getSettings()
+  const menu = document.createElement('div')
+  menu.className = 'menu settings-menu'
+  menu.addEventListener('click', (e) => e.stopPropagation())
+  const r = anchor.getBoundingClientRect()
+  menu.style.top = r.bottom + 6 + 'px'
+  menu.style.right = Math.max(8, window.innerWidth - r.right) + 'px'
+  menu.style.left = 'auto'
+
+  const head = (t) => {
+    const h = document.createElement('div')
+    h.className = 'menu-h'
+    h.textContent = t
+    menu.appendChild(h)
+  }
+  const check = (label, key, hint) => {
+    const l = document.createElement('label')
+    l.className = 'menu-check'
+    const c = document.createElement('input')
+    c.type = 'checkbox'
+    c.checked = !!st[key]
+    c.addEventListener('change', () => setSetting(key, c.checked))
+    const span = document.createElement('span')
+    span.textContent = label
+    l.append(c, span)
+    if (hint) {
+      const hh = document.createElement('small')
+      hh.textContent = hint
+      l.appendChild(hh)
+    }
+    menu.appendChild(l)
+  }
+  head('Just for this device')
+  check('Spell-check underline', 'spellcheck', 'Red squiggles in notes')
+  check('Smart arrows', 'arrows', '-> becomes →, -- becomes —')
+  check('Keep an offline copy', 'offline', 'The board opens even with the Pi off')
+  const launch = document.createElement('label')
+  launch.className = 'menu-check'
+  const lc = document.createElement('input')
+  lc.type = 'checkbox'
+  lc.checked = st.launch === 'home'
+  lc.addEventListener('change', () => setSetting('launch', lc.checked ? 'home' : 'last'))
+  const ls = document.createElement('span')
+  ls.textContent = 'Open the home page on launch'
+  launch.append(lc, ls)
+  menu.appendChild(launch)
+
+  head('Backup')
+  const link = (label, href) => {
+    const a = document.createElement('a')
+    a.className = 'menu-item'
+    a.href = href
+    a.textContent = label
+    a.addEventListener('click', () => closeMenus())
+    menu.appendChild(a)
+  }
+  link('⬇  Download all notes (Markdown)', '/api/export.md')
+  link('⬇  Download all notes (JSON)', '/api/export.json')
+  const note = document.createElement('div')
+  note.className = 'menu-note'
+  note.textContent = 'The Pi also keeps a readable copy in data/export/ with full history.'
+  menu.appendChild(note)
+
+  document.body.appendChild(menu)
+  openMenus.push(menu)
+}
+
+onSettingChange((key, value) => {
+  if (key === 'spellcheck') {
+    for (const [, c] of cards) {
+      c.titleEl.spellcheck = value
+      if (c.body && c.body.editors) c.body.editors.forEach((r) => r.setSpellcheck(value))
+      c.el.querySelectorAll('.todo-text').forEach((i) => (i.spellcheck = value))
+    }
+  } else if (key === 'offline') applyOfflineSetting()
+})
+
 // Keep relative timestamps fresh.
 setInterval(() => {
-  for (const [id, card] of cards) {
-    const n = yNotes.get(id)
-    if (n) card.timeEl.textContent = relTime(n.get('created') || Date.now())
-  }
+  for (const [, card] of cards) card.setMeta()
 }, 60000)
 
 // Run the one-time migration only after the server's state has arrived, so we
 // never race a populated board into a duplicate default tab. If we never reach
 // the server (offline first run), seed a tab after a short grace period.
-provider.onSync(migrateBoard)
+provider.onSync(() => {
+  migrateBoard()
+  // deep link: #note=<id> opens that note's tab and flashes it
+  const m = /#note=([A-Za-z0-9_-]+)/.exec(location.hash)
+  if (m) goToNote(m[1], { unarchive: false })
+})
+awareness.setLocalStateField('tab', activeTabId)
+window.addEventListener('hashchange', () => {
+  const m = /#note=([A-Za-z0-9_-]+)/.exec(location.hash)
+  if (m) goToNote(m[1], { unarchive: false })
+})
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('/sw.js').catch(() => {})
+}
 // Offline first-run only: if we never even connected, seed a starter board. If we
 // HAVE connected but sync is just slow, wait for onSync — seeding here would race
 // the server's real tabs and leave a duplicate "Ideas" tab.

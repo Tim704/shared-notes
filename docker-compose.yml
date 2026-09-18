@@ -6,7 +6,12 @@ services:
     container_name: shared-notes
     restart: unless-stopped
     volumes:
-      - ./data:/app/data               # board.bin persists (in-place writes, existing notes preserved)
+      - ./data:/app/data               # board.bin + data/export mirror persist (existing notes preserved)
+    environment:
+      - NODE_ENV=production
+      # - NOTES_PASSWORD=change-me     # recommended when reachable from the internet (see README)
+      # - NOTES_TRASH_DAYS=30
+      # - NOTES_HISTORY=0              # disable the git history of data/export
     ports:
       - "127.0.0.1:3002:3002"
     mem_limit: 192m

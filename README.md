@@ -32,7 +32,30 @@ browser at it.
   (this uses a CRDT, [Yjs](https://github.com/yjs/yjs), so there are no "last write wins"
   surprises).
 - Presence: little colored dots show who is online and who is currently editing which note.
-- Search to filter the current tab's notes by text.
+- Search to filter the current tab's notes by text, and a **home page** (the ⌂ button in
+  the tab bar) that lists every tab, shows who is on each one, and searches across all of
+  them.
+- **Safe delete**: deleting a note moves it to the tab's trash and offers Undo. Trash is
+  kept for 30 days. Notes and whole tabs can also be **archived** (kept, but out of the way).
+- **Collapse** any note to its title (the ⌄ chevron, or "Collapse all" in the tab bar).
+  This is per device, so folding a note never hides it for anyone else.
+- **Links**: URLs in a note are clickable, and typing `[[` opens a picker to link to
+  another note or tab by title. Click a link on an unfocused note to follow it, or
+  Ctrl/Cmd+click while editing. `#note=<id>` in the URL deep-links to a note.
+- **Book notes**: a note can have two pages side by side (gear → Layout → Book).
+- **Smart arrows**: `->` becomes →, `<-` ←, `=>` ⇒, `--` —. Backspace straight after
+  restores what you typed. Tab indents (two spaces), Shift+Tab outdents.
+- Per note: optional separate **title size**, and **grow with content** (no inner scroll).
+- **Version history**: gear → History shows earlier versions of a note from the Pi's git
+  history of the Markdown mirror, with one-click restore.
+- **Offline copy**: each browser keeps a copy of the board in IndexedDB and the app shell
+  is cached by a service worker, so the board opens (and can be edited) with the Pi off.
+  Edits sync when it comes back. Turn it off per device in ⚙ settings.
+- **Readable backup**: the Pi mirrors every note to `data/export/` as Markdown (and sketches
+  as SVG), commits it to a local git repo, and ⚙ → Backup downloads everything as one
+  Markdown or JSON file.
+- **Optional password** for when the board is reachable from outside your LAN.
+- A small **REST API** so scripts or a widget can read tabs, add notes and tick items.
 - Everything survives restarts. The whole board is saved to `data/board.bin` on disk.
 
 ### Formatting shortcuts (in a note body)
@@ -44,6 +67,8 @@ browser at it.
 | Underline | Ctrl/Cmd + U |
 | Strikethrough | Ctrl/Cmd + Shift + S |
 | Undo / Redo | Ctrl/Cmd + Z / Ctrl/Cmd + Shift + Z |
+| Indent / outdent | Tab / Shift + Tab |
+| Link to a note or tab | type `[[` then pick |
 
 You can also use the little **B / I / U / S** toolbar that appears along the bottom of a note
 while it is focused. Set the note **type** (note vs checklist), colour, text size and width from
@@ -169,22 +194,47 @@ pm2 startup            # run the command it prints, to enable boot start
 
 ## Configuration
 
-Environment variables:
+Environment variables (all optional):
 
-- `PORT`: port to listen on (default `3000`).
-- `HOST`: interface to bind (default `0.0.0.0`, meaning reachable from the LAN).
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `PORT` | `3000` | Port to listen on. |
+| `HOST` | `0.0.0.0` | Interface to bind (reachable from the LAN). |
+| `NOTES_DATA_DIR` | `data/` | Where `board.bin` and the export mirror live. |
+| `NOTES_EXPORT_DIR` | `<data>/export` | Where the readable Markdown mirror is written. |
+| `NOTES_MIRROR_MS` | `3000` | How long after the last edit the mirror is rewritten. |
+| `NOTES_HISTORY` | on | Set to `0` to skip the git history of the mirror. |
+| `NOTES_COMMIT_MS` | `60000` | How often (at most) the mirror is committed to git. |
+| `NOTES_TRASH_DAYS` | `30` | Deleted notes are purged after this many days. |
+| `NOTES_PASSWORD` | unset | When set, everyone must enter this password once per browser. |
 
-Example, run on port 8080:
+Example, run on port 8080 with a password:
 
 ```bash
-PORT=8080 npm start
+PORT=8080 NOTES_PASSWORD='something-long' npm start
 ```
 
 ## Data and backups
 
-The whole board lives in one file: `data/board.bin`. It is written shortly after any
-change and again on shutdown. To back up, copy that file. To wipe the board and start
-fresh, stop the server, delete `data/board.bin`, start again.
+Three layers, so losing the Pi never means losing the notes:
+
+1. **`data/board.bin`** is the live board (a Yjs binary). It is written shortly after any
+   change and again on shutdown. To wipe the board, stop the server, delete it, start again.
+2. **`data/export/`** is a human-readable mirror the server rewrites a few seconds after
+   any change: one Markdown file per note (`<tab>/<title>--<id>.md`, with the note's
+   colour, position and dates in the front matter; checklists as `- [ ]` lines), one
+   `sketch.svg` per sketch tab, and an `index.json`. If git is installed, that folder is a
+   git repo that is committed about once a minute after edits, which is what the in-app
+   History panel reads. Back this folder up anywhere (`rsync`, a USB stick, `git push` it
+   to a private remote) and you have every note, readable without this app.
+3. **Every browser keeps its own copy.** With "Keep an offline copy" on (the default,
+   ⚙ settings), the board is stored in that browser's IndexedDB and the app shell is
+   cached, so it opens and works offline. ⚙ → Backup also downloads the whole board as a
+   single Markdown or JSON file at any time.
+
+The Docker image includes git so history works out of the box. On a bare Pi,
+`sudo apt-get install git` if it is missing; without it everything still works, there is
+just no History panel.
 
 ## Updating the look or behavior
 
@@ -198,12 +248,33 @@ Files in `public/` (`index.html`, `style.css`) are served as-is, no build needed
 
 ## A note on safety
 
-This app has no login and no encryption. That is fine for friends on your home network,
-which is the intended use. Do not port-forward it or expose it to the public internet as
-is: anyone who reached it could read and edit everything. If you ever want remote access,
-put it behind something that adds HTTPS and authentication (for example a Cloudflare Tunnel,
-a Tailscale network, or an nginx reverse proxy with basic auth) rather than opening the port
-directly.
+This app has no accounts and no encryption of its own. On a home LAN that is fine. If you
+expose it beyond that (a Cloudflare Tunnel, a port forward), do at least one of these:
+
+- Set `NOTES_PASSWORD`. Every browser then sees a login page once and gets a long-lived
+  cookie; the WebSocket and the API refuse anything without it. Scripts can send
+  `Authorization: Bearer <password>` instead. Make sure the tunnel terminates HTTPS so the
+  password and cookie are not sent in the clear.
+- Or put something with its own login in front of it (Cloudflare Access, Tailscale, an
+  nginx reverse proxy with basic auth).
+
+Without either, anyone who can reach the URL can read and edit everything.
+
+## REST API
+
+Handy for scripts, widgets and automations. JSON in and out; add `?trash=1` to include
+deleted notes.
+
+| Method and path | Does |
+| --- | --- |
+| `GET /api/tabs` | List tabs with note counts. |
+| `GET /api/tabs/:id` | One tab and all its notes (title, body text, checklist items, colour, position…). |
+| `POST /api/tabs/:id/notes` | Create a note: `{ "title": "...", "body": "...", "color": "#..." }`. |
+| `PATCH /api/notes/:id/check` | Tick or untick a checklist item: `{ "itemId": "...", "done": true }`. |
+| `GET /api/search?q=milk` | Search every tab. |
+| `GET /api/history/:noteId` | Earlier versions of a note (needs git). |
+| `GET /api/history/:noteId/:commit` | One earlier version's title and body. |
+| `GET /api/export.md`, `GET /api/export.json` | Download the whole board. |
 
 ## How it works (short version)
 
@@ -215,6 +286,13 @@ directly.
 - The document state is serialized to `data/board.bin` (debounced, plus on shutdown) so the
   board persists across restarts. No external database, and no native modules, so it
   installs cleanly on a Pi.
+- Tabs are `Y.Map` entries in a `Y.Array` (older boards hold plain objects; both are read),
+  so a rename is a single field write that merges cleanly.
+- Deleting a note only sets a `deleted` timestamp; the server purges old ones. Archiving
+  sets `archived`. Both are ordinary CRDT writes, which is why Undo is trivial.
+- The browser keeps the document in IndexedDB via `y-indexeddb` and registers a
+  network-first service worker (`public/sw.js`), so online users always get fresh files and
+  offline users get the last good copy.
 - Rich text is plain Yjs: the note body is a `contentEditable` driven entirely by the app
   and bound to a `Y.Text` that carries inline formatting *attributes* (bold/italic/etc.), so
   formatting travels with the characters under concurrent edits. No editor framework is
@@ -234,41 +312,42 @@ directly.
 
 ```
 shared-notes/
-  server.js          Express static server + WebSocket sync + disk persistence
+  server.js          Express static server + WebSocket sync + disk persistence + trash purge
+  server/api.js      REST API (/api/...)
+  server/mirror.js   Markdown / SVG mirror of the board (data/export/)
+  server/history.js  git commits of the mirror + per-note version lookup
+  server/auth.js     Optional shared-password login (NOTES_PASSWORD)
   build.js           esbuild bundling step (src/client.js -> public/bundle.js)
-  src/client.js      Browser app: tabs, cards, drag/resize, checklists, popovers, sync wiring
-  src/richbody.js    contentEditable <-> Y.Text rich-text formatting binding
+  src/client.js      Browser app: tabs, cards, drag/resize, checklists, popovers, panels, sync wiring
+  src/richbody.js    contentEditable <-> Y.Text rich-text binding, Tab, smart arrows, links
   src/draw.js        Collaborative canvas sketch surface (strokes + text labels)
+  src/ui.js          In-app dialogs and toasts
+  src/settings.js    Per-device settings (localStorage)
   src/util.js        Helpers: ids, time, colour/contrast, favourites
   tools/make-icons.mjs  Regenerates the raster favicons (pure JS, no deps)
   public/index.html  Markup
   public/style.css   Dark-workspace styling
+  public/sw.js       Service worker (network first, cache fallback)
   public/favicon.svg, favicon-32.png, apple-touch-icon.png, site.webmanifest
   public/bundle.js   Built browser bundle (generated by npm run build)
   data/board.bin     Saved board state (generated at runtime)
-  test/              End-to-end, feature, and persistence tests
+  data/export/       Readable Markdown mirror + git history (generated at runtime)
+  test/              End-to-end, feature, API, persistence and browser tests
 ```
 
 ## Tests
 
-From the project folder, the tests start a server, drive it with simulated clients, and
-tear it down:
-
 ```bash
-# end-to-end: live typing sync, concurrent merge, presence
-PORT=3902 node server.js & SRV=$!; sleep 1; PORT=3902 node test/e2e.mjs; kill $SRV
-
-# features: tabs, per-note fields, position/size, checklists, rich-text attributes,
-#           drawing strokes and canvas text labels
-PORT=3902 node server.js & SRV=$!; sleep 1; PORT=3902 node test/features.mjs; kill $SRV
+npm test               # e2e, features, api and persistence suites, each on a fresh server
+npm run test:browser   # the same, plus the headless-Chrome smoke test
 ```
 
-There is also a real-browser smoke test (headless Chrome/Edge) that loads the app and drives
-the corkboard, rich text, checklist and popover paths, asserting there are no console errors:
-
-```bash
-node test/browser-smoke.mjs   # set CHROME=path if it can't find a browser
-```
+Every suite starts its own server on a throwaway data directory, so your real board is
+never touched. The browser test needs Chrome, Chromium or Edge installed (set `CHROME=path`
+if it cannot find one); it drives the corkboard, rich text, Tab and smart arrows, the link
+picker, soft delete and Undo, collapse, book layout, the home page, inline tab rename,
+settings and the history panel, and asserts that no native browser dialogs and no console
+errors appear.
 
 If you ever change the brand mark, regenerate the raster icons with
 `node tools/make-icons.mjs` (the SVG favicon is edited directly).

@@ -2,6 +2,8 @@
 # builds cleanly on arm64. The board persists to data/board.bin via in-place writes,
 # kept on a bind-mounted ./data so existing notes survive and persist across rebuilds.
 FROM node:22-slim
+# git powers the per-note version history of the markdown mirror (data/export).
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

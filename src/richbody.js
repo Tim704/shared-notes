@@ -15,15 +15,39 @@ import * as Y from 'yjs'
 const MARKS = ['b', 'i', 'u', 's']
 const TAG = { b: 'strong', i: 'em', u: 'u', s: 's' }
 const LOCAL = 'richbody-local'
+const INDENT = '  '
+
+// Things that get turned into links while rendering: bare URLs and [[wiki links]]
+// to other notes / tabs. Matching happens per delta run, so a URL that changes
+// formatting half way through is simply not linked. textContent is unchanged by
+// the wrapping, so caret <-> index mapping is unaffected.
+const LINK_RE = /(https?:\/\/[^\s<>"']+|\[\[[^\]\n]+\]\])/g
+
+// Typed sequences that become a nicer glyph (checked against the text just
+// before the caret plus the character being typed). Longest first.
+const ARROWS = [
+  ['←>', '↔'],
+  ['<->', '↔'],
+  ['->', '→'],
+  ['<-', '←'],
+  ['=>', '⇒'],
+  ['--', '—'],
+]
 
 export function bindRichText(ytext, el, opts = {}) {
   const onChange = opts.onChange || (() => {})
   const onState = opts.onState || (() => {})
+  const onLocal = opts.onLocal || (() => {}) // fires after a local edit lands
+  const onLink = opts.onLink || null // (href) => void, for clicks on links
+  const linkCandidates = opts.linkCandidates || null // () => [{label, hint}]
+  const useArrows = () => (typeof opts.arrows === 'function' ? opts.arrows() : opts.arrows !== false)
+  const useSpell = () => (typeof opts.spellcheck === 'function' ? opts.spellcheck() : !!opts.spellcheck)
 
   el.contentEditable = 'true'
-  el.spellcheck = true
+  el.spellcheck = useSpell()
   el.setAttribute('role', 'textbox')
   el.setAttribute('aria-multiline', 'true')
+  let lastArrow = null // { at, orig, glyph } so Backspace right after can undo it
 
   let composing = false
   let dirtyDuringCompose = false
@@ -44,7 +68,7 @@ export function bindRichText(ytext, el, opts = {}) {
     const frag = document.createDocumentFragment()
     for (const op of delta) {
       if (typeof op.insert !== 'string') continue
-      let node = document.createTextNode(op.insert)
+      let node = linkify(op.insert)
       const a = op.attributes || {}
       for (const m of MARKS) {
         if (a[m]) {
@@ -56,6 +80,25 @@ export function bindRichText(ytext, el, opts = {}) {
       frag.appendChild(node)
     }
     el.replaceChildren(frag)
+  }
+
+  // Wrap URLs and [[links]] in a run of text. Returns a single node.
+  function linkify(text) {
+    if (!onLink || !/https?:\/\/|\[\[/.test(text)) return document.createTextNode(text)
+    const frag = document.createDocumentFragment()
+    let last = 0
+    text.replace(LINK_RE, (m, _g, idx) => {
+      if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)))
+      const a = document.createElement('a')
+      a.className = 'rb-link' + (m[0] === '[' ? ' rb-wiki' : '')
+      a.dataset.href = m
+      a.textContent = m
+      frag.appendChild(a)
+      last = idx + m.length
+      return m
+    })
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)))
+    return frag
   }
 
   // ---- DOM <-> character index ----
@@ -305,6 +348,22 @@ export function bindRichText(ytext, el, opts = {}) {
             ? { ...pendingMarks }
             : charMarks(start - 1)
       if (data === '' && end <= start) return
+      // smart arrows: "->" becomes "→" etc. (single typed character only)
+      if (useArrows() && data.length === 1 && end === start && t === 'insertText') {
+        const before = text.slice(Math.max(0, start - 3), start)
+        for (const [seq, glyph] of ARROWS) {
+          const prefix = seq.slice(0, -1)
+          if (seq[seq.length - 1] === data && before.endsWith(prefix)) {
+            const from = start - prefix.length
+            // keep what the user actually typed so Backspace can restore it
+            const orig = (lastArrow && lastArrow.at === start ? lastArrow.orig : prefix) + data
+            replaceRange(from, end, glyph, marks)
+            lastArrow = { at: from + glyph.length, orig, glyph }
+            return
+          }
+        }
+      }
+      lastArrow = null
       replaceRange(start, end, data, marks)
       return
     }
@@ -312,9 +371,18 @@ export function bindRichText(ytext, el, opts = {}) {
     if (t && t.indexOf('delete') === 0) {
       e.preventDefault()
       if (end > start) {
+        lastArrow = null
         deleteRange(start, end)
         return
       }
+      // Backspace straight after a smart arrow puts the typed characters back.
+      if (t === 'deleteContentBackward' && lastArrow && lastArrow.at === start && text[start - 1] === lastArrow.glyph) {
+        const la = lastArrow
+        lastArrow = null
+        replaceRange(start - 1, start, la.orig, charMarks(start - 1))
+        return
+      }
+      lastArrow = null
       const fwd = t.indexOf('Forward') >= 0 || t.indexOf('forward') >= 0
       let from = start
       let to = start
@@ -358,6 +426,12 @@ export function bindRichText(ytext, el, opts = {}) {
   // Keyboard shortcuts (consistent across browsers; we own these so the
   // browser's native bold/italic never double-fires).
   function onKeyDown(e) {
+    if (picker && pickerKey(e)) return
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      indent(e.shiftKey ? -1 : 1)
+      return
+    }
     const mod = e.ctrlKey || e.metaKey
     if (!mod) return
     const k = e.key.toLowerCase()
@@ -381,6 +455,164 @@ export function bindRichText(ytext, el, opts = {}) {
     }
   }
 
+  // ---- Tab / Shift+Tab: indent or outdent the caret line (or every selected line) ----
+  function indent(dir) {
+    const sel = getSel()
+    if (!sel) return
+    const text = ytext.toString()
+    const single = sel.end === sel.start || text.slice(sel.start, sel.end).indexOf('\n') < 0
+    if (dir > 0 && single) {
+      replaceRange(sel.start, sel.end, INDENT, charMarks(sel.start - 1))
+      return
+    }
+    // line-wise: walk every line start in the selection, from the last one back
+    const first = lineBoundaryBack(text, sel.start)
+    const starts = [first]
+    for (let i = first; i < sel.end; i++) if (text[i] === '\n' && i + 1 < sel.end) starts.push(i + 1)
+    const plan = []
+    let newStart = sel.start
+    let newEnd = sel.end
+    for (let k = starts.length - 1; k >= 0; k--) {
+      const ls = starts[k]
+      if (dir > 0) {
+        plan.push({ ls, insert: true })
+        if (ls <= newStart) newStart += INDENT.length
+        newEnd += INDENT.length
+      } else {
+        let n = 0
+        while (n < INDENT.length && text[ls + n] === ' ') n++
+        if (n === 0 && text[ls] === '\t') n = 1
+        if (n > 0) {
+          plan.push({ ls, n })
+          if (ls < newStart) newStart = Math.max(ls, newStart - n)
+          newEnd = Math.max(ls, newEnd - n)
+        }
+      }
+    }
+    if (!plan.length) return
+    // observers fire when the transaction closes, so set the caret target first
+    pendingMarks = null
+    if (sel.end === sel.start) {
+      pendingRange = null
+      pendingCaret = newStart
+    } else pendingRange = [newStart, newEnd]
+    ytext.doc.transact(() => {
+      for (const step of plan) {
+        if (step.insert) ytext.insert(step.ls, INDENT, charMarks(step.ls))
+        else ytext.delete(step.ls, step.n)
+      }
+    }, LOCAL)
+  }
+
+  // ---- [[link]] picker ----------------------------------------------------
+  let picker = null // { el, items, index, from } while open
+
+  function closePicker() {
+    if (!picker) return
+    picker.el.remove()
+    picker = null
+  }
+
+  // Look for "[[partial" just before the caret and show matching titles.
+  function updatePicker() {
+    if (!linkCandidates || document.activeElement !== el) return closePicker()
+    const sel = getSel()
+    if (!sel || sel.end !== sel.start) return closePicker()
+    const text = ytext.toString()
+    const before = text.slice(Math.max(0, sel.start - 80), sel.start)
+    const m = /\[\[([^\]\n]*)$/.exec(before)
+    if (!m) return closePicker()
+    const q = m[1].toLowerCase()
+    const items = linkCandidates()
+      .filter((c) => c.label && c.label.toLowerCase().includes(q))
+      .slice(0, 8)
+    if (!items.length) return closePicker()
+    clearTimeout(blurTimer)
+    if (!picker) {
+      const box = document.createElement('div')
+      box.className = 'rb-picker'
+      box.addEventListener('mousedown', (e) => e.preventDefault()) // keep the caret
+      document.body.appendChild(box)
+      picker = { el: box, items: [], index: 0, from: 0 }
+    }
+    picker.items = items
+    picker.index = Math.min(picker.index, items.length - 1)
+    picker.from = sel.start - m[0].length
+    picker.el.replaceChildren()
+    items.forEach((c, i) => {
+      const row = document.createElement('div')
+      row.className = 'rb-pick' + (i === picker.index ? ' on' : '')
+      const l = document.createElement('span')
+      l.textContent = c.label
+      row.appendChild(l)
+      if (c.hint) {
+        const hnt = document.createElement('span')
+        hnt.className = 'rb-pick-hint'
+        hnt.textContent = c.hint
+        row.appendChild(hnt)
+      }
+      row.addEventListener('click', () => choosePick(i))
+      picker.el.appendChild(row)
+    })
+    // anchor under the caret
+    const s = window.getSelection()
+    let r = null
+    if (s && s.rangeCount) {
+      const rect = s.getRangeAt(0).getClientRects()[0] || el.getBoundingClientRect()
+      r = rect
+    } else r = el.getBoundingClientRect()
+    const top = Math.min(r.bottom + 4, window.innerHeight - 200)
+    const left = Math.min(r.left, window.innerWidth - 260)
+    picker.el.style.top = top + window.scrollY + 'px'
+    picker.el.style.left = Math.max(4, left) + window.scrollX + 'px'
+  }
+
+  function choosePick(i) {
+    if (!picker) return
+    const c = picker.items[i]
+    const sel = getSel()
+    if (!c || !sel) return closePicker()
+    const from = picker.from
+    closePicker()
+    replaceRange(from, sel.end, '[[' + c.label + ']]', charMarks(from - 1))
+  }
+
+  function pickerKey(e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const n = picker.items.length
+      picker.index = (picker.index + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+      Array.from(picker.el.children).forEach((row, i) => row.classList.toggle('on', i === picker.index))
+      return true
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      choosePick(picker.index)
+      return true
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      closePicker()
+      return true
+    }
+    return false
+  }
+
+  // ---- links: a click on an unfocused note follows the link; while editing,
+  // Ctrl/Cmd+click does. Touch users get the first behaviour naturally. ----
+  let hadFocusAtPointerDown = false
+  function onPointerDown() {
+    hadFocusAtPointerDown = document.activeElement === el
+  }
+  function onClick(e) {
+    if (!onLink) return
+    const a = e.target && e.target.closest ? e.target.closest('a.rb-link') : null
+    if (!a || !el.contains(a)) return
+    if (hadFocusAtPointerDown && !(e.ctrlKey || e.metaKey)) return
+    e.preventDefault()
+    onLink(a.dataset.href)
+  }
+
   // ---- Yjs observer ----
   function observer(event, transaction) {
     const local = transaction.origin === LOCAL
@@ -398,7 +630,9 @@ export function bindRichText(ytext, el, opts = {}) {
         pendingCaret = null
       }
       onChange()
+      onLocal()
       onState(activeMarks())
+      updatePicker()
       return
     }
     // remote (or undo/redo): keep the caret roughly where it was.
@@ -423,6 +657,7 @@ export function bindRichText(ytext, el, opts = {}) {
       pendingMarksAt = -1
     }
     onState(activeMarks())
+    updatePicker()
   }
 
   // ---- wire up ----
@@ -433,13 +668,28 @@ export function bindRichText(ytext, el, opts = {}) {
   el.addEventListener('keydown', onKeyDown)
   el.addEventListener('compositionstart', onCompositionStart)
   el.addEventListener('compositionend', onCompositionEnd)
+  el.addEventListener('pointerdown', onPointerDown)
+  el.addEventListener('click', onClick)
+  let blurTimer = null
+  el.addEventListener('blur', () => {
+    clearTimeout(blurTimer)
+    blurTimer = setTimeout(closePicker, 120)
+  })
+  el.addEventListener('focus', () => clearTimeout(blurTimer))
   document.addEventListener('selectionchange', onSelectionChange)
 
   return {
     toggleMark,
+    indent,
     getActiveMarks: activeMarks,
     focus: () => el.focus(),
+    setSpellcheck: (on) => {
+      el.spellcheck = !!on
+    },
     destroy() {
+      closePicker()
+      el.removeEventListener('pointerdown', onPointerDown)
+      el.removeEventListener('click', onClick)
       ytext.unobserve(observer)
       el.removeEventListener('beforeinput', onBeforeInput)
       el.removeEventListener('input', onInput)

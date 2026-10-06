@@ -104,6 +104,56 @@ export async function prompt(message, value = '', opts = {}) {
   return typeof v === 'string' ? v : null
 }
 
+// menu(anchor, [{ label, onClick, cls, on, hint } | 'sep' | { head }], { keepFocus, align })
+// A small floating menu under `anchor`. With keepFocus, pressing on it never
+// takes focus (or the text selection) away from the editor that opened it.
+const openMenus = []
+export function closeMenus() {
+  while (openMenus.length) openMenus.pop().remove()
+}
+export function menu(anchor, items, opts = {}) {
+  closeMenus()
+  const m = h('div', 'menu' + (opts.cls ? ' ' + opts.cls : ''))
+  m.addEventListener('click', (e) => e.stopPropagation())
+  if (opts.keepFocus) m.addEventListener('mousedown', (e) => e.preventDefault())
+  for (const it of items) {
+    if (it === 'sep') {
+      m.appendChild(h('div', 'menu-sep'))
+      continue
+    }
+    if (it.head) {
+      m.appendChild(h('div', 'menu-h', it.head))
+      continue
+    }
+    const b = h('button', 'menu-item' + (it.cls ? ' ' + it.cls : '') + (it.on ? ' on' : ''))
+    b.type = 'button'
+    if (it.icon) b.appendChild(h('span', 'menu-icon', it.icon))
+    b.appendChild(h('span', 'menu-label', it.label))
+    if (it.hint) b.appendChild(h('span', 'menu-hint', it.hint))
+    b.addEventListener('click', () => {
+      closeMenus()
+      it.onClick && it.onClick()
+    })
+    m.appendChild(b)
+  }
+  document.body.appendChild(m)
+  const r = anchor.getBoundingClientRect()
+  const mw = m.offsetWidth
+  const mh = m.offsetHeight
+  let left = opts.align === 'right' ? r.right - mw : r.left
+  left = Math.max(6, Math.min(left, window.innerWidth - mw - 6))
+  let top = r.bottom + 4
+  if (top + mh > window.innerHeight - 6) top = Math.max(6, r.top - mh - 4)
+  m.style.left = left + 'px'
+  m.style.top = top + 'px'
+  openMenus.push(m)
+  return () => {
+    const i = openMenus.indexOf(m)
+    if (i >= 0) openMenus.splice(i, 1)
+    m.remove()
+  }
+}
+
 // toast('Note deleted', { action: 'Undo', onAction, ms: 6000 })
 export function toast(message, opts = {}) {
   if (!toastHost) {

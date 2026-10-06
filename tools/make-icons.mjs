@@ -145,3 +145,5 @@ function makeIcon(size, file) {
 
 makeIcon(32, 'favicon-32.png')
 makeIcon(180, 'apple-touch-icon.png')
+makeIcon(192, 'icon-192.png') // installable app (Android home screen)
+makeIcon(512, 'icon-512.png')

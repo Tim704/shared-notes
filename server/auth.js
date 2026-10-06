@@ -15,7 +15,7 @@ const WRONG_PASSWORD_DELAY_MS = 600
 
 // paths the login page needs (and the health check), always allowed
 const OPEN_PATHS = ['/login', '/health', '/site.webmanifest', '/style.css']
-const isOpenPath = (p) => OPEN_PATHS.includes(p) || p.startsWith('/favicon')
+const isOpenPath = (p) => OPEN_PATHS.includes(p) || p.startsWith('/favicon') || /^\/icon-\d+\.png$/.test(p)
 
 const safeEqual = (a, b) => {
   const ba = Buffer.from(String(a))

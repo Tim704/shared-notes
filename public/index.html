@@ -24,6 +24,7 @@
         <span class="brand-dot"></span>
         <span class="brand-name">notes</span>
       </div>
+      <button id="phone-title" class="phone-title" title="Tabs">notes</button>
 
       <div id="search-wrap" class="search-wrap">
         <svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true">
@@ -55,6 +56,17 @@
       <div id="draw-bar" class="draw-bar"></div>
       <div id="canvas-host" class="canvas-host"></div>
     </section>
+
+    <div id="sel-bar" class="sel-bar" hidden></div>
+
+    <nav id="phone-bar" class="phone-bar" hidden>
+      <button data-act="tabs" title="Tabs"><span>☰</span><small>Tabs</small></button>
+      <button data-act="search" title="Search"><span>⌕</span><small>Search</small></button>
+      <button data-act="home" title="Home"><span>⌂</span><small>Home</small></button>
+      <button data-act="settings" title="Settings"><span>⚙</span><small>Settings</small></button>
+    </nav>
+    <button id="fab" class="fab" title="New note (hold for more)" hidden>+</button>
+    <div id="drawer" class="drawer" hidden><div class="drawer-panel"></div></div>
 
     <div id="overlay" class="overlay" hidden></div>
 

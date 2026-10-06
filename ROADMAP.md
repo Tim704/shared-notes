@@ -6,9 +6,9 @@ checked in the source, and file:line references point at the real thing.
 Sizes: **S** = an afternoon, **M** = a few days, **L** = a week or so, **XL** = weeks.
 
 
-> **Status (19 Sep 2026).** Everything in sections 0, 2, 4, 5 and the REST half of 6 is
-> built, tested and documented in the README. What is left, and why it was skipped in
-> this pass, is at the bottom of this file under "Still open".
+> **Status (6 Oct 2026).** Every section is now built except per-tab documents (by
+> choice) and a compiled Android app. "Still open" at the bottom explains where a few
+> sections ended up different from the plan below.
 
 ---
 
@@ -487,28 +487,36 @@ section 3 ─┬── section 5
 
 ## Still open
 
-Done in this pass (see the README for how each works): every bug and quick fix in
-section 0 including the opt-in password; the Markdown mirror, git history, offline copy,
-export and the History panel from section 2; the home page, archive, collapse and note
-links from section 4; book notes from section 5; and the REST layer from section 6. The
-test runner (`npm test`), the Chrome paths in the smoke test and `.gitignore` housekeeping
-are also done.
+**Update (6 Oct 2026): round 3 is built.** Everything below this line was implemented from
+`FEATURE_PROMPT_3.md` and is covered by `npm test` / `npm run test:browser`:
 
-Deliberately not done, because each one either rewrites working code or is a separate
-project:
+- **Section 3, block model**, but *not* as a `Y.Array` of block maps. Line attributes sit on
+  the `'\n'` that ends each line (Quill-style), so a body is still one `Y.Text`: no
+  migration of existing bodies, search / history / the mirror keep working on plain text,
+  and lists, mixed checkboxes, headings, indent, alignment and per-device folding all
+  merge like text. Whole-note checklists are converted to todo lines by the server.
+- **Section 1, phones**: built the other way round to what is suggested above. Phones get
+  a Keep-style layout of their own (grid of previews, full-screen editor, drawer,
+  long-press actions, swipe to archive) and never write positions, rather than a
+  pan-and-zoom copy of the corkboard.
+- **Section 2b opt-out**: per tab, per device, for this device's *backups* (downloads
+  and the new auto-save-to-folder), not the IndexedDB copy. Backups are now built in the
+  browser, so they work with the Pi off.
+- **Section 6**: the REST additions a widget needs (one note, edit, summary with ETags,
+  tick by line id, method override) are in this repo; the Kotlin app and Glance widgets are
+  in `../shared-notes-android`, **written but never compiled** (no Android SDK on the
+  machine they were written on).
+- **Section 7**: canvas view with pan, zoom, minimap and fit; snapping with guides,
+  multi-select, align, distribute, tidy, and undo per layout step; mind maps from the
+  outline (editable, drag to re-parent, PNG/SVG export) and freeform arrows between notes.
+- Also new: full-screen notes with deep links, pictures and YouTube/Instagram embeds
+  (stored in `data/media`, cache-first offline), title alignment, pinned notes, an
+  install-ready web manifest, and a password-protection test suite.
 
-- **Section 3, the block model** (mixed checkboxes and text, `a. b. c.` and arrow
-  bullets, per-paragraph alignment, foldable bullets). This replaces the editor's data
-  model and the checklist code and needs a migration of every existing body. It is the
-  biggest single change on the list and the one most likely to break live boards, so it
-  should be its own branch with its own round of testing.
-- **Section 1, phone pan-and-zoom.** A viewport rewrite; the current stacked phone layout
-  keeps working.
-- **Section 6, the Android app and widget.** Native Kotlin, a separate repository. The
-  REST endpoints it needs are in place.
-- **Section 7, the infinite canvas, align guides and mind maps.** Depends on section 3
-  for the outline-to-mind-map view and is weeks of work on its own.
-- **Per-tab documents** (the "should the document be split" question). Still recommended
-  against until the board file gets large.
-- **Per-tab offline opt-out.** With one document the offline copy is all-or-nothing; the
-  switch in settings covers the whole board.
+Still not done:
+
+- **Per-tab documents** (one `Y.Doc` per tab). Still recommended against until the board
+  file gets large.
+- **Building and testing the Android app** on a real device (see its README checklist).
+- Rich copy/paste between notes keeps list structure (as Markdown-ish text) but not bold
+  or italic.

@@ -23,6 +23,8 @@ import { createMirror } from './server/mirror.js'
 import { initHistory, scheduleCommit } from './server/history.js'
 import { createApi } from './server/api.js'
 import { createAuth } from './server/auth.js'
+import { createMedia, referencedMedia } from './server/media.js'
+import { migrateLegacyTodos } from './shared/migrate.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT || 3000)
@@ -37,6 +39,10 @@ const EXPORT_DIR = process.env.NOTES_EXPORT_DIR
 const MIRROR_MS = Number(process.env.NOTES_MIRROR_MS) > 0 ? Number(process.env.NOTES_MIRROR_MS) : 3000
 const COMMIT_MS = Number(process.env.NOTES_COMMIT_MS) > 0 ? Number(process.env.NOTES_COMMIT_MS) : 60000
 const TRASH_DAYS = Number(process.env.NOTES_TRASH_DAYS) >= 0 ? Number(process.env.NOTES_TRASH_DAYS) : 30
+const MEDIA_DIR = process.env.NOTES_MEDIA_DIR
+  ? path.resolve(process.env.NOTES_MEDIA_DIR)
+  : path.join(DATA_DIR, 'media')
+const MEDIA_MAX_MB = Number(process.env.NOTES_MEDIA_MAX_MB) > 0 ? Number(process.env.NOTES_MEDIA_MAX_MB) : 8
 const HISTORY_ENABLED = process.env.NOTES_HISTORY !== '0'
 const PASSWORD = process.env.NOTES_PASSWORD || ''
 fs.mkdirSync(DATA_DIR, { recursive: true })
@@ -60,6 +66,28 @@ if (fs.existsSync(DATA_FILE)) {
 
 const awareness = new awarenessProtocol.Awareness(ydoc)
 awareness.setLocalState(null) // the server itself is not a participant
+
+// Whole-note checklists from older versions become notes made of todo lines.
+// Done here, on the one server, so two browsers never both migrate a note.
+// Runs at boot and again shortly after any change that brings an old one in
+// (an old client, an IndexedDB copy from before the upgrade, the API).
+function runMigrations() {
+  try {
+    const n = migrateLegacyTodos(ydoc)
+    if (n) console.log(`Migrated ${n} checklist note(s) to todo lines`)
+  } catch (err) {
+    console.error('Migration failed:', err.message)
+  }
+}
+runMigrations()
+let migrateTimer = null
+function scheduleMigrations() {
+  if (migrateTimer) return
+  migrateTimer = setTimeout(() => {
+    migrateTimer = null
+    runMigrations()
+  }, 150)
+}
 
 /** @type {Set<import('ws').WebSocket>} */
 const conns = new Set()
@@ -99,6 +127,7 @@ ydoc.on('update', (update, origin) => {
   })
   scheduleSave()
   mirror.schedule()
+  if (origin !== 'migrate') scheduleMigrations()
 })
 
 // ---- markdown mirror + git history ---------------------------------------
@@ -109,6 +138,8 @@ const mirror = createMirror({
   exportDir: EXPORT_DIR,
   debounceMs: MIRROR_MS,
   onWritten: () => scheduleCommit(),
+  // pictures are linked from the note files (which sit one folder down)
+  mediaPrefix: path.relative(path.join(EXPORT_DIR, 'tab'), MEDIA_DIR).split(path.sep).join('/') + '/',
 })
 initHistory({ exportDir: EXPORT_DIR, enabled: HISTORY_ENABLED, commitMs: COMMIT_MS })
   .catch((err) => console.error('History setup failed:', err.message))
@@ -128,20 +159,33 @@ function purgeTrash() {
       const deleted = note.get('deleted')
       if (typeof deleted === 'number' && deleted < cutoff) gone.push(id)
     })
-    if (!gone.length) return
-    const goneSet = new Set(gone)
-    ydoc.transact(() => {
-      gone.forEach((id) => yNotes.delete(id))
-      // walk backwards so indexes stay valid while deleting
-      for (let i = yOrder.length - 1; i >= 0; i--) {
-        if (goneSet.has(yOrder.get(i))) yOrder.delete(i, 1)
-      }
-    }, 'purge')
-    console.log(`Trash: purged ${gone.length} note(s) deleted more than ${TRASH_DAYS} day(s) ago`)
+    if (gone.length) {
+      const goneSet = new Set(gone)
+      const yEdges = ydoc.getArray('edges')
+      ydoc.transact(() => {
+        gone.forEach((id) => yNotes.delete(id))
+        // walk backwards so indexes stay valid while deleting
+        for (let i = yOrder.length - 1; i >= 0; i--) {
+          if (goneSet.has(yOrder.get(i))) yOrder.delete(i, 1)
+        }
+        for (let i = yEdges.length - 1; i >= 0; i--) {
+          const e = yEdges.get(i)
+          const get = e && typeof e.get === 'function' ? (k) => e.get(k) : (k) => e && e[k]
+          if (goneSet.has(get('from')) || goneSet.has(get('to'))) yEdges.delete(i, 1)
+        }
+      }, 'purge')
+      console.log(`Trash: purged ${gone.length} note(s) deleted more than ${TRASH_DAYS} day(s) ago`)
+    }
   } catch (err) {
     console.error('Trash purge failed:', err.message)
   }
+  // pictures no note mentions any more (trash included), once past the trash window
+  media
+    .sweep(referencedMedia(ydoc), Math.max(1, TRASH_DAYS) * 24 * 60 * 60 * 1000)
+    .then((n) => n && console.log(`Media: removed ${n} unused picture(s)`))
+    .catch((err) => console.error('Media sweep failed:', err.message))
 }
+const media = createMedia({ mediaDir: MEDIA_DIR, maxBytes: MEDIA_MAX_MB * 1024 * 1024 })
 purgeTrash()
 const purgeTimer = setInterval(purgeTrash, PURGE_INTERVAL_MS)
 purgeTimer.unref()
@@ -173,6 +217,8 @@ if (auth.enabled) console.log('Password protection is ON (NOTES_PASSWORD is set)
 app.get('/health', (_req, res) => res.json({ ok: true, peers: conns.size }))
 app.use(auth.router) // /login (no-op when no password is set)
 app.use(auth.middleware) // gate everything below (no-op when no password is set)
+app.use('/api/media', media.router)
+app.use('/media', media.files)
 app.use('/api', createApi({ ydoc }))
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }))
 

@@ -8,6 +8,11 @@ const DEFAULTS = {
   arrows: true, // auto-replace -> => <- -- with real glyphs while typing
   offline: true, // keep a copy of the board in this browser (IndexedDB)
   launch: 'last', // 'last' tab or 'home' page on open
+  backupExclude: [], // tab ids this device leaves out of its own backups
+  snap: true, // snap notes to their neighbours' edges while dragging
+  grid: false, // also snap to a grid
+  gridSize: 20,
+  phoneCols: 2, // phone grid: 1 or 2 columns
 }
 
 let cache = null

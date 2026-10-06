@@ -3,6 +3,8 @@ import path from 'path'
 import * as Y from 'yjs'
 import { connect, sleep } from './lib.mjs'
 import { parseNoteMarkdown } from '../server/mirror.js'
+import { linesOf } from '../shared/lines.js'
+import { buildMirror } from '../shared/serialise.js'
 
 // Exercises the JSON API, the markdown mirror and the history endpoint against
 // a running server. Assumes a server on PORT (started separately, like the
@@ -93,14 +95,17 @@ const apiNote = tabRes.data.notes.find((n) => n.id === noteId)
 check('GET /api/tabs/:id includes the new note', apiNote && apiNote.title === 'Hello API' && apiNote.body.includes(marker))
 check('GET /api/tabs/:id note carries color/layout/kind', apiNote && apiNote.color === '#bde0fe' && apiNote.layout === 'single' && apiNote.kind === 'note')
 const apiTodo = tabRes.data.notes.find((n) => n.id === todoId)
-check('GET /api/tabs/:id shows checklist items', apiTodo && apiTodo.items.length === 1 && apiTodo.items[0].text === 'Buy oat milk')
+check(
+  'old checklist notes are migrated to todo lines (item id kept)',
+  apiTodo && apiTodo.kind === 'note' && apiTodo.lines.length === 1 && apiTodo.lines[0].type === 'todo' && apiTodo.lines[0].text === 'Buy oat milk' && apiTodo.lines[0].id === 'i1'
+)
 check('GET /api/tabs/unknown -> 404', (await api('GET', '/api/tabs/nope_' + suffix)).status === 404)
 
 // --- PATCH check on the checklist ---
 const patched = await api('PATCH', `/api/notes/${todoId}/check`, { itemId: 'i1', done: true })
 check('PATCH /api/notes/:id/check -> 200', patched.status === 200 && patched.data.done === true)
 await sleep(300)
-check('Yjs client sees the item ticked', A.doc.getMap('notes').get(todoId).get('items').get(0).get('done') === true)
+check('Yjs client sees the item ticked', linesOf(A.doc.getMap('notes').get(todoId).get('body'))[0].attrs.done === true)
 check('PATCH unknown item -> 404', (await api('PATCH', `/api/notes/${todoId}/check`, { itemId: 'nope', done: true })).status === 404)
 
 // --- search ---
@@ -140,8 +145,57 @@ check('mirror file parses back (front matter + title + body)', parsed && parsed.
 check('mirror front matter has numbers + editor', parsed && parsed.front.w === 250 && parsed.front.lastEditedBy === 'API' && parsed.front.kind === 'note')
 const todoFile = idxTab && idxTab.notes.find((n) => n.id === todoId)
 const todoParsed = todoFile && parseNoteMarkdown(fs.readFileSync(path.join(EXPORT_DIR, todoFile.file), 'utf8'))
-check('checklist mirrors as task list lines', todoParsed && todoParsed.front.kind === 'todo' && todoParsed.body === '- [x] Buy oat milk')
+check('checklist mirrors as task list lines', todoParsed && todoParsed.front.kind === 'note' && todoParsed.body === '- [x] Buy oat milk')
 check('mirror README.md exists', fs.existsSync(path.join(EXPORT_DIR, 'README.md')))
+// the browser's own backup uses the same serialiser: same doc → same files
+const local = buildMirror(A.doc, { mediaPrefix: '../../media/' })
+const sameFiles = idxTab && idxTab.notes.every((n) => local[n.file] === fs.readFileSync(path.join(EXPORT_DIR, n.file), 'utf8'))
+check('a device backup built from a synced copy matches the Pi mirror file for file', !!sameFiles)
+const without = buildMirror(A.doc, { excludeTabs: new Set([tabId]) })
+check('leaving a tab out of a device backup drops its folder', !Object.keys(without).some((f) => f.startsWith(idxTab.dir + '/')))
+
+// --- widget endpoints: one note, edit, append todos, summary + ETag ---
+const one = await api('GET', `/api/notes/${noteId}`)
+check('GET /api/notes/:id -> the note with its tab', one.status === 200 && one.data.title === 'Hello API' && one.data.tabId === tabId)
+const etag = one.headers.get('etag')
+const again = await fetch(HTTP + `/api/notes/${noteId}`, { headers: { 'If-None-Match': etag } })
+check('unchanged note answers 304 to If-None-Match', !!etag && again.status === 304)
+const edited = await api('PATCH', `/api/notes/${noteId}`, { title: 'Hello again', append: '- [ ] eggs\n- [x] flour', pinned: true })
+check('PATCH /api/notes/:id edits title and appends todo lines', edited.status === 200 && edited.data.title === 'Hello again' && edited.data.pinned === true)
+const todos = edited.data.lines.filter((l) => l.type === 'todo')
+check('appended lines are todos with ids', todos.length === 2 && todos[0].text === 'eggs' && todos[1].done === true && !!todos[0].id)
+const tick = await api('PATCH', `/api/notes/${noteId}/check`, { lineId: todos[0].id, done: true })
+check('PATCH check by line id', tick.status === 200 && tick.data.done === true)
+const viaPost = await fetch(HTTP + `/api/notes/${noteId}/check`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', 'X-HTTP-Method-Override': 'PATCH' },
+  body: JSON.stringify({ index: todos[1].index, done: false }),
+})
+check('POST + X-HTTP-Method-Override: PATCH works (for Android)', viaPost.status === 200 && (await viaPost.json()).done === false)
+const after = await api('GET', `/api/notes/${noteId}`, null)
+check('ETag changes after an edit', after.headers.get('etag') !== etag && after.data.lines.find((l) => l.id === todos[0].id).done === true)
+const summary = await api('GET', `/api/tabs/${tabId}?summary=1`)
+const sNote = summary.data.notes && summary.data.notes.find((n) => n.id === noteId)
+check('summary lists todos and pins first', sNote && sNote.todos.length === 2 && summary.data.notes[0].id === noteId)
+const created2 = await api('POST', `/api/tabs/${tabId}/notes`, { title: 'List', lines: [{ text: 'a', type: 'todo' }, { text: 'b', type: 'li', indent: 1 }] })
+const n2 = created2.status === 201 && (await api('GET', `/api/notes/${created2.data.id}`)).data
+check('POST a note from structured lines', n2 && n2.lines[0].type === 'todo' && n2.lines[1].type === 'li' && n2.lines[1].indent === 1)
+
+// --- pictures: upload, serve, reject non-images ---
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64'
+)
+const up = await fetch(HTTP + '/api/media', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png })
+const upData = await up.json()
+check('POST /api/media stores a picture', up.status === 201 && /^\/media\/[a-f0-9]{64}\.png$/.test(upData.url))
+const got = await fetch(HTTP + upData.url)
+check('GET /media/<file> serves it, cached', got.status === 200 && (got.headers.get('cache-control') || '').includes('max-age'))
+const bad = await fetch(HTTP + '/api/media', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: 'hello' })
+check('non-pictures are refused', bad.status === 415)
+const fake = await fetch(HTTP + '/api/media', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: 'not a png' })
+check('a file that only claims to be a picture is refused', fake.status === 415)
+check('unknown media 404s', (await fetch(HTTP + '/media/../board.bin')).status === 404)
 
 // --- history endpoint: shape only (git may or may not be installed / committed yet) ---
 const hist = await api('GET', `/api/history/${noteId}`)

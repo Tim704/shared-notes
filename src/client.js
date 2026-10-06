@@ -9,6 +9,16 @@ import { bindRichText } from './richbody.js'
 import { createDrawSurface } from './draw.js'
 import { getSettings, setSetting, onSettingChange } from './settings.js'
 import * as ui from './ui.js'
+import { searchText, snippetOf } from '../shared/serialise.js'
+import { markdownToLines } from '../shared/lines.js'
+import { replaceAllLines } from '../shared/lineops.js'
+import { uploadImages, openLightbox, pickImages } from './media.js'
+import { createFoldStore } from './folds.js'
+import * as backup from './backup.js'
+import { createMindMap } from './mindmap.js'
+import { createViewport } from './viewport.js'
+import { createEdges } from './edges.js'
+import { createGuides, snapMove, snapResize, alignRects, distributeRects, matchSize, tidyRects } from './snap.js'
 import {
   genId,
   clamp,
@@ -168,10 +178,11 @@ class WSProvider {
 // ---------------------------------------------------------------------------
 function bindInput(ytext, el, afterRemote) {
   let applyingRemote = false
+  const origin = { binding: 'input' } // per binding: a second input on the same text sees our edits
   el.value = ytext.toString()
 
   const observer = (event) => {
-    if (event.transaction.local) return
+    if (event.transaction.origin === origin) return
     applyingRemote = true
     let start = el.selectionStart
     let end = el.selectionEnd
@@ -217,7 +228,7 @@ function bindInput(ytext, el, afterRemote) {
     ytext.doc.transact(() => {
       if (pEnd > start) ytext.delete(start, pEnd - start)
       if (nEnd > start) ytext.insert(start, next.slice(start, nEnd))
-    })
+    }, origin)
   }
 
   ytext.observe(observer)
@@ -340,9 +351,15 @@ try {
 function tabRec(t) {
   if (!t) return null
   if (typeof t.get === 'function') {
-    return { id: t.get('id'), name: t.get('name') || '', kind: t.get('kind') || 'notes', archived: !!t.get('archived') }
+    return {
+      id: t.get('id'),
+      name: t.get('name') || '',
+      kind: t.get('kind') || 'notes',
+      archived: !!t.get('archived'),
+      view: t.get('view') === 'canvas' ? 'canvas' : 'board',
+    }
   }
-  return { id: t.id, name: t.name || '', kind: t.kind || 'notes', archived: !!t.archived }
+  return { id: t.id, name: t.name || '', kind: t.kind || 'notes', archived: !!t.archived, view: t.view === 'canvas' ? 'canvas' : 'board' }
 }
 function tabsList() {
   return yTabs.toArray().map(tabRec).filter((t) => t && t.id)
@@ -501,15 +518,18 @@ async function deleteTab(id) {
   if (choice !== 'delete') return
   const i = tabIndex(id)
   doc.transact(() => {
-    // remove notes that belong to this tab
+    // remove notes that belong to this tab (and arrows touching them)
     const ids = yOrder.toArray()
+    const gone = []
     for (let k = ids.length - 1; k >= 0; k--) {
       const n = yNotes.get(ids[k])
       if (n && n.get('tabId') === id) {
         yOrder.delete(k, 1)
         yNotes.delete(ids[k])
+        gone.push(ids[k])
       }
     }
+    if (gone.length) edges.removeFor(gone)
     if (yDrawings.has(id)) yDrawings.delete(id)
     if (i >= 0) yTabs.delete(i, 1)
   })
@@ -698,7 +718,37 @@ function openTabMenu(anchor, t) {
     renamingTabId = t.id
     renderTabs()
   })
+  if (t.kind !== 'draw') {
+    if (t.view === 'canvas')
+      item('▦  Back to the board view', () => {
+        updateTab(t.id, { view: null })
+        setTimeout(() => {
+          const bw = board.clientWidth
+          const off = Array.from(cards.values()).some((c) => {
+            const n = c.note
+            return (n.get('x') || 0) < 0 || (n.get('y') || 0) < 0 || (n.get('x') || 0) + (n.get('w') || W_DEFAULT) > bw
+          })
+          if (off)
+            ui.toast('Some notes sit outside this view.', { action: 'Bring them in', ms: 9000, onAction: bringAllIntoView })
+        }, 60)
+      })
+    else
+      item('∞  Canvas view (pan & zoom)', () => {
+        updateTab(t.id, { view: 'canvas' })
+        ui.toast('Canvas: drag the background to pan, Ctrl/⌘+wheel or pinch to zoom. Shift+drag selects.', { ms: 7000 })
+      })
+    if (t.view !== 'canvas') item('⇲  Bring every note into view', () => bringAllIntoView())
+  }
   item(t.archived ? 'Unarchive' : 'Archive', () => setTabArchived(t.id, !t.archived))
+  const excluded = backup.isExcluded(t.id)
+  item(excluded ? '☐  Back up on this device' : '☑  Backed up on this device', () => {
+    backup.setExcluded(t.id, !excluded)
+    ui.toast(
+      excluded
+        ? `"${t.name}" is in this device's backups again.`
+        : `"${t.name}" is left out of this device's backups. The Pi still keeps it.`
+    )
+  })
   item('Delete…', () => deleteTab(t.id), 'danger')
   document.body.appendChild(menu)
   openMenus.push(menu)
@@ -729,6 +779,7 @@ function openAddMenu(anchor) {
 const openMenus = []
 function closeMenus() {
   while (openMenus.length) openMenus.pop().remove()
+  ui.closeMenus()
 }
 document.addEventListener('click', () => {
   closeMenus()
@@ -809,6 +860,7 @@ function hardDeleteNote(id) {
     const i = arr.indexOf(id)
     if (i >= 0) yOrder.delete(i, 1)
     yNotes.delete(id)
+    edges.removeFor([id])
   })
 }
 
@@ -845,46 +897,13 @@ function hiddenCounts(tabId) {
   return { trash, archived }
 }
 
-// Flip a note between prose and checklist, carrying the text across. prose→todo
-// splits the body into items (one per non-blank line); todo→prose joins items
-// back into the body. Done-state is dropped on the way back to prose.
-function setNoteKind(note, kind) {
-  const cur = note.get('kind') || 'note'
-  if (cur === kind) return
+// Text or mind map (shared, like the book layout).
+function setNoteView(note, view) {
+  const cur = note.get('view') === 'map' ? 'map' : 'note'
+  if (cur === view) return
   note.doc.transact(() => {
-    if (kind === 'todo') {
-      const lines = note
-        .get('body')
-        .toString()
-        .split('\n')
-        .map((s) => s.replace(/\s+$/, ''))
-        .filter((s) => s.trim() !== '')
-      const arr = new Y.Array()
-      note.set('items', arr)
-      const use = lines.length ? lines : ['']
-      for (const line of use) {
-        const it = new Y.Map()
-        const t = new Y.Text()
-        it.set('id', genId())
-        it.set('text', t)
-        it.set('done', false)
-        arr.push([it])
-        if (line) t.insert(0, line)
-      }
-      note.set('kind', 'todo')
-    } else {
-      const items = note.get('items')
-      const text = items
-        ? items
-            .toArray()
-            .map((it) => it.get('text').toString())
-            .join('\n')
-        : ''
-      const body = note.get('body')
-      if (body.length) body.delete(0, body.length)
-      if (text) body.insert(0, text)
-      note.set('kind', 'note')
-    }
+    if (view === 'map') note.set('view', 'map')
+    else note.delete('view')
   })
 }
 
@@ -911,24 +930,9 @@ function setNoteLayout(note, layout) {
   })
 }
 
-// Searchable text for a note (title + body, or title + item texts for a list).
+// Searchable text for a note (title + body + second page, or a legacy checklist's items).
 function noteHay(note) {
-  const title = note.get('title').toString()
-  let body = ''
-  if ((note.get('kind') || 'note') === 'todo') {
-    const items = note.get('items')
-    body = items
-      ? items
-          .toArray()
-          .map((it) => it.get('text').toString())
-          .join(' ')
-      : ''
-  } else {
-    body = note.get('body').toString()
-    const b2 = note.get('body2')
-    if (b2) body += ' ' + b2.toString()
-  }
-  return (title + ' ' + body).toLowerCase()
+  return searchText(note).toLowerCase()
 }
 
 function belongsToActive(note, active) {
@@ -985,16 +989,19 @@ function goToNote(id, opts = {}) {
   if (n.get('deleted')) restoreNote(id)
   if (n.get('archived') && opts.unarchive !== false) setNoteArchived(id, false)
   if (collapsed.has(id)) setCollapsed(id, false)
-  try {
-    history.replaceState(null, '', '#note=' + id)
-  } catch {
-    /* ignore */
+  if (!opts.keepHash) {
+    try {
+      history.replaceState(null, '', '#note=' + id)
+    } catch {
+      /* ignore */
+    }
   }
   // the card may not exist until reconcile has run
   const tryFlash = (left) => {
     const c = cards.get(id)
     if (c) {
-      c.el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      if (canvasMode) viewport.centerOn(c.el.offsetLeft + c.el.offsetWidth / 2, c.el.offsetTop + c.el.offsetHeight / 2)
+      else c.el.scrollIntoView({ block: 'center', behavior: 'smooth' })
       c.el.classList.add('flash')
       setTimeout(() => c.el.classList.remove('flash'), 1400)
       return
@@ -1028,8 +1035,13 @@ function followLink(href) {
       ui.toast('No note or tab called ' + href)
       return
     }
-    if (target.noteId) goToNote(target.noteId)
-    else setActiveTab(target.tabId)
+    if (target.noteId) {
+      goToNote(target.noteId)
+      if (full) openFullscreen(target.noteId) // following a link from a full-screen note opens the next one full screen
+    } else {
+      if (full) closeFullscreen()
+      setActiveTab(target.tabId)
+    }
     return
   }
   window.open(href, '_blank', 'noopener')
@@ -1052,6 +1064,34 @@ function linkCandidates() {
 // ---- card construction ----
 const cards = new Map() // id -> { ... }
 
+// folded bullet points, per device (shared by every editor of a note)
+const folds = createFoldStore()
+
+// The options every body editor gets (cards and the full-screen view).
+function editorOpts(note, extra) {
+  return {
+    onLocal: () => stamp(note),
+    onLink: followLink,
+    linkCandidates,
+    arrows: () => getSettings().arrows,
+    spellcheck: () => getSettings().spellcheck,
+    folds,
+    reveal: () => !!search.value.trim(), // searching shows what is folded
+    onEmbedClick: (emb) => openLightbox(emb),
+    onFiles: async (files) => {
+      const urls = await uploadImages(files)
+      const rich = extra.getRich && extra.getRich()
+      if (urls.length && rich) rich.insertMedia(urls)
+    },
+    ...extra,
+  }
+}
+
+// Phones get their own Keep-style layout (see the phone section below).
+function phoneMode() {
+  return mqStack.matches
+}
+
 function applyNoteStyle(el, note) {
   const color = note.get('color') || PAPER[0]
   el.style.background = color
@@ -1065,6 +1105,10 @@ function applyNoteStyle(el, note) {
   else el.style.removeProperty('--title-fs')
   el.classList.toggle('autogrow', !!note.get('autoGrow'))
   el.classList.toggle('book', note.get('layout') === 'book')
+  el.classList.toggle('pinned', !!note.get('pinned'))
+  el.classList.toggle('mapview', note.get('view') === 'map')
+  const tEl = el.querySelector(':scope > .card-title')
+  if (tEl) tEl.style.textAlign = note.get('titleAlign') || ''
   for (const cls of Object.values(SIZES)) el.classList.remove(cls)
   el.classList.add(SIZES[note.get('size')] || SIZES.m)
 }
@@ -1075,6 +1119,90 @@ function applyNoteStyle(el, note) {
 // (x/y/w/h are ignored there so a phone stays usable).
 const mqStack = window.matchMedia('(max-width: 560px)')
 let freeLayout = !mqStack.matches
+
+// Two desktop views of a tab, chosen per tab (shared): the "board" grows
+// downwards inside the window width; the "canvas" is an endless plane you pan
+// and zoom (src/viewport.js). Cards live in `board` for the board and in
+// `plane` (the transformed layer) for the canvas.
+const plane = document.createElement('div')
+plane.className = 'plane'
+let canvasMode = false
+const LAYOUT = 'layout' // origin of position/size writes, so they can be undone as layout steps
+
+function container() {
+  return canvasMode ? plane : board
+}
+
+function noteRect(c) {
+  const n = c.note
+  return {
+    id: c.id,
+    x: canvasMode ? n.get('x') || 0 : c.el.offsetLeft,
+    y: canvasMode ? n.get('y') || 0 : c.el.offsetTop,
+    w: c.el.offsetWidth || n.get('w') || W_DEFAULT,
+    h: c.el.offsetHeight || n.get('h') || H_DEFAULT,
+  }
+}
+
+const viewport = createViewport({
+  board,
+  plane,
+  getRects: () =>
+    Array.from(cards.values())
+      .filter((c) => !c.el.classList.contains('hidden'))
+      .map((c) => ({ ...noteRect(c), color: c.note.get('color') })),
+  onChange: () => {
+    edges.schedule()
+    if (marquee) marquee.refresh()
+  },
+  shouldPan: (e) => !e.shiftKey, // Shift+drag on the canvas draws a selection box instead
+})
+
+function toPlane(cx, cy) {
+  if (canvasMode) return viewport.toPlane(cx, cy)
+  const r = board.getBoundingClientRect()
+  return { x: cx - r.left - board.clientLeft, y: cy - r.top - board.clientTop }
+}
+const zoom = () => (canvasMode ? viewport.view().k : 1)
+
+const guides = createGuides()
+const edges = createEdges({
+  doc,
+  Y,
+  ui,
+  genId,
+  toPlane,
+  scale: zoom,
+  getCard: (id) => {
+    const c = cards.get(id)
+    return c && freeLayout ? c : null
+  },
+})
+
+function setCanvasMode(on, tabId) {
+  const want = !!on && freeLayout
+  // nothing to move (moving a card would blur an editor and reload any video in it)
+  if (want === canvasMode) {
+    if (want && viewport.tab() !== tabId) viewport.enable(tabId) // another canvas tab: its own view
+    return
+  }
+  canvasMode = want
+  board.classList.toggle('canvas', canvasMode)
+  if (canvasMode) {
+    board.appendChild(plane)
+    for (const [, c] of cards) plane.appendChild(c.el)
+    viewport.enable(tabId)
+  } else {
+    viewport.disable()
+    for (const [, c] of cards) board.appendChild(c.el)
+    plane.remove()
+  }
+  const box = container()
+  box.appendChild(edges.el)
+  box.appendChild(guides.el)
+  relayoutAll()
+  edges.schedule()
+}
 
 function applyNoteLayout(el, note) {
   el.classList.toggle('free', freeLayout)
@@ -1088,9 +1216,14 @@ function applyNoteLayout(el, note) {
   }
   const w = clamp(note.get('w') || SIZE_W[note.get('size')] || W_DEFAULT, W_MIN, 4000)
   const h = Math.max(H_MIN, note.get('h') || H_DEFAULT)
-  const bw = board.clientWidth || window.innerWidth
-  const x = clamp(note.get('x') || 0, 0, Math.max(0, bw - w))
-  const y = Math.max(0, note.get('y') || 0)
+  let x = note.get('x') || 0
+  let y = note.get('y') || 0
+  if (!canvasMode) {
+    // the board only grows downwards: keep everything inside the window width
+    const bw = board.clientWidth || window.innerWidth
+    x = clamp(x, 0, Math.max(0, bw - w))
+    y = Math.max(0, y)
+  }
   el.style.left = x + 'px'
   el.style.top = y + 'px'
   el.style.width = w + 'px'
@@ -1130,8 +1263,9 @@ function bringToFront(note) {
 }
 
 function updateBoardExtent() {
-  if (!freeLayout) {
+  if (!freeLayout || canvasMode) {
     board.style.minHeight = ''
+    if (canvasMode) viewport.refreshMap()
     return
   }
   let maxB = 0
@@ -1149,17 +1283,244 @@ function relayoutAll() {
   board.classList.toggle('free', freeLayout)
   for (const [, c] of cards) applyNoteLayout(c.el, c.note)
   updateBoardExtent()
+  edges.schedule()
 }
 
 function nextNotePos() {
   const n = cards.size
   const step = 28
+  if (canvasMode) {
+    // in the middle of what is on screen
+    const c = viewport.center()
+    return { x: Math.round(c.x - SIZE_W.m / 2 + (n % 5) * 18), y: Math.round(c.y - H_DEFAULT / 2 + (n % 5) * 18) }
+  }
   return { x: 24 + (n % 7) * step, y: 24 + (n % 7) * step }
+}
+
+// ---- layout undo: moves, resizes and alignments are one undo step each -------
+const layoutUndo = new Y.UndoManager(yNotes, { trackedOrigins: new Set([LAYOUT]), captureTimeout: 1e9 })
+window.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+  const k = e.key.toLowerCase()
+  if (k !== 'z' && k !== 'y') return
+  const a = document.activeElement
+  if (a && (a.isContentEditable || a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return
+  const t = activeTab()
+  if (!freeLayout || full || !t || t.kind === 'draw') return
+  const redo = k === 'y' || e.shiftKey
+  if (redo ? !layoutUndo.redoStack.length : !layoutUndo.undoStack.length) return
+  e.preventDefault()
+  if (redo) layoutUndo.redo()
+  else layoutUndo.undo()
+})
+
+// write several notes' positions/sizes as one shared change and one undo step
+function applyLayout(changes) {
+  if (!changes.length) return
+  layoutUndo.stopCapturing()
+  doc.transact(() => {
+    for (const ch of changes) {
+      const n = yNotes.get(ch.id)
+      if (!n) continue
+      if (ch.x != null) n.set('x', Math.round(ch.x))
+      if (ch.y != null) n.set('y', Math.round(ch.y))
+      if (ch.w != null) n.set('w', Math.round(ch.w))
+      if (ch.h != null) {
+        n.set('h', Math.round(ch.h))
+        if (n.get('autoGrow')) n.delete('autoGrow')
+      }
+    }
+  }, LAYOUT)
+  layoutUndo.stopCapturing()
+}
+
+// ---- selecting several notes (desktop) ---------------------------------------
+const boardSel = new Set()
+function setSelected(ids) {
+  boardSel.clear()
+  for (const id of ids) if (cards.has(id)) boardSel.add(id)
+  for (const [id, c] of cards) c.el.classList.toggle('sel', boardSel.has(id))
+  renderAlignBar()
+}
+function toggleSelected(id) {
+  const next = new Set(boardSel)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  setSelected(next)
+}
+
+const alignBar = document.createElement('div')
+alignBar.className = 'align-bar'
+alignBar.hidden = true
+document.body.appendChild(alignBar)
+alignBar.addEventListener('pointerdown', (e) => e.stopPropagation())
+
+function selRects() {
+  return Array.from(boardSel)
+    .map((id) => cards.get(id))
+    .filter(Boolean)
+    .map((c) => {
+      const r = noteRect(c)
+      // in board view work from the stored values (the drawn ones may be clamped)
+      if (!canvasMode) return { ...r, x: c.note.get('x') || 0, y: c.note.get('y') || 0 }
+      return r
+    })
+}
+
+function renderAlignBar() {
+  const n = boardSel.size
+  alignBar.hidden = n < 2 || !freeLayout
+  if (alignBar.hidden) return
+  alignBar.replaceChildren()
+  const b = (html, title, fn) => {
+    const x = document.createElement('button')
+    x.className = 'align-btn'
+    x.innerHTML = html
+    x.title = title
+    x.addEventListener('click', (e) => {
+      e.stopPropagation()
+      fn()
+    })
+    alignBar.appendChild(x)
+  }
+  const label = document.createElement('span')
+  label.className = 'align-count'
+  label.textContent = n + ' notes'
+  alignBar.appendChild(label)
+  const I = (d) => svg(d)
+  b(I('M2.5 2v12M5 5h8M5 10h5'), 'Align left edges', () => applyLayout(alignRects(selRects(), 'left')))
+  b(I('M8 2v12M3 5h10M5 10h6'), 'Align centres (vertical line)', () => applyLayout(alignRects(selRects(), 'center')))
+  b(I('M13.5 2v12M3 5h8M6 10h5'), 'Align right edges', () => applyLayout(alignRects(selRects(), 'right')))
+  b(I('M2 2.5h12M5 5v8M10 5v5'), 'Align top edges', () => applyLayout(alignRects(selRects(), 'top')))
+  b(I('M2 8h12M5 3v10M10 5v6'), 'Align middles (horizontal line)', () => applyLayout(alignRects(selRects(), 'middle')))
+  b(I('M2 13.5h12M5 3v8M10 6v5'), 'Align bottom edges', () => applyLayout(alignRects(selRects(), 'bottom')))
+  const sep = document.createElement('span')
+  sep.className = 'align-sep'
+  alignBar.appendChild(sep)
+  b(I('M2 3v10M14 3v10M6 5h4v6H6z'), 'Space evenly, left to right', () => applyLayout(distributeRects(selRects(), 'h')))
+  b(I('M3 2h10M3 14h10M5 6h6v4H5z'), 'Space evenly, top to bottom', () => applyLayout(distributeRects(selRects(), 'v')))
+  b(I('M2 5h12M2 11h12M4 3l-2 2 2 2M12 9l2 2-2 2'), 'Same width', () => applyLayout(matchSize(selRects(), 'w')))
+  b(I('M5 2v12M11 2v12M3 4l2-2 2 2M9 12l2 2 2-2'), 'Same height', () => applyLayout(matchSize(selRects(), 'h')))
+  b(I('M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z'), 'Tidy up into a grid', () => applyLayout(tidyRects(selRects())))
+  b('✕', 'Clear selection (Esc)', () => setSelected([]))
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && boardSel.size) setSelected([])
+})
+
+// drag a box on empty board (or Shift+drag on the canvas) to select notes
+let marquee = null
+board.addEventListener('pointerdown', (e) => {
+  if (!freeLayout || e.button !== 0) return
+  const bg = e.target === board || e.target === plane || e.target === edges.el
+  if (!bg) return
+  if (canvasMode && !e.shiftKey) return // plain drag pans the canvas
+  e.preventDefault()
+  const start = toPlane(e.clientX, e.clientY)
+  const box = document.createElement('div')
+  box.className = 'marquee'
+  container().appendChild(box)
+  const base = e.shiftKey || e.ctrlKey || e.metaKey ? new Set(boardSel) : new Set()
+  let moved = false
+  let last = e
+  const update = () => {
+    const p = toPlane(last.clientX, last.clientY)
+    const x = Math.min(start.x, p.x)
+    const y = Math.min(start.y, p.y)
+    const w = Math.abs(p.x - start.x)
+    const h = Math.abs(p.y - start.y)
+    box.style.left = x + 'px'
+    box.style.top = y + 'px'
+    box.style.width = w + 'px'
+    box.style.height = h + 'px'
+    const hit = new Set(base)
+    for (const [id, c] of cards) {
+      if (c.el.classList.contains('hidden')) continue
+      const r = { x: c.el.offsetLeft, y: c.el.offsetTop, w: c.el.offsetWidth, h: c.el.offsetHeight }
+      if (r.x < x + w && r.x + r.w > x && r.y < y + h && r.y + r.h > y) hit.add(id)
+    }
+    setSelected(hit)
+  }
+  marquee = { refresh: update }
+  const move = (ev) => {
+    last = ev
+    if (!moved && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 4) return
+    moved = true
+    update()
+  }
+  const up = () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    box.remove()
+    marquee = null
+    if (!moved && !base.size) setSelected([])
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+})
+
+// notes this drag should snap against: the visible ones that aren't moving
+function snapTargets(moving) {
+  const out = []
+  for (const [id, c] of cards) {
+    if (moving.has(id) || c.el.classList.contains('hidden')) continue
+    out.push({ x: c.el.offsetLeft, y: c.el.offsetTop, w: c.el.offsetWidth, h: c.el.offsetHeight })
+  }
+  return out
+}
+function snapOpts(ev) {
+  const st = getSettings()
+  if (ev && ev.altKey) return null
+  if (!st.snap && !st.grid) return null
+  return { threshold: 7 / zoom(), grid: st.grid ? Math.max(4, Number(st.gridSize) || 20) : 0, edges: st.snap }
+}
+
+// Board view → bring notes that sit outside the window width (e.g. placed on
+// the canvas) back into view, below the others. One undo step.
+function bringAllIntoView() {
+  const bw = board.clientWidth || window.innerWidth
+  const inside = []
+  const outside = []
+  for (const [id, c] of cards) {
+    const n = c.note
+    const x = n.get('x') || 0
+    const y = n.get('y') || 0
+    const w = n.get('w') || W_DEFAULT
+    if (x < 0 || y < 0 || x + w > bw) outside.push({ id, w, h: c.el.offsetHeight || n.get('h') || H_DEFAULT })
+    else inside.push({ y, h: c.el.offsetHeight || n.get('h') || H_DEFAULT })
+  }
+  if (!outside.length) {
+    ui.toast('Every note is already in view.')
+    return
+  }
+  let y = inside.reduce((m, r) => Math.max(m, r.y + r.h), 0) + 24
+  let x = 16
+  let rowH = 0
+  const changes = []
+  for (const o of outside) {
+    if (x + o.w > bw - 8 && x > 16) {
+      x = 16
+      y += rowH + 16
+      rowH = 0
+    }
+    changes.push({ id: o.id, x, y })
+    x += o.w + 16
+    rowH = Math.max(rowH, o.h)
+  }
+  applyLayout(changes)
+  ui.toast(`Moved ${outside.length} note${outside.length === 1 ? '' : 's'} into view.`, { action: 'Undo', onAction: () => layoutUndo.undo() })
 }
 
 mqStack.addEventListener('change', () => {
   freeLayout = !mqStack.matches
+  // phone and desktop cards behave differently (read-only previews vs editors): rebuild them
+  for (const [cid, c] of cards) {
+    destroyCard(c)
+    cards.delete(cid)
+  }
+  phoneRefresh()
   relayoutAll()
+  scheduleReconcile()
 })
 window.addEventListener(
   'resize',
@@ -1167,6 +1528,101 @@ window.addEventListener(
     if (freeLayout) relayoutAll()
   })
 )
+
+// ---- formatting toolbar (cards and the full-screen editor) ----------------
+const LIST_STYLES = [
+  ['disc', '•', 'Bullets', 'Ctrl+Shift+8'],
+  ['square', '▪', 'Squares'],
+  ['arrow', '→', 'Arrows'],
+  ['dash', '–', 'Dashes'],
+  ['decimal', '1.', 'Numbers', 'Ctrl+Shift+7'],
+  ['alpha', 'a.', 'Letters'],
+  ['roman', 'i.', 'Roman numerals'],
+]
+const svg = (d, extra = '') =>
+  `<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${extra}<path d="${d}"/></svg>`
+const ICONS = {
+  list: svg('M6 4h8M6 8h8M6 12h8', '<circle cx="2.6" cy="4" r=".9" fill="currentColor"/><circle cx="2.6" cy="8" r=".9" fill="currentColor"/><circle cx="2.6" cy="12" r=".9" fill="currentColor"/>'),
+  todo: svg('M4.5 8.2l2.2 2.2 4.6-4.8', '<rect x="1.5" y="1.5" width="13" height="13" rx="2.5"/>'),
+  left: svg('M2 3.5h12M2 6.5h8M2 9.5h12M2 12.5h7'),
+  center: svg('M2 3.5h12M4 6.5h8M2 9.5h12M4.5 12.5h7'),
+  right: svg('M2 3.5h12M6 6.5h8M2 9.5h12M7 12.5h7'),
+  image: svg('M2 12l3.6-3.6 2.8 2.8 2-2 3.6 3.6', '<rect x="1.5" y="2.5" width="13" height="11" rx="1.6"/><circle cx="5.4" cy="6.2" r="1.2"/>'),
+  fold: svg('M5 6l3 3 3-3'),
+}
+
+function buildFmtBar(getRich) {
+  const el = document.createElement('div')
+  el.className = 'card-fmt'
+  const btns = {}
+  const mkBtn = (cls, html, tip, onPress) => {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'fmt-btn ' + cls
+    b.innerHTML = html
+    b.title = tip
+    b.addEventListener('mousedown', (e) => e.preventDefault()) // keep the body's selection
+    b.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const rich = getRich()
+      if (rich) onPress(rich, b)
+    })
+    el.appendChild(b)
+    return b
+  }
+  ;[
+    ['b', 'B', 'Bold  (Ctrl/Cmd+B)'],
+    ['i', 'I', 'Italic  (Ctrl/Cmd+I)'],
+    ['u', 'U', 'Underline  (Ctrl/Cmd+U)'],
+    ['s', 'S', 'Strikethrough  (Ctrl/Cmd+Shift+S)'],
+  ].forEach(([mark, label, tip]) => {
+    btns[mark] = mkBtn('fmt-' + mark, label, tip, (rich) => rich.toggleMark(mark))
+  })
+  const sep = document.createElement('span')
+  sep.className = 'fmt-sep'
+  el.appendChild(sep)
+  let state = {}
+  btns.list = mkBtn('fmt-list', ICONS.list, 'Bullets, numbers and headings', (rich, b) => {
+    const cur = state.lt === 'li' ? state.mk || 'disc' : null
+    ui.menu(
+      b,
+      [
+        ...LIST_STYLES.map(([mk, glyph, label, hint]) => ({
+          icon: glyph,
+          label,
+          hint,
+          on: cur === mk,
+          onClick: () => rich.toggleList(mk),
+        })),
+        'sep',
+        { icon: 'H', label: 'Heading', hint: '# then space', on: state.lt === 'h', onClick: () => rich.toggleHeading() },
+        { icon: '¶', label: 'Plain text', onClick: () => (state.lt === 'h' ? rich.toggleHeading() : state.lt === 'todo' ? rich.toggleTodo() : state.lt === 'li' && rich.toggleList(cur)) },
+      ],
+      { keepFocus: true, cls: 'fmt-menu' }
+    )
+  })
+  btns.todo = mkBtn('fmt-todo', ICONS.todo, 'Checkbox  (Ctrl/Cmd+Shift+9, or type [] and a space)', (rich) => rich.toggleTodo())
+  btns.align = mkBtn('fmt-align', ICONS.left, 'Align: left → centre → right  (Ctrl/Cmd+Shift+L / E / R)', (rich) => {
+    const cur = state.al || 'left'
+    rich.setAlign(cur === 'left' ? 'center' : cur === 'center' ? 'right' : 'left')
+  })
+  btns.image = mkBtn('fmt-image', ICONS.image, 'Add a picture (or paste / drop one in)', async (rich) => {
+    const files = await pickImages()
+    if (!files.length) return
+    const urls = await uploadImages(files)
+    if (urls.length) rich.insertMedia(urls)
+  })
+  function update(marks, line) {
+    for (const m of ['b', 'i', 'u', 's']) btns[m].classList.toggle('on', !!(marks && marks[m]))
+    state = line || {}
+    btns.list.classList.toggle('on', state.lt === 'li' || state.lt === 'h')
+    btns.todo.classList.toggle('on', state.lt === 'todo')
+    const al = state.al || 'left'
+    btns.align.innerHTML = ICONS[al] || ICONS.left
+    btns.align.classList.toggle('on', al !== 'left')
+  }
+  return { el, btns, update }
+}
 
 function createCard(id) {
   const note = yNotes.get(id)
@@ -1201,7 +1657,16 @@ function createCard(id) {
     setCollapsed(id, !collapsed.has(id))
   })
 
-  tools.append(fold, optBtn, del)
+  const expand = document.createElement('button')
+  expand.className = 'icon-btn expand'
+  expand.title = 'Open full screen (or double-click the header)'
+  expand.textContent = '⤢'
+  expand.addEventListener('click', (e) => {
+    e.stopPropagation()
+    openFullscreen(id)
+  })
+
+  tools.append(fold, expand, optBtn, del)
   top.append(presenceEl, tools)
   if (collapsed.has(id)) el.classList.add('collapsed')
 
@@ -1210,6 +1675,7 @@ function createCard(id) {
   titleEl.placeholder = 'Title'
   titleEl.maxLength = 120
   titleEl.spellcheck = getSettings().spellcheck
+  titleEl.readOnly = phoneMode() // phone cards are previews; editing happens full screen
   titleEl.addEventListener('keydown', (e) => {
     // Tab from the title goes into the body, never out of the note
     if (e.key === 'Tab' && !e.shiftKey) {
@@ -1221,28 +1687,10 @@ function createCard(id) {
     }
   })
 
-  // formatting toolbar (prose notes only; appears while the note is focused)
-  const fmt = document.createElement('div')
-  fmt.className = 'card-fmt'
-  const fmtBtns = {}
-  ;[
-    ['b', 'B', 'Bold  (Ctrl/Cmd+B)'],
-    ['i', 'I', 'Italic  (Ctrl/Cmd+I)'],
-    ['u', 'U', 'Underline  (Ctrl/Cmd+U)'],
-    ['s', 'S', 'Strikethrough  (Ctrl/Cmd+Shift+S)'],
-  ].forEach(([mark, label, tip]) => {
-    const b = document.createElement('button')
-    b.className = 'fmt-btn fmt-' + mark
-    b.textContent = label
-    b.title = tip
-    b.addEventListener('mousedown', (e) => {
-      e.preventDefault() // keep the body's selection
-      const rich = card.activeRich || (card.body && card.body.rich)
-      if (rich) rich.toggleMark(mark)
-    })
-    fmt.appendChild(b)
-    fmtBtns[mark] = b
-  })
+  // formatting toolbar (appears while the note is focused)
+  const fmtBar = buildFmtBar(() => card.activeRich || (card.body && card.body.rich))
+  const fmt = fmtBar.el
+  const fmtBtns = fmtBar.btns
 
   // body region: either the rich-text editor or a checklist (depends on kind)
   const bodyHost = document.createElement('div')
@@ -1261,41 +1709,55 @@ function createCard(id) {
   }
   setMeta()
 
-  // corner grip for resizing (free layout only — hidden via CSS otherwise)
+  // corner grip for resizing + a dot for drawing arrows (free layout only — hidden via CSS otherwise)
   const grip = document.createElement('div')
   grip.className = 'resize-grip'
   grip.title = 'Drag to resize'
+  const linkDot = document.createElement('div')
+  linkDot.className = 'link-handle'
+  linkDot.title = 'Drag onto another note to draw an arrow'
+  linkDot.addEventListener('pointerdown', (e) => {
+    if (!freeLayout || (e.button != null && e.button !== 0 && e.pointerType === 'mouse')) return
+    edges.startLink(id, e)
+  })
 
-  el.append(top, titleEl, bodyHost, fmt, meta, grip)
+  el.append(top, titleEl, bodyHost, fmt, meta, grip, linkDot)
 
   applyNoteStyle(el, note)
   applyNoteLayout(el, note)
 
   // ---- drag to move (header) + drag to resize (grip), free layout only ----
-  // `card.interacting` lets noteObs skip re-laying-out while WE drive the inline
-  // style; `card.abortInteraction` lets destroyCard tear down an in-flight drag.
-  let pendingPos = null
+  // While dragging we drive the moving cards' inline styles and write their
+  // positions at most once per frame (origin LAYOUT: one undo step per drag),
+  // so friends see the motion live. Selected notes move together; edges and
+  // centres snap to the neighbours (hold Alt to place freely).
+  // `card.interacting` lets noteObs skip re-laying-out while WE drive the style;
+  // `card.abortInteraction` lets destroyCard tear down an in-flight drag.
+  let pendingPos = null // Map id -> { x, y }
   let pendingSize = null
   const commitPos = () => {
     if (!pendingPos) return
     const p = pendingPos
     pendingPos = null
-    if (!yNotes.has(id)) return // note was deleted mid-drag; don't resurrect keys
-    note.doc.transact(() => {
-      note.set('x', p.x)
-      note.set('y', p.y)
-    })
+    doc.transact(() => {
+      for (const [nid, v] of p) {
+        const n = yNotes.get(nid)
+        if (!n) continue // deleted mid-drag; don't resurrect keys
+        n.set('x', Math.round(v.x))
+        n.set('y', Math.round(v.y))
+      }
+    }, LAYOUT)
   }
   const commitSize = () => {
     if (!pendingSize) return
-    const s = pendingSize
+    const sz = pendingSize
     pendingSize = null
     if (!yNotes.has(id)) return
-    note.doc.transact(() => {
-      note.set('w', s.w)
-      note.set('h', s.h)
+    doc.transact(() => {
+      note.set('w', Math.round(sz.w))
+      note.set('h', Math.round(sz.h))
       if (note.get('autoGrow')) note.delete('autoGrow')
-    })
+    }, LAYOUT)
   }
   const schedulePos = rafThrottle(commitPos)
   const scheduleSize = rafThrottle(commitSize)
@@ -1305,27 +1767,66 @@ function createCard(id) {
     if (e.button != null && e.button !== 0 && e.pointerType === 'mouse') return
     if (e.target.closest('.card-tools')) return // let the gear / delete buttons work
     e.preventDefault()
+    if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      toggleSelected(id) // Shift/Ctrl/Cmd-click: add to / remove from the selection
+      return
+    }
+    if (!boardSel.has(id) && boardSel.size) setSelected([])
     bringToFront(note)
+    const k = zoom()
     const sx = e.clientX
     const sy = e.clientY
-    const ox = note.get('x') || 0
-    const oy = note.get('y') || 0
+    const group =
+      boardSel.has(id) && boardSel.size > 1 ? Array.from(boardSel).map((x) => cards.get(x)).filter(Boolean) : [card]
+    const starts = group.map((c) => ({
+      c,
+      x: canvasMode ? c.note.get('x') || 0 : c.el.offsetLeft,
+      y: canvasMode ? c.note.get('y') || 0 : c.el.offsetTop,
+      w: c.el.offsetWidth,
+      h: c.el.offsetHeight,
+    }))
+    const mine = starts.find((st) => st.c === card)
+    const others = snapTargets(new Set(group.map((c) => c.id)))
     const bw = board.clientWidth
-    const w = note.get('w') || W_DEFAULT
     try {
       top.setPointerCapture(e.pointerId)
     } catch {
       /* ignore */
     }
-    card.interacting = true
-    el.classList.add('dragging')
+    for (const c of group) {
+      c.interacting = true
+      c.el.classList.add('dragging')
+    }
+    layoutUndo.stopCapturing()
+    let moved = false
     const move = (ev) => {
-      const nx = clamp(ox + (ev.clientX - sx), 0, Math.max(0, bw - w))
-      const ny = Math.max(0, oy + (ev.clientY - sy))
-      el.style.left = nx + 'px'
-      el.style.top = ny + 'px'
-      pendingPos = { x: nx, y: ny }
+      let dx = (ev.clientX - sx) / k
+      let dy = (ev.clientY - sy) / k
+      if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 3) return
+      moved = true
+      const so = snapOpts(ev)
+      if (so) {
+        const res = snapMove({ x: mine.x + dx, y: mine.y + dy, w: mine.w, h: mine.h }, so.edges ? others : [], so)
+        dx += res.dx
+        dy += res.dy
+        guides.show(res.guides, k)
+      } else guides.clear()
+      pendingPos = new Map()
+      for (const st of starts) {
+        let nx = st.x + dx
+        let ny = st.y + dy
+        if (!canvasMode) {
+          nx = clamp(nx, 0, Math.max(0, bw - st.w))
+          ny = Math.max(0, ny)
+        }
+        nx = Math.round(nx)
+        ny = Math.round(ny)
+        st.c.el.style.left = nx + 'px'
+        st.c.el.style.top = ny + 'px'
+        pendingPos.set(st.c.id, { x: nx, y: ny })
+      }
       schedulePos()
+      edges.schedule()
     }
     const end = (ev) => {
       top.removeEventListener('pointermove', move)
@@ -1338,11 +1839,16 @@ function createCard(id) {
           /* ignore */
         }
       }
-      card.interacting = false
+      for (const c of group) {
+        c.interacting = false
+        c.el.classList.remove('dragging')
+      }
       card.abortInteraction = null
-      el.classList.remove('dragging')
+      guides.clear()
       commitPos()
+      layoutUndo.stopCapturing()
       updateBoardExtent()
+      edges.schedule()
     }
     card.abortInteraction = end
     top.addEventListener('pointermove', move)
@@ -1356,12 +1862,15 @@ function createCard(id) {
     e.preventDefault()
     e.stopPropagation()
     bringToFront(note)
+    const k = zoom()
     const sx = e.clientX
     const sy = e.clientY
-    const ow = note.get('w') || W_DEFAULT
-    const oh = note.get('h') || H_DEFAULT
-    const x = note.get('x') || 0
+    const ow = el.offsetWidth
+    const oh = el.offsetHeight
+    const x = canvasMode ? note.get('x') || 0 : el.offsetLeft
+    const y = canvasMode ? note.get('y') || 0 : el.offsetTop
     const bw = board.clientWidth
+    const others = snapTargets(new Set([id]))
     try {
       grip.setPointerCapture(e.pointerId)
     } catch {
@@ -1369,13 +1878,26 @@ function createCard(id) {
     }
     card.interacting = true
     el.classList.add('resizing')
+    layoutUndo.stopCapturing()
     const move = (ev) => {
-      const nw = clamp(ow + (ev.clientX - sx), W_MIN, Math.max(W_MIN, bw - x))
-      const nh = Math.max(H_MIN, oh + (ev.clientY - sy))
+      let nw = ow + (ev.clientX - sx) / k
+      let nh = oh + (ev.clientY - sy) / k
+      const so = snapOpts(ev)
+      if (so) {
+        const res = snapResize({ x, y, w: nw, h: nh }, so.edges ? others : [], so)
+        nw = res.w
+        nh = res.h
+        guides.show(res.guides, k)
+      } else guides.clear()
+      nw = Math.max(W_MIN, nw)
+      if (!canvasMode) nw = Math.min(nw, Math.max(W_MIN, bw - x))
+      nh = Math.round(Math.max(H_MIN, nh))
+      nw = Math.round(nw)
       el.style.width = nw + 'px'
       el.style.height = nh + 'px'
       pendingSize = { w: nw, h: nh }
       scheduleSize()
+      edges.schedule()
     }
     const end = (ev) => {
       grip.removeEventListener('pointermove', move)
@@ -1391,8 +1913,11 @@ function createCard(id) {
       card.interacting = false
       card.abortInteraction = null
       el.classList.remove('resizing')
+      guides.clear()
       commitSize()
+      layoutUndo.stopCapturing()
       updateBoardExtent()
+      edges.schedule()
     }
     card.abortInteraction = end
     grip.addEventListener('pointermove', move)
@@ -1410,6 +1935,7 @@ function createCard(id) {
     unbinds,
     body: null,
     fmtBtns,
+    fmtBar,
     titleEl,
     bodyHost,
     presenceEl,
@@ -1425,6 +1951,7 @@ function createCard(id) {
   }
 
   mountBody(card)
+  attachPhoneGestures(card)
 
   optBtn.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -1442,9 +1969,14 @@ function createCard(id) {
     if (awareness.getLocalState()?.focus === id) awareness.setLocalStateField('focus', null)
   })
 
+  top.addEventListener('dblclick', (e) => {
+    if (e.target.closest('.card-tools')) return
+    openFullscreen(id)
+  })
+
   const noteObs = (e) => {
     if (!e.keysChanged) return
-    if (e.keysChanged.has('kind') || e.keysChanged.has('layout')) {
+    if (e.keysChanged.has('kind') || e.keysChanged.has('layout') || e.keysChanged.has('view')) {
       rebuildCard(id)
       return
     }
@@ -1458,8 +1990,11 @@ function createCard(id) {
       e.keysChanged.has('fontSize') ||
       e.keysChanged.has('size') ||
       e.keysChanged.has('titleSize') ||
+      e.keysChanged.has('titleAlign') ||
+      e.keysChanged.has('pinned') ||
       e.keysChanged.has('autoGrow')
     ) {
+      if (e.keysChanged.has('pinned') && phoneMode()) scheduleReconcile()
       applyNoteStyle(el, note)
       if (card.pop) refreshPopover(card)
       if (e.keysChanged.has('autoGrow') && !card.interacting) {
@@ -1479,6 +2014,7 @@ function createCard(id) {
       applyNoteLayout(el, note)
       updateBoardExtent()
     }
+    if (['x', 'y', 'w', 'h', 'size', 'autoGrow', 'titleSize', 'fontSize'].some((k) => e.keysChanged.has(k))) edges.schedule()
     if (e.keysChanged.has('tabId')) scheduleReconcile()
   }
   note.observe(noteObs)
@@ -1488,6 +2024,7 @@ function createCard(id) {
     card.ro = new ResizeObserver(
       rafThrottle(() => {
         if (freeLayout && (collapsed.has(id) || note.get('autoGrow'))) updateBoardExtent()
+        if (freeLayout) edges.schedule()
       })
     )
     card.ro.observe(el)
@@ -1525,9 +2062,16 @@ function mountBody(card) {
   const note = card.note
   const kind = note.get('kind') || 'note'
   card.el.classList.toggle('is-todo', kind === 'todo')
+  card.el.classList.toggle('is-map', kind !== 'todo' && note.get('view') === 'map')
   if (kind === 'todo') {
+    // a checklist from before todo lines existed; the Pi converts it moments after it syncs
     ensureItems(note)
     card.body = bindTodo(card, note.get('items'))
+    return
+  }
+  if (note.get('view') === 'map') {
+    const map = createMindMap(card.bodyHost, note, { editable: card.isFull || !phoneMode() })
+    card.body = { kind: 'map', rich: null, editors: [], map, destroy: () => map.destroy() }
     return
   }
 
@@ -1538,17 +2082,12 @@ function mountBody(card) {
     bodyEl.className = 'card-body' + (book ? ' page page-' + (i ? 'r' : 'l') : '')
     bodyEl.setAttribute('data-ph', book ? (i ? 'Right page…' : 'Left page…') : 'Take a note…')
     card.bodyHost.appendChild(bodyEl)
-    const rich = bindRichText(ytext, bodyEl, {
+    const rich = bindRichText(ytext, bodyEl, editorOpts(note, {
       onChange: () => applyFilter(),
-      onLocal: () => stamp(note),
-      onLink: followLink,
-      linkCandidates,
-      arrows: () => getSettings().arrows,
-      spellcheck: () => getSettings().spellcheck,
-      onState: (marks) => {
-        for (const m of ['b', 'i', 'u', 's']) card.fmtBtns[m].classList.toggle('on', !!marks[m])
-      },
-    })
+      onState: (marks, line) => card.fmtBar.update(marks, line),
+      editable: card.isFull || !phoneMode(),
+      getRich: () => rich,
+    }))
     bodyEl.addEventListener('focus', () => {
       card.activeRich = rich
     })
@@ -1726,6 +2265,7 @@ function destroyCard(card) {
     card.pop = null
   }
   card.el.remove()
+  if (boardSel.delete(card.id)) renderAlignBar()
 }
 
 // ---- options popover (colour / size / text) ----
@@ -1735,6 +2275,7 @@ function closeAllPopovers() {
       c.pop.classList.remove('open')
     }
   }
+  if (full && full.card.pop) full.card.pop.classList.remove('open')
 }
 
 function togglePopover(card) {
@@ -1763,19 +2304,20 @@ function buildPopover(card) {
   pop.className = 'card-pop'
   pop.addEventListener('click', (e) => e.stopPropagation())
 
-  // Type (prose note vs checklist)
-  const kSec = section('Type')
+  // View: the note as text, or its bullet points as a mind map
+  const kSec = section('View')
   const kRow = document.createElement('div')
   kRow.className = 'pop-row pop-sizes'
   const kindBtns = {}
   ;[
     ['note', 'Note'],
-    ['todo', 'Checklist'],
+    ['map', 'Mind map'],
   ].forEach(([k, label]) => {
     const b = document.createElement('button')
     b.className = 'pop-btn size-btn'
     b.textContent = label
-    b.addEventListener('click', () => setNoteKind(card.note, k))
+    b.title = k === 'map' ? 'Show the bullet points as a mind map (for everyone)' : 'Show the note as text'
+    b.addEventListener('click', () => setNoteView(card.note, k))
     kRow.appendChild(b)
     kindBtns[k] = b
   })
@@ -1893,7 +2435,27 @@ function buildPopover(card) {
     else card.note.delete('autoGrow')
   })
   agRow.append(agChk, document.createTextNode(' Grow with content (no inner scroll)'))
-  oSec.append(tsRow, tsStep, agRow)
+  // title alignment (line alignment lives on the formatting toolbar)
+  const taRow = document.createElement('div')
+  taRow.className = 'pop-row pop-sizes pop-align'
+  const taLabel = document.createElement('span')
+  taLabel.className = 'pop-label'
+  taLabel.textContent = 'Title'
+  taRow.appendChild(taLabel)
+  const taBtns = {}
+  for (const al of ['left', 'center', 'right']) {
+    const b = document.createElement('button')
+    b.className = 'pop-btn size-btn'
+    b.innerHTML = ICONS[al]
+    b.title = 'Title: ' + (al === 'center' ? 'centre' : al)
+    b.addEventListener('click', () => {
+      if (al === 'left') card.note.delete('titleAlign')
+      else card.note.set('titleAlign', al)
+    })
+    taRow.appendChild(b)
+    taBtns[al] = b
+  }
+  oSec.append(tsRow, tsStep, agRow, taRow)
 
   // Move to another tab
   const mSec = section('Move to tab')
@@ -1924,13 +2486,20 @@ function buildPopover(card) {
     closeAllPopovers()
     openHistoryPanel(card.id)
   })
-  aRow.append(archiveBtn, histBtn)
+  const pinBtn = document.createElement('button')
+  pinBtn.className = 'pop-btn'
+  pinBtn.title = 'Pinned notes come first on phones and in the widget'
+  pinBtn.addEventListener('click', () => {
+    if (card.note.get('pinned')) card.note.delete('pinned')
+    else card.note.set('pinned', true)
+  })
+  aRow.append(pinBtn, archiveBtn, histBtn)
   aSec.append(aRow)
 
   pop.append(kSec, lSec, cSec, tSec, wSec, oSec, mSec, aSec)
   card.el.appendChild(pop)
   card.pop = pop
-  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, kindBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec }
+  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, kindBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec, taBtns, pinBtn }
   renderFavs(card)
 
   function section(name) {
@@ -1985,7 +2554,8 @@ function refreshPopover(card) {
   const sz = card.note.get('size') || 'm'
   for (const k of Object.keys(sizeBtns)) sizeBtns[k].classList.toggle('on', k === sz)
   const kind = card.note.get('kind') || 'note'
-  for (const k of Object.keys(kindBtns)) kindBtns[k].classList.toggle('on', k === kind)
+  const view = card.note.get('view') === 'map' ? 'map' : 'note'
+  for (const k of Object.keys(kindBtns)) kindBtns[k].classList.toggle('on', k === view)
   const { layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec } = card.popRefs
   const layout = card.note.get('layout') || 'single'
   for (const k of Object.keys(layoutBtns)) layoutBtns[k].classList.toggle('on', k === layout)
@@ -1995,6 +2565,9 @@ function refreshPopover(card) {
   tsStep.style.display = ts ? '' : 'none'
   tsVal.textContent = (ts || (card.note.get('fontSize') || FS_DEFAULT) + 1) + 'px'
   agChk.checked = !!card.note.get('autoGrow')
+  const ta = card.note.get('titleAlign') || 'left'
+  for (const k of Object.keys(card.popRefs.taBtns)) card.popRefs.taBtns[k].classList.toggle('on', k === ta)
+  card.popRefs.pinBtn.textContent = card.note.get('pinned') ? 'Unpin' : 'Pin'
   mSel.replaceChildren()
   for (const t of tabsList()) {
     if (t.kind === 'draw') continue
@@ -2223,6 +2796,8 @@ function reconcile() {
       destroyCard(card)
       cards.delete(id)
     }
+    setCanvasMode(false)
+    if (boardSel.size) setSelected([])
     empty.style.display = 'none'
     mountDraw(active.id)
     renderTabs()
@@ -2232,10 +2807,15 @@ function reconcile() {
 
   unmountDraw()
   board.classList.toggle('free', freeLayout)
+  setCanvasMode(active && active.view === 'canvas', active && active.id)
+  edges.setEnabled(freeLayout)
+  const box = container()
 
-  const order = yOrder
+  let order = yOrder
     .toArray()
     .filter((id) => yNotes.has(id) && belongsToActive(yNotes.get(id), active))
+  // the phone grid shows pinned notes first (the desktop board has no order)
+  if (phoneMode()) order = order.filter((id) => yNotes.get(id).get('pinned')).concat(order.filter((id) => !yNotes.get(id).get('pinned')))
   const wanted = new Set(order)
 
   for (const [id, card] of cards) {
@@ -2252,16 +2832,22 @@ function reconcile() {
       card = createCard(id)
       cards.set(id, card)
     }
-    const ref = prev ? prev.nextSibling : board.firstChild
-    if (ref !== card.el) board.insertBefore(card.el, ref)
+    const ref = prev ? prev.nextSibling : box.firstChild
+    if (ref !== card.el) box.insertBefore(card.el, ref)
     prev = card.el
   }
+  // the arrow layer and snap guides live with the cards
+  if (edges.el.parentNode !== box) box.appendChild(edges.el)
+  if (guides.el.parentNode !== box) box.appendChild(guides.el)
+  if (boardSel.size) setSelected(Array.from(boardSel).filter((sid) => cards.has(sid)))
+  edges.schedule()
 
   empty.style.display = order.length ? 'none' : 'flex'
   updateBoardExtent()
   renderTabs()
   renderPresence()
   applyFilter()
+  phoneRefresh()
 }
 
 yOrder.observe(scheduleReconcile)
@@ -2278,6 +2864,605 @@ yNotes.observeDeep((events) => {
     }
   }
 })
+
+// ---- full-screen editor -------------------------------------------------------
+// The note opened large (on a phone: the whole screen). It binds its own
+// editors to the same Y types as the card, so both stay live; each editor
+// undoes only its own typing. Opening pushes a history entry, so the browser /
+// Android back gesture closes it, and #note=<id>&full deep-links straight in.
+let full = null
+
+function openFullscreen(id, opts = {}) {
+  const note = yNotes.get(id)
+  if (!note || note.get('deleted')) return false
+  if (full && full.id === id) return true
+  if (full) closeFullscreenNow()
+  closeMenus()
+  closeAllPopovers()
+  if (overlayKind === 'home') closeOverlay()
+
+  const back = document.createElement('div')
+  back.className = 'full-back'
+  const el = document.createElement('article')
+  el.className = 'full card'
+  el.dataset.id = id
+
+  const top = document.createElement('div')
+  top.className = 'full-top'
+  const closeBtn = document.createElement('button')
+  closeBtn.className = 'icon-btn full-x'
+  closeBtn.title = 'Close (Esc)'
+  closeBtn.innerHTML = '<span class="full-x-back">←</span><span class="full-x-close">×</span>'
+  closeBtn.addEventListener('click', () => closeFullscreen())
+  const presenceEl = document.createElement('div')
+  presenceEl.className = 'card-presence'
+  const tools = document.createElement('div')
+  tools.className = 'card-tools full-tools'
+  const mapBtn = document.createElement('button')
+  mapBtn.className = 'icon-btn full-map'
+  mapBtn.title = 'Mind map / text'
+  mapBtn.innerHTML = svg('M8 3v4M8 7L4 11M8 7l4 4', '<circle cx="8" cy="2.6" r="1.6"/><circle cx="3.4" cy="12.6" r="1.6"/><circle cx="12.6" cy="12.6" r="1.6"/>')
+  mapBtn.addEventListener('click', () => setNoteView(note, note.get('view') === 'map' ? 'note' : 'map'))
+  const optBtn = document.createElement('button')
+  optBtn.className = 'icon-btn opt'
+  optBtn.title = 'Colour, size, layout & more'
+  optBtn.innerHTML = '&#9881;'
+  const del = document.createElement('button')
+  del.className = 'icon-btn del'
+  del.title = 'Delete note'
+  del.innerHTML = svg('M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5M7 7v4M9 7v4')
+  del.addEventListener('click', () => {
+    closeFullscreen()
+    deleteNote(id)
+  })
+  tools.append(mapBtn, optBtn, del)
+  top.append(closeBtn, presenceEl, tools)
+
+  const titleEl = document.createElement('input')
+  titleEl.className = 'card-title full-title'
+  titleEl.placeholder = 'Title'
+  titleEl.maxLength = 120
+  titleEl.spellcheck = getSettings().spellcheck
+  const bodyHost = document.createElement('div')
+  bodyHost.className = 'card-bodyhost full-bodyhost'
+  const card = {
+    el,
+    id,
+    note,
+    isFull: true,
+    body: null,
+    titleEl,
+    bodyHost,
+    presenceEl,
+    pop: null,
+    activeRich: null,
+    interacting: false,
+    unbinds: [],
+  }
+  const fmtBar = buildFmtBar(() => card.activeRich || (card.body && card.body.rich))
+  card.fmtBar = fmtBar
+  card.fmtBtns = fmtBar.btns
+  fmtBar.el.classList.add('full-fmt')
+  const meta = document.createElement('div')
+  meta.className = 'card-meta'
+  const timeEl = document.createElement('span')
+  meta.appendChild(timeEl)
+  card.timeEl = timeEl
+  card.setMeta = () => {
+    const at = note.get('lastEditedAt')
+    const by = note.get('lastEditedBy')
+    timeEl.textContent =
+      at && by && by.name && by.id !== me.id ? 'edited ' + relTime(at) + ' by ' + by.name : 'edited ' + relTime(at || note.get('created') || Date.now())
+  }
+  card.setMeta()
+  titleEl.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) && card.body && card.body.rich) {
+      e.preventDefault()
+      card.body.rich.focusEnd()
+    }
+  })
+  el.append(top, titleEl, bodyHost, fmtBar.el, meta)
+  back.appendChild(el)
+  document.body.appendChild(back)
+  document.body.classList.add('has-full')
+
+  applyFullStyle(card)
+  card.unbinds.push(bindInput(note.get('title'), titleEl, () => applyFilter()))
+  el.addEventListener('input', () => stamp(note))
+  mountBody(card)
+  optBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    togglePopover(card)
+  })
+  el.addEventListener('focusin', () => awareness.setLocalStateField('focus', id))
+  el.addEventListener('focusout', (e) => {
+    if (el.contains(e.relatedTarget)) return
+    if (awareness.getLocalState()?.focus === id) awareness.setLocalStateField('focus', null)
+  })
+  back.addEventListener('pointerdown', (e) => {
+    if (e.target === back) closeFullscreen()
+  })
+
+  const obs = (e) => {
+    if (!e.keysChanged) return
+    if (e.keysChanged.has('deleted') && note.get('deleted')) {
+      closeFullscreen()
+      ui.toast('That note was deleted.')
+      return
+    }
+    if (e.keysChanged.has('archived') && note.get('archived')) {
+      closeFullscreen()
+      return
+    }
+    if (e.keysChanged.has('tabId') && note.get('tabId') !== activeTabId && !opts.anyTab) {
+      closeFullscreen()
+      const t = tabsList().find((x) => x.id === note.get('tabId'))
+      ui.toast('Moved to ' + (t ? t.name : 'another tab'), { action: 'Open', onAction: () => goToNote(id) })
+      return
+    }
+    if (e.keysChanged.has('kind') || e.keysChanged.has('layout') || e.keysChanged.has('view')) mountBody(card)
+    if (e.keysChanged.has('lastEditedAt')) card.setMeta()
+    applyFullStyle(card)
+    if (card.pop) refreshPopover(card)
+  }
+  note.observe(obs)
+  const gone = (e) => {
+    if (e.keysChanged.has(id) && !yNotes.has(id)) closeFullscreen()
+  }
+  yNotes.observe(gone)
+  card.unbinds.push(() => note.unobserve(obs), () => yNotes.unobserve(gone))
+
+  full = { id, back, card, pushed: false }
+  if (!opts.fromHash) {
+    try {
+      history.pushState({ full: id }, '', '#note=' + id + '&full')
+      full.pushed = true
+    } catch {
+      /* ignore */
+    }
+  }
+  renderPresence()
+  requestAnimationFrame(() => {
+    if (opts.focus === false) return
+    if (!note.get('title').toString().trim()) titleEl.focus()
+    else if (card.body && card.body.rich && !phoneMode()) card.body.rich.focusEnd()
+  })
+  return true
+}
+
+function applyFullStyle(card) {
+  const note = card.note
+  const el = card.el
+  const color = note.get('color') || PAPER[0]
+  el.style.background = color
+  el.style.setProperty('--note-ink', inkFor(color))
+  el.style.setProperty('--note-ink-dim', inkDimFor(color))
+  el.style.setProperty('--note-line', hairlineFor(color))
+  el.style.setProperty('--note-fs', Math.max(15, (note.get('fontSize') || FS_DEFAULT) + 3) + 'px')
+  const ts = note.get('titleSize')
+  if (ts) el.style.setProperty('--title-fs', ts + 6 + 'px')
+  else el.style.removeProperty('--title-fs')
+  el.classList.toggle('book', note.get('layout') === 'book')
+  card.titleEl.style.textAlign = note.get('titleAlign') || ''
+}
+
+function closeFullscreenNow() {
+  if (!full) return
+  const f = full
+  full = null
+  const card = f.card
+  if (card.pop) card.pop.remove()
+  if (card.body) card.body.destroy()
+  card.unbinds.forEach((fn) => fn())
+  f.back.remove()
+  document.body.classList.remove('has-full')
+  if (awareness.getLocalState()?.focus === f.id) awareness.setLocalStateField('focus', null)
+  if (phoneMode()) phoneRefresh()
+}
+
+function closeFullscreen() {
+  if (!full) return
+  const f = full
+  if (f.pushed && history.state && history.state.full === f.id) {
+    ignoreHash = true
+    history.back() // popstate closes it
+    setTimeout(() => {
+      ignoreHash = false
+      if (full === f) closeFullscreenNow()
+    }, 400)
+    return
+  }
+  closeFullscreenNow()
+  try {
+    history.replaceState(null, '', location.pathname + location.search)
+  } catch {
+    /* ignore */
+  }
+}
+
+let ignoreHash = false
+window.addEventListener('popstate', () => {
+  if (full && !(history.state && history.state.full === full.id)) closeFullscreenNow()
+})
+// capture on window: runs before the handlers that close menus/popovers, so one
+// Escape closes the innermost thing only
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.key !== 'Escape' || !full) return
+    if (document.querySelector('.card-pop.open, .menu, .rb-picker, .lightbox, .dlg-back, .mm-input, .edge-pop') || !overlay.hidden) return
+    e.preventDefault()
+    closeFullscreen()
+  },
+  true
+)
+
+// ---- phone: Google Keep style -----------------------------------------------
+// Below 560px the board is a grid of read-only previews, pinned notes first.
+// Tap a note to edit it full screen; long-press to select (colour, pin,
+// archive, delete, move); swipe one sideways to archive it. Tabs live in a
+// drawer and new notes come from the round + button. The phone never moves or
+// resizes notes, so a phone session leaves the desktop corkboard as it was.
+const phoneBar = document.getElementById('phone-bar')
+const drawer = document.getElementById('drawer')
+const fab = document.getElementById('fab')
+const phoneTitle = document.getElementById('phone-title')
+const selBar = document.getElementById('sel-bar')
+const picked = new Set()
+
+function phoneRefresh() {
+  const on = phoneMode()
+  document.body.classList.toggle('phone', on)
+  board.classList.toggle('phone-grid', on)
+  board.classList.toggle('one-col', on && Number(getSettings().phoneCols) === 1)
+  const t = activeTab()
+  phoneTitle.textContent = t ? t.name : 'notes'
+  fab.hidden = !on || !!(t && t.kind === 'draw')
+  phoneBar.hidden = !on
+  if (!on && picked.size) picked.clear()
+  for (const id of Array.from(picked)) if (!cards.has(id)) picked.delete(id)
+  for (const [id, c] of cards) c.el.classList.toggle('picked', picked.has(id))
+  renderSelBar()
+  if (!drawer.hidden) renderDrawer()
+}
+
+function attachPhoneGestures(card) {
+  const el = card.el
+  let start = null
+  let timer = null
+  let longFired = false
+  let swiping = false
+  const SKIP = '.rb-check, .rb-fold, .rb-more, .rb-play, .rb-insta, .rb-frame, a.rb-link, .rb-embed img, .card-pop'
+  el.addEventListener('pointerdown', (e) => {
+    if (!phoneMode() || (e.button != null && e.button > 0)) return
+    if (e.target.closest(SKIP)) return
+    start = { x: e.clientX, y: e.clientY, id: e.pointerId }
+    longFired = false
+    swiping = false
+    timer = setTimeout(() => {
+      longFired = true
+      if (navigator.vibrate) navigator.vibrate(12)
+      togglePicked(card.id, true)
+    }, 480)
+  })
+  el.addEventListener('pointermove', (e) => {
+    if (!start || e.pointerId !== start.id) return
+    const dx = e.clientX - start.x
+    const dy = e.clientY - start.y
+    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) clearTimeout(timer)
+    if (!swiping && !picked.size && !longFired && Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      swiping = true
+      try {
+        el.setPointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      el.classList.add('swiping')
+    }
+    if (swiping) {
+      el.style.transform = `translateX(${dx}px) rotate(${dx / 40}deg)`
+      el.style.opacity = String(Math.max(0.2, 1 - Math.abs(dx) / (el.offsetWidth * 1.2)))
+    }
+  })
+  const end = (e) => {
+    if (!start || (e && e.pointerId !== start.id)) return
+    clearTimeout(timer)
+    const dx = e.clientX - start.x
+    const dy = e.clientY - start.y
+    const wasSwipe = swiping
+    start = null
+    swiping = false
+    el.classList.remove('swiping')
+    if (wasSwipe) {
+      if (e.type === 'pointerup' && Math.abs(dx) > el.offsetWidth * 0.33) {
+        el.style.transition = 'transform .16s ease-out, opacity .16s'
+        el.style.transform = `translateX(${dx > 0 ? 120 : -120}%)`
+        el.style.opacity = '0'
+        setTimeout(() => setNoteArchived(card.id, true), 160)
+      } else {
+        el.style.transform = ''
+        el.style.opacity = ''
+      }
+      return
+    }
+    if (longFired || e.type !== 'pointerup') return
+    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) return
+    if (picked.size) togglePicked(card.id)
+    else openFullscreen(card.id)
+  }
+  el.addEventListener('pointerup', end)
+  el.addEventListener('pointercancel', end)
+  el.addEventListener('contextmenu', (e) => {
+    if (phoneMode()) e.preventDefault()
+  })
+}
+
+function togglePicked(id, on) {
+  const v = on != null ? on : !picked.has(id)
+  if (v) picked.add(id)
+  else picked.delete(id)
+  phoneRefresh()
+}
+function clearPicked() {
+  picked.clear()
+  phoneRefresh()
+}
+
+function swatchSheet(anchor, colors, onPick) {
+  closeMenus()
+  const m = document.createElement('div')
+  m.className = 'menu swatch-menu'
+  m.addEventListener('click', (e) => e.stopPropagation())
+  for (const c of colors) {
+    const b = document.createElement('button')
+    b.className = 'pop-swatch'
+    b.style.background = c
+    b.title = c
+    b.addEventListener('click', () => {
+      closeMenus()
+      onPick(c)
+    })
+    m.appendChild(b)
+  }
+  document.body.appendChild(m)
+  const r = anchor.getBoundingClientRect()
+  m.style.left = Math.max(6, Math.min(r.left, window.innerWidth - m.offsetWidth - 6)) + 'px'
+  m.style.top = r.bottom + 6 + 'px'
+  openMenus.push(m)
+}
+
+function renderSelBar() {
+  const n = picked.size
+  document.body.classList.toggle('selecting', n > 0)
+  selBar.hidden = n === 0
+  if (!n) return
+  selBar.replaceChildren()
+  const ids = Array.from(picked)
+  const notes = ids.map((id) => yNotes.get(id)).filter(Boolean)
+  const b = (html, title, fn, cls) => {
+    const x = document.createElement('button')
+    x.className = 'sel-btn' + (cls ? ' ' + cls : '')
+    x.innerHTML = html
+    x.title = title
+    x.setAttribute('aria-label', title)
+    x.addEventListener('click', (e) => {
+      e.stopPropagation()
+      fn(x)
+    })
+    selBar.appendChild(x)
+    return x
+  }
+  b('✕', 'Done', clearPicked, 'sel-x')
+  const count = document.createElement('span')
+  count.className = 'sel-count'
+  count.textContent = n + ' selected'
+  selBar.appendChild(count)
+  const allPinned = notes.every((nn) => nn.get('pinned'))
+  b('🎨', 'Colour', (x) =>
+    swatchSheet(x, PAPER.concat(getFavorites()), (c) => doc.transact(() => notes.forEach((nn) => nn.set('color', c))))
+  )
+  b(allPinned ? '📍' : '📌', allPinned ? 'Unpin' : 'Pin to the top', () => {
+    doc.transact(() => notes.forEach((nn) => (allPinned ? nn.delete('pinned') : nn.set('pinned', true))))
+    clearPicked()
+  })
+  b('🗄', 'Archive', () => {
+    doc.transact(() => notes.forEach((nn) => nn.set('archived', true)))
+    clearPicked()
+    ui.toast(ids.length + ' archived', {
+      action: 'Undo',
+      onAction: () => doc.transact(() => ids.forEach((id) => yNotes.get(id) && yNotes.get(id).delete('archived'))),
+    })
+  })
+  b('🗑', 'Delete', () => {
+    const now = Date.now()
+    doc.transact(() => notes.forEach((nn) => nn.set('deleted', now)))
+    clearPicked()
+    ui.toast(ids.length + ' moved to trash', {
+      action: 'Undo',
+      ms: 7000,
+      onAction: () => ids.forEach((id) => restoreNote(id)),
+    })
+  })
+  b('⇄', 'Move to tab', (x) =>
+    ui.menu(
+      x,
+      tabsList()
+        .filter((t) => t.kind !== 'draw' && !t.archived && t.id !== activeTabId)
+        .map((t) => ({
+          label: t.name,
+          onClick: () => {
+            doc.transact(() => notes.forEach((nn) => nn.set('tabId', t.id)))
+            clearPicked()
+            ui.toast('Moved to ' + t.name, { action: 'Open', onAction: () => setActiveTab(t.id) })
+          },
+        })),
+      { align: 'right' }
+    )
+  )
+}
+
+function renderDrawer() {
+  const panel = drawer.querySelector('.drawer-panel')
+  panel.replaceChildren()
+  const head = document.createElement('div')
+  head.className = 'drawer-head'
+  head.innerHTML = '<span class="brand-dot"></span><span class="brand-name">notes</span>'
+  panel.appendChild(head)
+  const counts = new Map()
+  yNotes.forEach((n) => {
+    if (isHidden(n)) return
+    const t = n.get('tabId')
+    counts.set(t, (counts.get(t) || 0) + 1)
+  })
+  const row = (icon, label, sub, fn, cls) => {
+    const b = document.createElement('button')
+    b.className = 'drawer-item' + (cls ? ' ' + cls : '')
+    const i = document.createElement('span')
+    i.className = 'drawer-icon'
+    i.textContent = icon
+    const l = document.createElement('span')
+    l.className = 'drawer-label'
+    l.textContent = label
+    b.append(i, l)
+    if (sub != null) {
+      const c = document.createElement('span')
+      c.className = 'drawer-count'
+      c.textContent = sub
+      b.appendChild(c)
+    }
+    b.addEventListener('click', () => fn(b))
+    panel.appendChild(b)
+    return b
+  }
+  const sec = (t) => {
+    const h = document.createElement('div')
+    h.className = 'drawer-h'
+    h.textContent = t
+    panel.appendChild(h)
+  }
+  sec('Tabs')
+  for (const t of tabsList().filter((x) => !x.archived)) {
+    row(t.kind === 'draw' ? '✎' : '☰', t.name, t.kind === 'draw' ? '' : String(counts.get(t.id) || 0), () => {
+      closeDrawer()
+      setActiveTab(t.id)
+    }, t.id === activeTabId ? 'on' : '')
+  }
+  row('+', 'New list', null, () => {
+    closeDrawer()
+    addTab('notes')
+  }, 'drawer-add')
+  row('+', 'New sketch', null, () => {
+    closeDrawer()
+    addTab('draw')
+  }, 'drawer-add')
+  sec('More')
+  row('⌂', 'Home, search & archived tabs', null, () => {
+    closeDrawer()
+    openHome()
+  })
+  const hidden = activeTab() ? hiddenCounts(activeTab().id) : { trash: 0, archived: 0 }
+  row('🗄', 'Archived & trash in this tab', hidden.trash + hidden.archived ? String(hidden.trash + hidden.archived) : '', () => {
+    closeDrawer()
+    if (activeTab()) openHiddenPanel(activeTab().id)
+  })
+  const cols = Number(getSettings().phoneCols) === 1 ? 1 : 2
+  row(cols === 1 ? '▦' : '▤', cols === 1 ? 'Show two columns' : 'Show one column', null, () => {
+    setSetting('phoneCols', cols === 1 ? 2 : 1)
+    phoneRefresh()
+  })
+  row('⚙', 'Settings & backup', null, () => {
+    closeDrawer()
+    openSettingsMenu(document.getElementById('settings'))
+  })
+}
+function openDrawer() {
+  renderDrawer()
+  drawer.hidden = false
+  requestAnimationFrame(() => drawer.classList.add('open'))
+}
+function closeDrawer() {
+  drawer.classList.remove('open')
+  setTimeout(() => {
+    if (!drawer.classList.contains('open')) drawer.hidden = true
+  }, 180)
+}
+drawer.addEventListener('click', (e) => {
+  if (e.target === drawer) closeDrawer()
+})
+
+function newPhoneNote(kind) {
+  const id = createNote(PAPER[Math.floor(Math.random() * 4)])
+  if (kind === 'todo') {
+    const n = yNotes.get(id)
+    doc.transact(() => replaceAllLines(n.get('body'), [{ text: '', attrs: { lt: 'todo' } }]))
+  }
+  setTimeout(() => openFullscreen(id), 30)
+}
+;(() => {
+  let t = null
+  let long = false
+  fab.addEventListener('pointerdown', () => {
+    long = false
+    t = setTimeout(() => {
+      long = true
+      if (navigator.vibrate) navigator.vibrate(12)
+      ui.menu(
+        fab,
+        [
+          { icon: '✎', label: 'New note', onClick: () => newPhoneNote('note') },
+          { icon: '☑', label: 'New checklist', onClick: () => newPhoneNote('todo') },
+          'sep',
+          { icon: '☰', label: 'New list tab', onClick: () => addTab('notes') },
+          { icon: '✎', label: 'New sketch tab', onClick: () => addTab('draw') },
+        ],
+        { align: 'right' }
+      )
+    }, 450)
+  })
+  const cancel = () => clearTimeout(t)
+  fab.addEventListener('pointerup', cancel)
+  fab.addEventListener('pointercancel', cancel)
+  fab.addEventListener('pointerleave', cancel)
+  fab.addEventListener('contextmenu', (e) => e.preventDefault())
+  fab.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (long) return
+    newPhoneNote('note')
+  })
+})()
+
+phoneBar.addEventListener('click', (e) => {
+  const b = e.target.closest('button')
+  if (!b) return
+  e.stopPropagation()
+  const act = b.dataset.act
+  if (act === 'tabs') openDrawer()
+  else if (act === 'home') toggleHome()
+  else if (act === 'search') {
+    document.body.classList.add('searching')
+    search.focus()
+  } else if (act === 'settings') openSettingsMenu(b)
+})
+phoneTitle.addEventListener('click', (e) => {
+  e.stopPropagation()
+  openDrawer()
+})
+search.addEventListener('blur', () => {
+  if (!search.value.trim()) document.body.classList.remove('searching')
+})
+
+// keep the full-screen editor and its toolbar above the on-screen keyboard
+if (window.visualViewport) {
+  const vv = window.visualViewport
+  const upd = () => {
+    const root = document.documentElement.style
+    root.setProperty('--vvh', vv.height + 'px')
+    root.setProperty('--vvtop', vv.offsetTop + 'px')
+  }
+  vv.addEventListener('resize', upd)
+  vv.addEventListener('scroll', upd)
+  upd()
+}
 
 // ---- overlays: home page, hidden notes (trash / archived), history ----------
 const overlay = document.getElementById('overlay')
@@ -2330,14 +3515,7 @@ function toggleHome() {
 }
 
 function noteSnippet(n, max = 90) {
-  const kind = n.get('kind') || 'note'
-  let text = ''
-  if (kind === 'todo') {
-    const items = n.get('items')
-    text = items ? items.toArray().map((it) => (it.get('done') ? '☑ ' : '☐ ') + it.get('text').toString()).join('  ') : ''
-  } else text = n.get('body').toString()
-  text = text.replace(/\s+/g, ' ').trim()
-  return text.length > max ? text.slice(0, max - 1) + '…' : text
+  return snippetOf(n, max)
 }
 
 // Home: every tab as a card (with who is on it), archived tabs below, and a
@@ -2418,6 +3596,12 @@ function openHome() {
       sub.textContent =
         t.kind === 'draw' ? 'Sketch board' : count + (count === 1 ? ' note' : ' notes') + (at ? ' · edited ' + relTime(at) : '')
       c.append(top, sub)
+      if (backup.isExcluded(t.id)) {
+        const nb = document.createElement('div')
+        nb.className = 'home-tab-flag'
+        nb.textContent = 'Not in this device’s backups'
+        c.appendChild(nb)
+      }
       if (t.archived) {
         const un = document.createElement('span')
         un.className = 'home-unarchive'
@@ -2673,50 +3857,23 @@ function stripMd(text) {
     .replace(/<\/?u>/g, '')
 }
 
+// Write an old version back as an ordinary edit (so it is itself undoable by
+// restoring a newer one). Lists, checkboxes and headings come back from their
+// Markdown form; bold/italic marks are dropped.
 function restoreVersion(noteId, ver) {
   const n = yNotes.get(noteId)
   if (!n) return
   const title = stripMd(ver.title)
-  const bodyText = stripMd(ver.body)
-  const body2Text = stripMd(ver.body2)
   doc.transact(() => {
     const t = n.get('title')
     if (t.length) t.delete(0, t.length)
     if (title) t.insert(0, title)
-    if ((n.get('kind') || 'note') === 'todo' || /^- \[[ xX]\] /m.test(bodyText)) {
-      // rebuild the checklist from "- [ ] item" lines
-      const arr = new Y.Array()
-      for (const line of bodyText.split('\n')) {
-        const m = /^- \[([ xX])\] (.*)$/.exec(line)
-        if (!m) continue
-        const it = new Y.Map()
-        const tx = new Y.Text()
-        it.set('id', genId())
-        it.set('text', tx)
-        it.set('done', m[1] !== ' ')
-        arr.push([it])
-        if (m[2]) tx.insert(0, m[2])
-      }
-      if (arr.length === 0) {
-        const it = new Y.Map()
-        it.set('id', genId())
-        it.set('text', new Y.Text())
-        it.set('done', false)
-        arr.push([it])
-      }
-      n.set('items', arr)
-      n.set('kind', 'todo')
-    } else {
-      const b = n.get('body')
-      if (b.length) b.delete(0, b.length)
-      if (bodyText) b.insert(0, bodyText, {})
-      if (n.get('kind') === 'todo') n.set('kind', 'note')
-      if (body2Text) {
-        const b2 = n.get('body2') || ensureBody2(n)
-        if (b2.length) b2.delete(0, b2.length)
-        b2.insert(0, body2Text, {})
-        n.set('layout', 'book')
-      }
+    if (n.get('kind') === 'todo') n.set('kind', 'note')
+    replaceAllLines(n.get('body'), markdownToLines(ver.body || ''))
+    if (ver.body2) {
+      const b2 = n.get('body2') || ensureBody2(n)
+      replaceAllLines(b2, markdownToLines(ver.body2))
+      n.set('layout', 'book')
     }
     n.set('lastEditedAt', Date.now())
     n.set('lastEditedBy', { id: me.id, name: me.name })
@@ -2751,7 +3908,9 @@ function renderPresence() {
     if (!byNote.has(st.focus)) byNote.set(st.focus, [])
     byNote.get(st.focus).push(st.user)
   }
-  for (const [id, card] of cards) {
+  const all = Array.from(cards)
+  if (full) all.push([full.id, full.card])
+  for (const [id, card] of all) {
     const editors = byNote.get(id) || []
     card.el.classList.toggle('active', editors.length > 0)
     card.presenceEl.innerHTML = ''
@@ -2780,8 +3939,19 @@ function applyFilter() {
     if (!n) continue
     card.el.classList.toggle('hidden', !noteHay(n).includes(q))
   }
+  edges.schedule()
+  if (canvasMode) viewport.refreshMap()
 }
-search.addEventListener('input', applyFilter)
+// while searching, folded lines are shown (so a match can't hide inside a fold)
+let wasSearching = false
+search.addEventListener('input', () => {
+  applyFilter()
+  const now = !!search.value.trim()
+  if (now !== wasSearching) {
+    wasSearching = now
+    for (const [, c] of cards) if (c.body && c.body.editors) c.body.editors.forEach((r) => r.refresh())
+  }
+})
 
 // ---- toolbar actions ----
 addBtn.addEventListener('click', () => {
@@ -2813,8 +3983,11 @@ function openSettingsMenu(anchor) {
   menu.className = 'menu settings-menu'
   menu.addEventListener('click', (e) => e.stopPropagation())
   const r = anchor.getBoundingClientRect()
-  menu.style.top = r.bottom + 6 + 'px'
-  menu.style.right = Math.max(8, window.innerWidth - r.right) + 'px'
+  const fromBottom = r.width && r.top > window.innerHeight / 2 // e.g. the phone's bottom bar
+  if (!r.width) menu.style.top = '56px' // anchor hidden (phone): just below the top bar
+  else if (fromBottom) menu.style.bottom = window.innerHeight - r.top + 6 + 'px'
+  else menu.style.top = r.bottom + 6 + 'px'
+  menu.style.right = (r.width ? Math.max(8, window.innerWidth - r.right) : 8) + 'px'
   menu.style.left = 'auto'
 
   const head = (t) => {
@@ -2844,6 +4017,8 @@ function openSettingsMenu(anchor) {
   check('Spell-check underline', 'spellcheck', 'Red squiggles in notes')
   check('Smart arrows', 'arrows', '-> becomes →, -- becomes —')
   check('Keep an offline copy', 'offline', 'The board opens even with the Pi off')
+  check('Snap notes to each other', 'snap', 'Edges and centres line up while dragging (hold Alt to place freely)')
+  check('Snap to a grid', 'grid', 'Every ' + (st.gridSize || 20) + ' px')
   const launch = document.createElement('label')
   launch.className = 'menu-check'
   const lc = document.createElement('input')
@@ -2855,27 +4030,62 @@ function openSettingsMenu(anchor) {
   launch.append(lc, ls)
   menu.appendChild(launch)
 
-  head('Backup')
+  head('Backup on this device')
+  const btn = (label, fn, cls) => {
+    const b = document.createElement('button')
+    b.className = 'menu-item' + (cls ? ' ' + cls : '')
+    b.textContent = label
+    b.addEventListener('click', () => {
+      closeMenus()
+      fn()
+    })
+    menu.appendChild(b)
+    return b
+  }
   const link = (label, href) => {
     const a = document.createElement('a')
-    a.className = 'menu-item'
+    a.className = 'menu-item menu-sub'
     a.href = href
     a.textContent = label
     a.addEventListener('click', () => closeMenus())
     menu.appendChild(a)
   }
-  link('⬇  Download all notes (Markdown)', '/api/export.md')
-  link('⬇  Download all notes (JSON)', '/api/export.json')
+  btn('⬇  Download all notes (Markdown)', () => backup.download(doc, 'md'), 'backup-md')
+  btn('⬇  Download all notes (JSON)', () => backup.download(doc, 'json'), 'backup-json')
+  if (folderBackup) {
+    const st = folderBackup.status()
+    if (st.state === 'off') btn('📁  Auto-save to a folder…', () => folderBackup.choose(), 'backup-folder')
+    else {
+      if (st.state === 'paused') btn('▶  Resume saving to "' + st.folder + '"', () => folderBackup.resume(), 'backup-folder')
+      btn('■  Stop saving to "' + st.folder + '"', () => folderBackup.stop(), 'backup-folder')
+    }
+    const fs = document.createElement('div')
+    fs.className = 'menu-note backup-status'
+    fs.textContent = folderStatusText(st)
+    menu.appendChild(fs)
+  }
+  const ex = backup.excludedTabs()
+  const exNames = tabsList()
+    .filter((t) => ex.has(t.id))
+    .map((t) => t.name)
   const note = document.createElement('div')
   note.className = 'menu-note'
-  note.textContent = 'The Pi also keeps a readable copy in data/export/ with full history.'
+  note.textContent =
+    (exNames.length ? 'Left out here: ' + exNames.join(', ') + ' (tab menu ⋯). ' : '') +
+    'Built from this device, so it works with the Pi off. The Pi also keeps a full copy with history in data/export/.'
   menu.appendChild(note)
+  link('⬇  Download from the Pi (everything, Markdown)', '/api/export.md')
+  link('⬇  Download from the Pi (everything, JSON)', '/api/export.json')
 
   document.body.appendChild(menu)
   openMenus.push(menu)
 }
 
 onSettingChange((key, value) => {
+  if (key === 'backupExclude') {
+    if (folderBackup) folderBackup.schedule()
+    renderTabs()
+  }
   if (key === 'spellcheck') {
     for (const [, c] of cards) {
       c.titleEl.spellcheck = value
@@ -2885,6 +4095,32 @@ onSettingChange((key, value) => {
   } else if (key === 'offline') applyOfflineSetting()
 })
 
+// ---- this device's own backup to a folder (Chromium desktop) ----
+function folderStatusText(st) {
+  if (st.state === 'off') return 'Keeps a readable copy in a folder on this computer, updated as you edit.'
+  if (st.state === 'paused') return 'Paused: the browser needs your OK again after a restart.'
+  if (st.error) return 'Last try failed: ' + st.error
+  return st.lastSaved ? 'Saved to "' + st.folder + '" ' + relTime(st.lastSaved) : 'Saving to "' + st.folder + '"…'
+}
+let folderPausedToast = false
+const folderBackup = backup.folderSupported
+  ? backup.createFolderBackup(doc, {
+      onStatus: (st) => {
+        if (st.state === 'paused' && !folderPausedToast) {
+          folderPausedToast = true
+          ui.toast('Backups to "' + st.folder + '" are paused.', {
+            action: 'Resume',
+            ms: 15000,
+            onAction: () => folderBackup.resume(),
+          })
+        }
+        if (st.state === 'on') folderPausedToast = false
+        const el = document.querySelector('.backup-status')
+        if (el) el.textContent = folderStatusText(st)
+      },
+    })
+  : null
+
 // Keep relative timestamps fresh.
 setInterval(() => {
   for (const [, card] of cards) card.setMeta()
@@ -2893,16 +4129,50 @@ setInterval(() => {
 // Run the one-time migration only after the server's state has arrived, so we
 // never race a populated board into a duplicate default tab. If we never reach
 // the server (offline first run), seed a tab after a short grace period.
+// deep link: #note=<id> opens that note's tab and flashes it; #note=<id>&full
+// opens it full screen
+function followHash(initial) {
+  if (location.hash === '#new') {
+    // the installed app's "New note" shortcut
+    try {
+      history.replaceState(null, '', location.pathname + location.search)
+    } catch {
+      /* ignore */
+    }
+    const t = activeTab()
+    if (t && t.kind === 'draw') {
+      const n = tabsList().find((x) => x.kind !== 'draw' && !x.archived)
+      if (n) setActiveTab(n.id)
+    }
+    const id = createNote(PAPER[Math.floor(Math.random() * 4)])
+    setTimeout(() => openFullscreen(id), 50)
+    return
+  }
+  const tm = /#tab=([A-Za-z0-9_-]+)/.exec(location.hash)
+  if (tm) {
+    // the Android widget's "open this tab"
+    if (tabsList().some((t) => t.id === tm[1])) setActiveTab(tm[1])
+    try {
+      history.replaceState(null, '', location.pathname + location.search)
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+  const m = /#note=([A-Za-z0-9_-]+)(&full)?/.exec(location.hash)
+  if (!m) return
+  if (full && full.id === m[1] && m[2]) return
+  goToNote(m[1], { unarchive: false, keepHash: !!m[2] })
+  if (m[2]) openFullscreen(m[1], { fromHash: true, focus: !initial })
+}
 provider.onSync(() => {
   migrateBoard()
-  // deep link: #note=<id> opens that note's tab and flashes it
-  const m = /#note=([A-Za-z0-9_-]+)/.exec(location.hash)
-  if (m) goToNote(m[1], { unarchive: false })
+  followHash(true)
 })
 awareness.setLocalStateField('tab', activeTabId)
 window.addEventListener('hashchange', () => {
-  const m = /#note=([A-Za-z0-9_-]+)/.exec(location.hash)
-  if (m) goToNote(m[1], { unarchive: false })
+  if (ignoreHash) return
+  followHash(false)
 })
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('/sw.js').catch(() => {})

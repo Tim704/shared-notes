@@ -18,10 +18,10 @@ function run(cmd, args, env, opts = {}) {
   })
 }
 
-async function startServer(port, dataDir) {
+async function startServer(port, dataDir, extraEnv = {}) {
   const p = spawn('node', ['server.js'], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), NOTES_DATA_DIR: dataDir, NOTES_COMMIT_MS: '2000', NOTES_MIRROR_MS: '500' },
+    env: { ...process.env, PORT: String(port), NOTES_DATA_DIR: dataDir, NOTES_COMMIT_MS: '2000', NOTES_MIRROR_MS: '500', ...extraEnv },
     stdio: ['ignore', 'pipe', 'inherit'],
   })
   await new Promise((resolve) => {
@@ -46,6 +46,17 @@ for (const suite of ['e2e', 'features', 'api']) {
   const srv = await startServer(port, dataDir)
   console.log(`\n=== ${suite} (port ${port}) ===`)
   const code = await run('node', [`test/${suite}.mjs`], { PORT: String(port), NOTES_EXPORT_DIR: path.join(dataDir, 'export') })
+  if (code !== 0) failed++
+  await stop(srv)
+  port++
+}
+
+// password protection (a server started with NOTES_PASSWORD)
+{
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-test-'))
+  const srv = await startServer(port, dataDir, { NOTES_PASSWORD: 'test-pass' })
+  console.log(`\n=== auth (port ${port}) ===`)
+  const code = await run('node', ['test/auth.mjs'], { PORT: String(port), NOTES_PASSWORD: 'test-pass' })
   if (code !== 0) failed++
   await stop(srv)
   port++

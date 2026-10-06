@@ -1,5 +1,6 @@
 import * as Y from 'yjs'
 import { connect, sleep } from './lib.mjs'
+import { linesOf } from '../shared/lines.js'
 
 // Exercises the v2 data model through the real server: tabs, per-note fields,
 // rich-text formatting attributes, and collaborative drawing strokes all sync.
@@ -130,25 +131,77 @@ A.doc.transact(() => {
   A.doc.getMap('notes').set(todoId, n)
   A.doc.getArray('order').unshift([todoId])
 })
-await sleep(200)
+await sleep(700) // the server migrates old whole-note checklists to todo lines
 const bTodo = B.doc.getMap('notes').get(todoId)
-check('B checklist note has kind=todo', bTodo && bTodo.get('kind') === 'todo')
-const bItems = bTodo && bTodo.get('items')
+check('server migrated the checklist note to kind=note', bTodo && bTodo.get('kind') === 'note' && bTodo.get('migratedTodo') === true)
+const bLines = linesOf(bTodo.get('body'))
 check(
-  'B sees one item with its text',
-  bItems && bItems.length === 1 && bItems.get(0).get('text').toString() === 'Buy milk'
+  'B sees one todo line with its text and the item id',
+  bLines.length === 1 && bLines[0].text === 'Buy milk' && bLines[0].attrs.lt === 'todo' && bLines[0].attrs.bid === 'i1'
 )
-check('B item starts not done', bItems.get(0).get('done') === false)
+check('B todo starts not done', !bLines[0].attrs.done)
 
-// ticking the item syncs
+// ticking is a format on the line break, and syncs
 A.doc.transact(() => {
-  A.doc.getMap('notes').get(todoId).get('items').get(0).set('done', true)
+  const body = A.doc.getMap('notes').get(todoId).get('body')
+  const L = linesOf(body)[0]
+  body.format(L.start + L.len, 1, { done: true })
 })
 await sleep(200)
-check(
-  'B sees the item checked',
-  B.doc.getMap('notes').get(todoId).get('items').get(0).get('done') === true
-)
+check('B sees the line ticked', linesOf(B.doc.getMap('notes').get(todoId).get('body'))[0].attrs.done === true)
+
+// --- line model: lists, indent, alignment and headings live on the line breaks ---
+const lineNote = 'note_' + Math.random().toString(36).slice(2, 8)
+A.doc.transact(() => {
+  const n = new Y.Map()
+  const body = new Y.Text()
+  n.set('title', new Y.Text())
+  n.set('body', body)
+  n.set('tabId', tabId)
+  A.doc.getMap('notes').set(lineNote, n)
+  A.doc.getArray('order').unshift([lineNote])
+  body.insert(0, 'Plan', { b: true })
+  body.insert(4, '\n', { lt: 'h', al: 'center' })
+  body.insert(5, 'one', {})
+  body.insert(8, '\n', { lt: 'li', mk: 'decimal', bid: 'x1' })
+  body.insert(9, 'sub', {})
+  body.insert(12, '\n', { lt: 'li', mk: 'alpha', ind: 1, bid: 'x2' })
+  body.insert(13, 'buy', {})
+  body.insert(16, '\n', { lt: 'todo', bid: 'x3' })
+})
+await sleep(200)
+const bl = linesOf(B.doc.getMap('notes').get(lineNote).get('body'))
+check('B sees four lines', bl.length === 4 && bl.map((l) => l.text).join('|') === 'Plan|one|sub|buy')
+check('heading + centre alignment sync', bl[0].attrs.lt === 'h' && bl[0].attrs.al === 'center')
+check('inline bold stays on the characters, not the line', bl[0].runs[0].marks.b === true && !bl[0].attrs.b)
+check('numbered list + nested letters sync', bl[1].attrs.mk === 'decimal' && bl[2].attrs.mk === 'alpha' && bl[2].attrs.ind === 1)
+check('a todo line sits among the others', bl[3].attrs.lt === 'todo' && bl[3].attrs.bid === 'x3')
+
+// concurrent: A ticks the todo while B types into the first line
+A.doc.transact(() => {
+  const body = A.doc.getMap('notes').get(lineNote).get('body')
+  const L = linesOf(body)[3]
+  body.format(L.start + L.len, 1, { done: true })
+})
+B.doc.transact(() => B.doc.getMap('notes').get(lineNote).get('body').insert(4, '!', { b: true }))
+await sleep(250)
+const al = linesOf(A.doc.getMap('notes').get(lineNote).get('body'))
+const bl2 = linesOf(B.doc.getMap('notes').get(lineNote).get('body'))
+check('concurrent tick + typing converge', al[0].text === 'Plan!' && al[3].attrs.done === true && JSON.stringify(al) === JSON.stringify(bl2))
+
+// --- connector arrows between notes ---
+A.doc.transact(() => {
+  const e = new Y.Map()
+  e.set('id', 'e1')
+  e.set('from', id)
+  e.set('to', lineNote)
+  e.set('label', 'leads to')
+  e.set('style', 'dashed')
+  A.doc.getArray('edges').push([e])
+})
+await sleep(200)
+const be = B.doc.getArray('edges').toArray()
+check('B sees the arrow', be.length === 1 && be[0].get('from') === id && be[0].get('label') === 'leads to')
 
 // --- sketch text label syncs (lives alongside strokes) ---
 A.doc.transact(() => {

@@ -3,3 +3,4 @@ data/*.bin
 data/export/
 npm-debug.log*
 .DS_Store
+visual-review/

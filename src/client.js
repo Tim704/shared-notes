@@ -1,3 +1,4 @@
+import { icon as makeIcon, iconHTML, iconLabel, mountIcons } from './icons.js'
 import * as Y from 'yjs'
 import * as syncProtocol from 'y-protocols/sync'
 import * as awarenessProtocol from 'y-protocols/awareness'
@@ -17,7 +18,8 @@ import { createFoldStore } from './folds.js'
 import * as backup from './backup.js'
 import { createMindMap } from './mindmap.js'
 import { createViewport } from './viewport.js'
-import { createEdges } from './edges.js'
+import { createInk } from './ink.js'
+import { createRibbon, setPressed } from './ribbon.js'
 import { createGuides, snapMove, snapResize, alignRects, distributeRects, matchSize, tidyRects } from './snap.js'
 import {
   genId,
@@ -35,6 +37,8 @@ import {
   inkFor,
   inkDimFor,
   hairlineFor,
+  renderedPaper,
+  DOCUMENT_INK,
 } from './util.js'
 
 const MESSAGE_SYNC = 0
@@ -251,7 +255,8 @@ const provider = new WSProvider(wsUrl, doc, awareness)
 const yNotes = doc.getMap('notes') // id -> Y.Map { title:Y.Text, body:Y.Text, color, created, tabId, fontSize, size }
 const yOrder = doc.getArray('order') // [id, ...] newest first
 const yTabs = doc.getArray('tabs') // Y.Map{ id, name, kind, archived } (legacy entries are plain objects)
-const yDrawings = doc.getMap('drawings') // tabId -> Y.Array<stroke>
+const yDrawings = doc.getMap('drawings') // tabId -> Y.Array<stroke> (sketch tabs); 'ink:'+tabId -> ink on a notes tab
+const yPages = doc.getMap('pages') // tabId -> Y.Map{ title:Y.Text, body:Y.Text } (document and mind map tabs)
 
 // Keep a copy of the whole board in this browser (IndexedDB) so it opens
 // instantly and still works when the Pi is off. Per-device switch in settings.
@@ -280,7 +285,7 @@ const W_DEFAULT = 250
 const H_DEFAULT = 200
 const FS_MIN = 11
 const FS_MAX = 26
-const FS_DEFAULT = 13
+const FS_DEFAULT = 14
 
 // ---- identity / presence ----
 let me = null
@@ -328,6 +333,7 @@ const addBtn = document.getElementById('add')
 const drawView = document.getElementById('draw-view')
 const canvasHost = document.getElementById('canvas-host')
 const drawBar = document.getElementById('draw-bar')
+const pageView = document.getElementById('page-view')
 youName.textContent = me.name
 youName.style.setProperty('--me', me.color)
 
@@ -336,6 +342,8 @@ provider.onStatus((connected) => {
   if (connected) everConnected = true
   dot.classList.toggle('on', connected)
   dot.title = connected ? 'Connected' : 'Reconnecting...'
+
+  dot.setAttribute('aria-label', dot.title)
 })
 
 // ---- active tab (per-user) ----
@@ -391,6 +399,7 @@ function makeTabMap(rec) {
   m.set('name', rec.name)
   m.set('kind', rec.kind || 'notes')
   if (rec.archived) m.set('archived', true)
+  if (rec.view === 'canvas') m.set('view', 'canvas') // reordering a tab keeps its canvas view
   return m
 }
 
@@ -464,16 +473,42 @@ function migrateBoard() {
 }
 
 // ---- tab operations ----
+// What each kind of tab is called and drawn as. Unknown kinds show as notes.
+const TAB_KINDS = {
+  notes: { label: 'List', menu: 'Sticky notes', icon: 'note', sub: null },
+  draw: { label: 'Sketch', menu: 'Sketch board', icon: 'pencil', sub: 'Sketch board' },
+  doc: { label: 'Document', menu: 'Document', icon: 'text', sub: 'Document' },
+  mindmap: { label: 'Mind map', menu: 'Mind map', icon: 'map', sub: 'Mind map' },
+}
+const kindInfo = (kind) => TAB_KINDS[kind] || TAB_KINDS.notes
+const isNotesTab = (t) => !!t && !TAB_KINDS[t.kind]?.sub
+
 async function addTab(kind) {
-  const label = kind === 'draw' ? 'Sketch' : 'List'
+  const label = kindInfo(kind).label
   const typed = await ui.prompt(`Name this ${label.toLowerCase()} tab:`, label, { title: 'New tab', maxLength: 28 })
   if (typed == null) return
   const name = typed.trim().slice(0, 28) || label
   const id = genId()
   doc.transact(() => {
     yTabs.push([makeTabMap({ id, name, kind })])
+    if (kind === 'doc' || kind === 'mindmap') getPage(id, name)
   })
   setActiveTab(id)
+}
+
+// The shared content of a document or mind map tab, created on first use.
+// The mind map's centre node is `title` (it starts as the tab's name).
+function getPage(tabId, name) {
+  let p = yPages.get(tabId)
+  if (!(p instanceof Y.Map)) {
+    p = new Y.Map()
+    const title = new Y.Text()
+    if (name) title.insert(0, name)
+    p.set('title', title)
+    p.set('body', new Y.Text())
+    yPages.set(tabId, p)
+  }
+  return p
 }
 
 function renameTab(id, name) {
@@ -501,7 +536,7 @@ async function deleteTab(id) {
     ui.toast('Keep at least one tab. Archive it instead if you want it out of the way.')
     return
   }
-  const kindWord = t.kind === 'draw' ? 'sketch and all its strokes' : 'tab and all its notes'
+  const kindWord = { draw: 'sketch and all its strokes', doc: 'document', mindmap: 'mind map' }[t.kind] || 'tab and all its notes'
   const choice = await ui.dialog({
     title: `Delete "${t.name}"?`,
     message: `This removes the ${kindWord} for everyone. Archiving keeps it around but out of the way.`,
@@ -518,7 +553,7 @@ async function deleteTab(id) {
   if (choice !== 'delete') return
   const i = tabIndex(id)
   doc.transact(() => {
-    // remove notes that belong to this tab (and arrows touching them)
+    // remove notes that belong to this tab, and the tab's page / ink
     const ids = yOrder.toArray()
     const gone = []
     for (let k = ids.length - 1; k >= 0; k--) {
@@ -529,8 +564,9 @@ async function deleteTab(id) {
         gone.push(ids[k])
       }
     }
-    if (gone.length) edges.removeFor(gone)
     if (yDrawings.has(id)) yDrawings.delete(id)
+    if (yDrawings.has('ink:' + id)) yDrawings.delete('ink:' + id)
+    if (yPages.has(id)) yPages.delete(id)
     if (i >= 0) yTabs.delete(i, 1)
   })
   const remaining = tabsList().filter((x) => !x.archived)
@@ -563,7 +599,9 @@ function renderTabs() {
   const home = document.createElement('button')
   home.className = 'tab-home'
   home.title = 'All tabs (home)'
-  home.innerHTML = '&#8962;'
+
+  home.setAttribute('aria-label', home.title)
+  iconLabel(home, '', 'home')
   home.addEventListener('click', (e) => {
     e.stopPropagation()
     toggleHome()
@@ -576,10 +614,18 @@ function renderTabs() {
     tab.className = 'tab' + (isActive ? ' on' : '') + (t.archived ? ' archived' : '')
     tab.draggable = renamingTabId !== t.id
     tab.dataset.id = t.id
+    tab.setAttribute('role', 'tab')
+    tab.setAttribute('aria-selected', String(isActive))
+    tab.tabIndex = isActive ? 0 : -1
+    tab.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab(t.id) }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); const i = list.indexOf(t); setActiveTab(list[(i + (e.key === 'ArrowRight' ? 1 : list.length - 1)) % list.length].id); tabsEl.querySelector('.tab.on')?.focus() }
+      if (e.key === 'F2') { e.preventDefault(); renamingTabId = t.id; renderTabs() }
+    })
 
     const icon = document.createElement('span')
     icon.className = 'tab-icon'
-    icon.textContent = t.kind === 'draw' ? '✎' : '☰' // pencil / list
+    icon.appendChild(makeIcon(kindInfo(t.kind).icon))
     tab.appendChild(icon)
 
     if (renamingTabId === t.id) {
@@ -621,8 +667,10 @@ function renderTabs() {
     if (isActive) {
       const more = document.createElement('button')
       more.className = 'tab-x'
-      more.textContent = '⋯'
+      iconLabel(more, '⋯')
       more.title = 'Tab options'
+
+      more.setAttribute('aria-label', more.title)
       more.addEventListener('click', (e) => {
         e.stopPropagation()
         openTabMenu(more, t)
@@ -656,8 +704,10 @@ function renderTabs() {
 
   const add = document.createElement('button')
   add.className = 'tab-add'
-  add.textContent = '+'
+  iconLabel(add, '+')
   add.title = 'Add a tab'
+
+  add.setAttribute('aria-label', add.title)
   add.addEventListener('click', (e) => {
     e.stopPropagation()
     openAddMenu(add)
@@ -667,13 +717,15 @@ function renderTabs() {
   // right side: collapse-all + hidden notes (trash / archived) for this tab
   const right = document.createElement('div')
   right.className = 'tab-right'
-  if (active && active.kind !== 'draw') {
+  if (isNotesTab(active)) {
     const hidden = hiddenCounts(active.id)
     const fold = document.createElement('button')
     fold.className = 'tab-tool'
     const allCollapsed = cards.size > 0 && Array.from(cards.keys()).every((id) => collapsed.has(id))
-    fold.textContent = allCollapsed ? '⌄ Expand all' : '⌃ Collapse all'
+    iconLabel(fold, allCollapsed ? 'Expand all' : 'Collapse all', allCollapsed ? 'down' : 'up')
     fold.title = 'Collapse or expand every note on this tab (just for you)'
+
+    fold.setAttribute('aria-label', fold.title)
     fold.addEventListener('click', (e) => {
       e.stopPropagation()
       setAllCollapsed(!allCollapsed)
@@ -687,6 +739,8 @@ function renderTabs() {
       if (hidden.trash) parts.push(hidden.trash + ' in trash')
       hb.textContent = parts.join(' · ')
       hb.title = 'Show archived and deleted notes'
+
+      hb.setAttribute('aria-label', hb.title)
       hb.addEventListener('click', (e) => {
         e.stopPropagation()
         openHiddenPanel(active.id)
@@ -707,7 +761,7 @@ function openTabMenu(anchor, t) {
   const item = (label, fn, cls) => {
     const b = document.createElement('button')
     b.className = 'menu-item' + (cls ? ' ' + cls : '')
-    b.textContent = label
+    iconLabel(b, label)
     b.addEventListener('click', () => {
       closeMenus()
       fn()
@@ -718,7 +772,7 @@ function openTabMenu(anchor, t) {
     renamingTabId = t.id
     renderTabs()
   })
-  if (t.kind !== 'draw') {
+  if (isNotesTab(t)) {
     if (t.view === 'canvas')
       item('▦  Back to the board view', () => {
         updateTab(t.id, { view: null })
@@ -751,7 +805,8 @@ function openTabMenu(anchor, t) {
   })
   item('Delete…', () => deleteTab(t.id), 'danger')
   document.body.appendChild(menu)
-  openMenus.push(menu)
+  const dismiss = ui.popover(menu, anchor, { menu: !menu.classList.contains('settings-menu'), label: 'Settings' })
+  openMenus.push({ remove: dismiss })
 }
 
 function openAddMenu(anchor) {
@@ -761,19 +816,20 @@ function openAddMenu(anchor) {
   const r = anchor.getBoundingClientRect()
   menu.style.left = r.left + 'px'
   menu.style.top = r.bottom + 4 + 'px'
-  const mkItem = (label, kind) => {
+  const mkItem = (kind) => {
     const b = document.createElement('button')
     b.className = 'menu-item'
-    b.textContent = label
+    iconLabel(b, kindInfo(kind).menu, kindInfo(kind).icon)
     b.addEventListener('click', () => {
       closeMenus()
       addTab(kind)
     })
     return b
   }
-  menu.append(mkItem('☰  List of notes', 'notes'), mkItem('✎  Sketch board', 'draw'))
+  menu.append(mkItem('notes'), mkItem('doc'), mkItem('mindmap'), mkItem('draw'))
   document.body.appendChild(menu)
-  openMenus.push(menu)
+  const dismiss = ui.popover(menu, anchor, { menu: !menu.classList.contains('settings-menu'), label: 'Settings' })
+  openMenus.push({ remove: dismiss })
 }
 
 const openMenus = []
@@ -860,7 +916,6 @@ function hardDeleteNote(id) {
     const i = arr.indexOf(id)
     if (i >= 0) yOrder.delete(i, 1)
     yNotes.delete(id)
-    edges.removeFor([id])
   })
 }
 
@@ -895,16 +950,6 @@ function hiddenCounts(tabId) {
     else if (n.get('archived')) archived++
   })
   return { trash, archived }
-}
-
-// Text or mind map (shared, like the book layout).
-function setNoteView(note, view) {
-  const cur = note.get('view') === 'map' ? 'map' : 'note'
-  if (cur === view) return
-  note.doc.transact(() => {
-    if (view === 'map') note.set('view', 'map')
-    else note.delete('view')
-  })
 }
 
 // Single page or a two-page "book" (body + body2 side by side).
@@ -1093,31 +1138,41 @@ function phoneMode() {
 }
 
 function applyNoteStyle(el, note) {
-  const color = note.get('color') || PAPER[0]
+  const color = renderedPaper(note.get('color') || PAPER[0])
   el.style.background = color
   el.style.setProperty('--note-ink', inkFor(color))
   el.style.setProperty('--note-ink-dim', inkDimFor(color))
   el.style.setProperty('--note-line', hairlineFor(color))
+  el.style.setProperty('--note-link', inkFor(color) === '#ffffff' ? '#ffd60a' : '#694b00')
   el.style.setProperty('--note-fs', (note.get('fontSize') || FS_DEFAULT) + 'px')
   // title follows the body (+1px) unless the note opted into its own size
   const ts = note.get('titleSize')
   if (ts) el.style.setProperty('--title-fs', ts + 'px')
   else el.style.removeProperty('--title-fs')
-  el.classList.toggle('autogrow', !!note.get('autoGrow'))
+  el.classList.toggle('autogrow', growsWithContent(note))
   el.classList.toggle('book', note.get('layout') === 'book')
   el.classList.toggle('pinned', !!note.get('pinned'))
-  el.classList.toggle('mapview', note.get('view') === 'map')
   const tEl = el.querySelector(':scope > .card-title')
   if (tEl) tEl.style.textAlign = note.get('titleAlign') || ''
   for (const cls of Object.values(SIZES)) el.classList.remove(cls)
   el.classList.add(SIZES[note.get('size')] || SIZES.m)
 }
 
+// Notes grow with their content unless someone gave them a fixed height
+// (an unset `autoGrow` means on; switching it off stores false).
+function growsWithContent(note) {
+  return note.get('autoGrow') !== false
+}
+function setAutoGrow(note, on) {
+  if (on) note.delete('autoGrow')
+  else note.set('autoGrow', false)
+}
+
 // ---- free-floating "corkboard" layout -------------------------------------
 // Desktop: notes are absolutely positioned — drag the header to move, drag the
 // corner grip to resize. Narrow screens fall back to the stacked flow layout
 // (x/y/w/h are ignored there so a phone stays usable).
-const mqStack = window.matchMedia('(max-width: 560px)')
+const mqStack = window.matchMedia('(max-width: 600px)')
 let freeLayout = !mqStack.matches
 
 // Two desktop views of a tab, chosen per tab (shared): the "board" grows
@@ -1144,18 +1199,26 @@ function noteRect(c) {
   }
 }
 
+// free-hand ink between the notes (see src/ink.js); bound to the active tab in reconcile()
+const ink = createInk({ Y, toPlane, zoom: () => zoom(), onChange: () => { if (!canvasMode) updateBoardExtent() } })
+board.appendChild(ink.capture)
+
 const viewport = createViewport({
   board,
   plane,
-  getRects: () =>
-    Array.from(cards.values())
+  getRects: () => {
+    const rects = Array.from(cards.values())
       .filter((c) => !c.el.classList.contains('hidden'))
-      .map((c) => ({ ...noteRect(c), color: c.note.get('color') })),
+      .map((c) => ({ ...noteRect(c), color: c.note.get('color') }))
+    const b = ink.bounds() // fit and the minimap take the ink into account too
+    if (b) rects.push({ ...b, color: 'transparent' })
+    return rects
+  },
   onChange: () => {
-    edges.schedule()
     if (marquee) marquee.refresh()
   },
-  shouldPan: (e) => !e.shiftKey, // Shift+drag on the canvas draws a selection box instead
+  // Shift+drag on the canvas draws a selection box; in ink mode a drag draws
+  shouldPan: (e) => !e.shiftKey && !ink.isActive(),
 })
 
 function toPlane(cx, cy) {
@@ -1166,18 +1229,6 @@ function toPlane(cx, cy) {
 const zoom = () => (canvasMode ? viewport.view().k : 1)
 
 const guides = createGuides()
-const edges = createEdges({
-  doc,
-  Y,
-  ui,
-  genId,
-  toPlane,
-  scale: zoom,
-  getCard: (id) => {
-    const c = cards.get(id)
-    return c && freeLayout ? c : null
-  },
-})
 
 function setCanvasMode(on, tabId) {
   const want = !!on && freeLayout
@@ -1198,10 +1249,10 @@ function setCanvasMode(on, tabId) {
     plane.remove()
   }
   const box = container()
-  box.appendChild(edges.el)
+  box.appendChild(ink.el) // z-index 0: under the notes
   box.appendChild(guides.el)
+  board.appendChild(ink.capture)
   relayoutAll()
-  edges.schedule()
 }
 
 function applyNoteLayout(el, note) {
@@ -1228,7 +1279,7 @@ function applyNoteLayout(el, note) {
   el.style.top = y + 'px'
   el.style.width = w + 'px'
   // collapsed (title only) and auto-growing notes size themselves to content
-  const fluid = collapsed.has(el.dataset.id) || note.get('autoGrow')
+  const fluid = collapsed.has(el.dataset.id) || growsWithContent(note)
   el.style.height = fluid ? '' : h + 'px'
   el.style.zIndex = String(note.get('z') || 1)
 }
@@ -1272,10 +1323,12 @@ function updateBoardExtent() {
   for (const [id, c] of cards) {
     const n = c.note
     const y = Math.max(0, n.get('y') || 0)
-    const fluid = collapsed.has(id) || n.get('autoGrow')
+    const fluid = collapsed.has(id) || growsWithContent(n)
     const h = fluid ? c.el.offsetHeight || H_MIN : Math.max(H_MIN, n.get('h') || H_DEFAULT)
     if (y + h > maxB) maxB = y + h
   }
+  const b = ink.bounds()
+  if (b && b.y + b.h > maxB) maxB = b.y + b.h
   board.style.minHeight = maxB + 60 + 'px'
 }
 
@@ -1283,7 +1336,6 @@ function relayoutAll() {
   board.classList.toggle('free', freeLayout)
   for (const [, c] of cards) applyNoteLayout(c.el, c.note)
   updateBoardExtent()
-  edges.schedule()
 }
 
 function nextNotePos() {
@@ -1306,7 +1358,7 @@ window.addEventListener('keydown', (e) => {
   const a = document.activeElement
   if (a && (a.isContentEditable || a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return
   const t = activeTab()
-  if (!freeLayout || full || !t || t.kind === 'draw') return
+  if (!freeLayout || full || !isNotesTab(t)) return
   const redo = k === 'y' || e.shiftKey
   if (redo ? !layoutUndo.redoStack.length : !layoutUndo.undoStack.length) return
   e.preventDefault()
@@ -1327,7 +1379,7 @@ function applyLayout(changes) {
       if (ch.w != null) n.set('w', Math.round(ch.w))
       if (ch.h != null) {
         n.set('h', Math.round(ch.h))
-        if (n.get('autoGrow')) n.delete('autoGrow')
+        if (n.get('autoGrow') !== false) n.set('autoGrow', false) // a set height pins the note
       }
     }
   }, LAYOUT)
@@ -1375,8 +1427,11 @@ function renderAlignBar() {
   const b = (html, title, fn) => {
     const x = document.createElement('button')
     x.className = 'align-btn'
-    x.innerHTML = html
+    if (html.startsWith('<svg')) x.innerHTML = html
+    else iconLabel(x, html)
     x.title = title
+
+    x.setAttribute('aria-label', x.title)
     x.addEventListener('click', (e) => {
       e.stopPropagation()
       fn()
@@ -1412,7 +1467,7 @@ window.addEventListener('keydown', (e) => {
 let marquee = null
 board.addEventListener('pointerdown', (e) => {
   if (!freeLayout || e.button !== 0) return
-  const bg = e.target === board || e.target === plane || e.target === edges.el
+  const bg = e.target === board || e.target === plane
   if (!bg) return
   if (canvasMode && !e.shiftKey) return // plain drag pans the canvas
   e.preventDefault()
@@ -1541,15 +1596,7 @@ const LIST_STYLES = [
 ]
 const svg = (d, extra = '') =>
   `<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${extra}<path d="${d}"/></svg>`
-const ICONS = {
-  list: svg('M6 4h8M6 8h8M6 12h8', '<circle cx="2.6" cy="4" r=".9" fill="currentColor"/><circle cx="2.6" cy="8" r=".9" fill="currentColor"/><circle cx="2.6" cy="12" r=".9" fill="currentColor"/>'),
-  todo: svg('M4.5 8.2l2.2 2.2 4.6-4.8', '<rect x="1.5" y="1.5" width="13" height="13" rx="2.5"/>'),
-  left: svg('M2 3.5h12M2 6.5h8M2 9.5h12M2 12.5h7'),
-  center: svg('M2 3.5h12M4 6.5h8M2 9.5h12M4.5 12.5h7'),
-  right: svg('M2 3.5h12M6 6.5h8M2 9.5h12M7 12.5h7'),
-  image: svg('M2 12l3.6-3.6 2.8 2.8 2-2 3.6 3.6', '<rect x="1.5" y="2.5" width="13" height="11" rx="1.6"/><circle cx="5.4" cy="6.2" r="1.2"/>'),
-  fold: svg('M5 6l3 3 3-3'),
-}
+const ICONS = Object.fromEntries(['list', 'todo', 'left', 'center', 'right', 'image', 'fold'].map(name => [name, iconHTML(name === 'right' ? 'alignRight' : name === 'fold' ? 'down' : name)]))
 
 function buildFmtBar(getRich) {
   const el = document.createElement('div')
@@ -1561,6 +1608,8 @@ function buildFmtBar(getRich) {
     b.className = 'fmt-btn ' + cls
     b.innerHTML = html
     b.title = tip
+
+    b.setAttribute('aria-label', b.title)
     b.addEventListener('mousedown', (e) => e.preventDefault()) // keep the body's selection
     b.addEventListener('click', (e) => {
       e.stopPropagation()
@@ -1576,7 +1625,7 @@ function buildFmtBar(getRich) {
     ['u', 'U', 'Underline  (Ctrl/Cmd+U)'],
     ['s', 'S', 'Strikethrough  (Ctrl/Cmd+Shift+S)'],
   ].forEach(([mark, label, tip]) => {
-    btns[mark] = mkBtn('fmt-' + mark, label, tip, (rich) => rich.toggleMark(mark))
+    btns[mark] = mkBtn('fmt-' + mark, iconHTML({b:'bold',i:'italic',u:'underline',s:'strike'}[mark]), tip, (rich) => rich.toggleMark(mark))
   })
   const sep = document.createElement('span')
   sep.className = 'fmt-sep'
@@ -1637,21 +1686,20 @@ function createCard(id) {
   const tools = document.createElement('div')
   tools.className = 'card-tools'
 
-  const optBtn = document.createElement('button')
-  optBtn.className = 'icon-btn opt'
-  optBtn.title = 'Type, colour, size & text'
-  optBtn.innerHTML = '&#9881;'
-
   const del = document.createElement('button')
   del.className = 'icon-btn del'
   del.title = 'Delete note'
-  del.textContent = '×'
+
+  del.setAttribute('aria-label', del.title)
+  iconLabel(del, '×')
   del.addEventListener('click', () => deleteNote(id)) // soft delete + Undo toast
 
   const fold = document.createElement('button')
   fold.className = 'icon-btn fold'
   fold.title = 'Collapse / expand (just for you)'
-  fold.textContent = '⌄'
+
+  fold.setAttribute('aria-label', fold.title)
+  iconLabel(fold, '⌄')
   fold.addEventListener('click', (e) => {
     e.stopPropagation()
     setCollapsed(id, !collapsed.has(id))
@@ -1660,13 +1708,15 @@ function createCard(id) {
   const expand = document.createElement('button')
   expand.className = 'icon-btn expand'
   expand.title = 'Open full screen (or double-click the header)'
-  expand.textContent = '⤢'
+
+  expand.setAttribute('aria-label', expand.title)
+  iconLabel(expand, '⤢')
   expand.addEventListener('click', (e) => {
     e.stopPropagation()
     openFullscreen(id)
   })
 
-  tools.append(fold, expand, optBtn, del)
+  tools.append(fold, expand, del) // the note's settings live in the ribbon
   top.append(presenceEl, tools)
   if (collapsed.has(id)) el.classList.add('collapsed')
 
@@ -1687,10 +1737,9 @@ function createCard(id) {
     }
   })
 
-  // formatting toolbar (appears while the note is focused)
-  const fmtBar = buildFmtBar(() => card.activeRich || (card.body && card.body.rich))
-  const fmt = fmtBar.el
-  const fmtBtns = fmtBar.btns
+  // formatting lives in the ribbon: the editors report their state there
+  // while this note is the one being edited
+  const fmtBar = { update: (marks, line) => ribbonState(card, marks, line) }
 
   // body region: either the rich-text editor or a checklist (depends on kind)
   const bodyHost = document.createElement('div')
@@ -1709,19 +1758,13 @@ function createCard(id) {
   }
   setMeta()
 
-  // corner grip for resizing + a dot for drawing arrows (free layout only — hidden via CSS otherwise)
+  // corner grip for resizing (free layout only — hidden via CSS otherwise)
   const grip = document.createElement('div')
   grip.className = 'resize-grip'
   grip.title = 'Drag to resize'
-  const linkDot = document.createElement('div')
-  linkDot.className = 'link-handle'
-  linkDot.title = 'Drag onto another note to draw an arrow'
-  linkDot.addEventListener('pointerdown', (e) => {
-    if (!freeLayout || (e.button != null && e.button !== 0 && e.pointerType === 'mouse')) return
-    edges.startLink(id, e)
-  })
 
-  el.append(top, titleEl, bodyHost, fmt, meta, grip, linkDot)
+  grip.setAttribute('aria-label', grip.title)
+  el.append(top, titleEl, bodyHost, meta, grip)
 
   applyNoteStyle(el, note)
   applyNoteLayout(el, note)
@@ -1756,7 +1799,7 @@ function createCard(id) {
     doc.transact(() => {
       note.set('w', Math.round(sz.w))
       note.set('h', Math.round(sz.h))
-      if (note.get('autoGrow')) note.delete('autoGrow')
+      if (note.get('autoGrow') !== false) note.set('autoGrow', false) // resizing pins the height
     }, LAYOUT)
   }
   const schedulePos = rafThrottle(commitPos)
@@ -1826,7 +1869,6 @@ function createCard(id) {
         pendingPos.set(st.c.id, { x: nx, y: ny })
       }
       schedulePos()
-      edges.schedule()
     }
     const end = (ev) => {
       top.removeEventListener('pointermove', move)
@@ -1848,7 +1890,6 @@ function createCard(id) {
       commitPos()
       layoutUndo.stopCapturing()
       updateBoardExtent()
-      edges.schedule()
     }
     card.abortInteraction = end
     top.addEventListener('pointermove', move)
@@ -1897,7 +1938,6 @@ function createCard(id) {
       el.style.height = nh + 'px'
       pendingSize = { w: nw, h: nh }
       scheduleSize()
-      edges.schedule()
     }
     const end = (ev) => {
       grip.removeEventListener('pointermove', move)
@@ -1917,7 +1957,6 @@ function createCard(id) {
       commitSize()
       layoutUndo.stopCapturing()
       updateBoardExtent()
-      edges.schedule()
     }
     card.abortInteraction = end
     grip.addEventListener('pointermove', move)
@@ -1934,7 +1973,6 @@ function createCard(id) {
     el,
     unbinds,
     body: null,
-    fmtBtns,
     fmtBar,
     titleEl,
     bodyHost,
@@ -1953,17 +1991,14 @@ function createCard(id) {
   mountBody(card)
   attachPhoneGestures(card)
 
-  optBtn.addEventListener('click', (e) => {
-    e.stopPropagation()
-    bringToFront(note) // raise the card so its popover isn't trapped under a neighbour
-    togglePopover(card)
-  })
-
-  // presence focus follows any field inside the card (title, body, list items)
+  // presence focus follows any field inside the card (title, body, list items);
+  // the ribbon follows the note last clicked or typed in
   el.addEventListener('focusin', () => {
     awareness.setLocalStateField('focus', id)
     bringToFront(note)
+    setRibbonTarget(card)
   })
+  el.addEventListener('pointerdown', () => { if (!phoneMode()) setRibbonTarget(card) })
   el.addEventListener('focusout', (e) => {
     if (el.contains(e.relatedTarget)) return
     if (awareness.getLocalState()?.focus === id) awareness.setLocalStateField('focus', null)
@@ -1974,9 +2009,9 @@ function createCard(id) {
     openFullscreen(id)
   })
 
-  const noteObs = (e) => {
+  const noteObs = (e, transaction) => {
     if (!e.keysChanged) return
-    if (e.keysChanged.has('kind') || e.keysChanged.has('layout') || e.keysChanged.has('view')) {
+    if (e.keysChanged.has('kind') || e.keysChanged.has('layout')) {
       rebuildCard(id)
       return
     }
@@ -1997,6 +2032,7 @@ function createCard(id) {
       if (e.keysChanged.has('pinned') && phoneMode()) scheduleReconcile()
       applyNoteStyle(el, note)
       if (card.pop) refreshPopover(card)
+      if (ribbonTarget?.card === card) refreshRibbon()
       if (e.keysChanged.has('autoGrow') && !card.interacting) {
         applyNoteLayout(el, note)
         updateBoardExtent()
@@ -2011,10 +2047,14 @@ function createCard(id) {
         e.keysChanged.has('z') ||
         e.keysChanged.has('size'))
     ) {
+      const before = transaction?.local === false && !phoneMode() ? el.getBoundingClientRect() : null
       applyNoteLayout(el, note)
+      if (before) {
+        el.style.transformOrigin = '0 0'
+        ui.zoomFrom(el, before)?.finished.then(() => el.getAnimations().forEach(a => a.cancel())).catch(() => {})
+      }
       updateBoardExtent()
     }
-    if (['x', 'y', 'w', 'h', 'size', 'autoGrow', 'titleSize', 'fontSize'].some((k) => e.keysChanged.has(k))) edges.schedule()
     if (e.keysChanged.has('tabId')) scheduleReconcile()
   }
   note.observe(noteObs)
@@ -2023,8 +2063,7 @@ function createCard(id) {
   if (typeof ResizeObserver !== 'undefined') {
     card.ro = new ResizeObserver(
       rafThrottle(() => {
-        if (freeLayout && (collapsed.has(id) || note.get('autoGrow'))) updateBoardExtent()
-        if (freeLayout) edges.schedule()
+        if (freeLayout && (collapsed.has(id) || growsWithContent(note))) updateBoardExtent()
       })
     )
     card.ro.observe(el)
@@ -2062,16 +2101,10 @@ function mountBody(card) {
   const note = card.note
   const kind = note.get('kind') || 'note'
   card.el.classList.toggle('is-todo', kind === 'todo')
-  card.el.classList.toggle('is-map', kind !== 'todo' && note.get('view') === 'map')
   if (kind === 'todo') {
     // a checklist from before todo lines existed; the Pi converts it moments after it syncs
     ensureItems(note)
     card.body = bindTodo(card, note.get('items'))
-    return
-  }
-  if (note.get('view') === 'map') {
-    const map = createMindMap(card.bodyHost, note, { editable: card.isFull || !phoneMode() })
-    card.body = { kind: 'map', rich: null, editors: [], map, destroy: () => map.destroy() }
     return
   }
 
@@ -2119,7 +2152,7 @@ function bindTodo(card, items) {
   list.className = 'todo-list'
   const addBtn = document.createElement('button')
   addBtn.className = 'todo-add'
-  addBtn.textContent = '+ Add item'
+  iconLabel(addBtn, '+ Add item')
   addBtn.addEventListener('click', () => addItem(items.length, '', true))
   host.append(list, addBtn)
 
@@ -2189,8 +2222,10 @@ function bindTodo(card, items) {
     txt.addEventListener('keydown', (e) => onItemKey(e, item, txt))
     const delB = document.createElement('button')
     delB.className = 'todo-del'
-    delB.textContent = '×'
+    iconLabel(delB, '×')
     delB.title = 'Remove item'
+
+    delB.setAttribute('aria-label', delB.title)
     delB.addEventListener('click', () => removeItem(item))
     const obs = (e) => {
       if (e.keysChanged && e.keysChanged.has('done')) {
@@ -2261,67 +2296,41 @@ function destroyCard(card) {
   if (card.body) card.body.destroy()
   card.note.unobserve(card.noteObs)
   if (card.pop) {
+    card.closePop?.()
     card.pop.remove()
     card.pop = null
   }
   card.el.remove()
   if (boardSel.delete(card.id)) renderAlignBar()
+  if (ribbonTarget?.card === card) setRibbonTarget(null)
 }
 
 // ---- options popover (colour / size / text) ----
 function closeAllPopovers() {
   for (const [, c] of cards) {
     if (c.pop) {
+      c.closePop?.()
       c.pop.classList.remove('open')
     }
   }
-  if (full && full.card.pop) full.card.pop.classList.remove('open')
+  if (full && full.card.pop) { full.card.closePop?.(); full.card.pop.classList.remove('open') }
 }
 
-function togglePopover(card) {
+function togglePopover(card, anchor = card.el.querySelector('.opt')) {
   const wasOpen = card.pop && card.pop.classList.contains('open')
   closeAllPopovers()
   if (wasOpen) return
   if (!card.pop) buildPopover(card)
   refreshPopover(card)
   const pop = card.pop
-  // reset any prior on-screen flip, then keep it within the viewport
-  pop.style.left = ''
-  pop.style.right = ''
-  pop.classList.add('open')
-  const r = pop.getBoundingClientRect()
-  if (r.left < 8) {
-    pop.style.right = 'auto'
-    pop.style.left = '6px' // flip to anchor on the card's left edge
-  } else if (r.right > window.innerWidth - 8) {
-    pop.style.right = '6px'
-    pop.style.left = 'auto'
-  }
+  document.body.appendChild(pop)
+  card.closePop = ui.popover(pop, anchor, { retain: true, label: 'Note options' })
 }
 
 function buildPopover(card) {
   const pop = document.createElement('div')
   pop.className = 'card-pop'
   pop.addEventListener('click', (e) => e.stopPropagation())
-
-  // View: the note as text, or its bullet points as a mind map
-  const kSec = section('View')
-  const kRow = document.createElement('div')
-  kRow.className = 'pop-row pop-sizes'
-  const kindBtns = {}
-  ;[
-    ['note', 'Note'],
-    ['map', 'Mind map'],
-  ].forEach(([k, label]) => {
-    const b = document.createElement('button')
-    b.className = 'pop-btn size-btn'
-    b.textContent = label
-    b.title = k === 'map' ? 'Show the bullet points as a mind map (for everyone)' : 'Show the note as text'
-    b.addEventListener('click', () => setNoteView(card.note, k))
-    kRow.appendChild(b)
-    kindBtns[k] = b
-  })
-  kSec.append(kRow)
 
   // Colour
   const cSec = section('Colour')
@@ -2338,8 +2347,10 @@ function buildPopover(card) {
   colorInput.addEventListener('input', () => card.note.set('color', colorInput.value))
   const saveFav = document.createElement('button')
   saveFav.className = 'pop-btn'
-  saveFav.textContent = '★ Save'
+  iconLabel(saveFav, '★ Save')
   saveFav.title = 'Save this colour to favourites'
+
+  saveFav.setAttribute('aria-label', saveFav.title)
   saveFav.addEventListener('click', () => {
     addFavorite(card.note.get('color') || PAPER[0])
     renderFavs(card)
@@ -2375,7 +2386,7 @@ function buildPopover(card) {
   ].forEach(([k, label]) => {
     const b = document.createElement('button')
     b.className = 'pop-btn size-btn'
-    b.textContent = label
+    iconLabel(b, label)
     b.addEventListener('click', () =>
       card.note.doc.transact(() => {
         card.note.set('size', k)
@@ -2398,8 +2409,10 @@ function buildPopover(card) {
   ].forEach(([k, label]) => {
     const b = document.createElement('button')
     b.className = 'pop-btn size-btn'
-    b.textContent = label
+    iconLabel(b, label)
     b.title = k === 'book' ? 'Two pages side by side' : 'One page'
+
+    b.setAttribute('aria-label', b.title)
     b.addEventListener('click', () => setNoteLayout(card.note, k))
     lRow.appendChild(b)
     layoutBtns[k] = b
@@ -2431,8 +2444,7 @@ function buildPopover(card) {
   const agChk = document.createElement('input')
   agChk.type = 'checkbox'
   agChk.addEventListener('change', () => {
-    if (agChk.checked) card.note.set('autoGrow', true)
-    else card.note.delete('autoGrow')
+    setAutoGrow(card.note, agChk.checked)
   })
   agRow.append(agChk, document.createTextNode(' Grow with content (no inner scroll)'))
   // title alignment (line alignment lives on the formatting toolbar)
@@ -2448,6 +2460,8 @@ function buildPopover(card) {
     b.className = 'pop-btn size-btn'
     b.innerHTML = ICONS[al]
     b.title = 'Title: ' + (al === 'center' ? 'centre' : al)
+
+    b.setAttribute('aria-label', b.title)
     b.addEventListener('click', () => {
       if (al === 'left') card.note.delete('titleAlign')
       else card.note.set('titleAlign', al)
@@ -2469,11 +2483,13 @@ function buildPopover(card) {
   // Actions
   const aSec = section('More')
   const aRow = document.createElement('div')
-  aRow.className = 'pop-row pop-sizes'
+  aRow.className = 'pop-row pop-actions'
   const archiveBtn = document.createElement('button')
   archiveBtn.className = 'pop-btn'
   archiveBtn.textContent = 'Archive'
   archiveBtn.title = 'Hide this note without deleting it'
+
+  archiveBtn.setAttribute('aria-label', archiveBtn.title)
   archiveBtn.addEventListener('click', () => {
     closeAllPopovers()
     setNoteArchived(card.id, true)
@@ -2482,6 +2498,8 @@ function buildPopover(card) {
   histBtn.className = 'pop-btn'
   histBtn.textContent = 'History'
   histBtn.title = 'Earlier versions of this note'
+
+  histBtn.setAttribute('aria-label', histBtn.title)
   histBtn.addEventListener('click', () => {
     closeAllPopovers()
     openHistoryPanel(card.id)
@@ -2489,17 +2507,27 @@ function buildPopover(card) {
   const pinBtn = document.createElement('button')
   pinBtn.className = 'pop-btn'
   pinBtn.title = 'Pinned notes come first on phones and in the widget'
+
+  pinBtn.setAttribute('aria-label', pinBtn.title)
   pinBtn.addEventListener('click', () => {
     if (card.note.get('pinned')) card.note.delete('pinned')
     else card.note.set('pinned', true)
   })
-  aRow.append(pinBtn, archiveBtn, histBtn)
+  const deleteBtn = document.createElement('button')
+  deleteBtn.className = 'pop-btn danger'
+  iconLabel(deleteBtn, 'Delete', 'trash')
+  deleteBtn.addEventListener('click', () => { closeAllPopovers(); deleteNote(card.id) })
+  iconLabel(archiveBtn, 'Archive', 'archive')
+  iconLabel(histBtn, 'History', 'history')
+  aRow.append(pinBtn, archiveBtn, histBtn, deleteBtn)
   aSec.append(aRow)
 
-  pop.append(kSec, lSec, cSec, tSec, wSec, oSec, mSec, aSec)
+  pop.append(cSec, tSec, wSec, lSec, oSec, mSec, aSec)
   card.el.appendChild(pop)
   card.pop = pop
-  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, kindBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec, taBtns, pinBtn }
+  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec, taBtns, pinBtn }
+  colorInput.setAttribute('aria-label', 'Custom paper colour')
+  mSel.setAttribute('aria-label', 'Move to tab')
   renderFavs(card)
 
   function section(name) {
@@ -2516,8 +2544,13 @@ function buildPopover(card) {
 function swatch(card, color) {
   const b = document.createElement('button')
   b.className = 'pop-swatch'
-  b.style.background = color
+  b.style.background = renderedPaper(color)
+  b.dataset.color = color
+  b.style.color = inkFor(renderedPaper(color))
+  b.appendChild(makeIcon('check'))
   b.title = color
+
+  b.setAttribute('aria-label', b.title)
   b.addEventListener('click', () => card.note.set('color', color))
   return b
 }
@@ -2547,15 +2580,17 @@ function renderFavs(card) {
 }
 
 function refreshPopover(card) {
+  card.pop.querySelectorAll('.pop-swatch').forEach(b => {
+    const on = normalizeHex(b.dataset.color) === normalizeHex(card.note.get('color') || PAPER[0])
+    b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on))
+  })
   if (!card.popRefs) return
-  const { colorInput, fsVal, sizeBtns, kindBtns } = card.popRefs
+  const { colorInput, fsVal, sizeBtns } = card.popRefs
   colorInput.value = normalizeHex(card.note.get('color') || PAPER[0])
   fsVal.textContent = (card.note.get('fontSize') || FS_DEFAULT) + 'px'
   const sz = card.note.get('size') || 'm'
   for (const k of Object.keys(sizeBtns)) sizeBtns[k].classList.toggle('on', k === sz)
   const kind = card.note.get('kind') || 'note'
-  const view = card.note.get('view') === 'map' ? 'map' : 'note'
-  for (const k of Object.keys(kindBtns)) kindBtns[k].classList.toggle('on', k === view)
   const { layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec } = card.popRefs
   const layout = card.note.get('layout') || 'single'
   for (const k of Object.keys(layoutBtns)) layoutBtns[k].classList.toggle('on', k === layout)
@@ -2564,13 +2599,13 @@ function refreshPopover(card) {
   tsChk.checked = !!ts
   tsStep.style.display = ts ? '' : 'none'
   tsVal.textContent = (ts || (card.note.get('fontSize') || FS_DEFAULT) + 1) + 'px'
-  agChk.checked = !!card.note.get('autoGrow')
+  agChk.checked = growsWithContent(card.note)
   const ta = card.note.get('titleAlign') || 'left'
   for (const k of Object.keys(card.popRefs.taBtns)) card.popRefs.taBtns[k].classList.toggle('on', k === ta)
-  card.popRefs.pinBtn.textContent = card.note.get('pinned') ? 'Unpin' : 'Pin'
+  iconLabel(card.popRefs.pinBtn, card.note.get('pinned') ? 'Unpin' : 'Pin', 'pin')
   mSel.replaceChildren()
   for (const t of tabsList()) {
-    if (t.kind === 'draw') continue
+    if (!isNotesTab(t)) continue
     const o = document.createElement('option')
     o.value = t.id
     o.textContent = (t.archived ? '(archived) ' : '') + t.name
@@ -2595,8 +2630,10 @@ function bumpFont(card, dir) {
 function stepBtn(text, title, fn) {
   const b = document.createElement('button')
   b.className = 'pop-btn'
-  b.textContent = text
+  iconLabel(b, text)
   b.title = title
+
+  b.setAttribute('aria-label', b.title)
   b.addEventListener('click', fn)
   return b
 }
@@ -2612,7 +2649,7 @@ function loadDrawTool() {
   } catch {
     /* ignore */
   }
-  return { color: '#1f2228', width: 4, mode: 'pen' }
+  return { color: DOCUMENT_INK, width: 4, mode: 'pen' }
 }
 function saveDrawTool() {
   try {
@@ -2650,6 +2687,312 @@ function unmountDraw() {
   drawBar.innerHTML = ''
 }
 
+// ---- document and mind map tabs --------------------------------------------
+// One shared page per tab (yPages): a document is a full-width rich-text editor
+// on a sheet of paper; a mind map draws the same kind of outline as a map.
+let pageState = null // { tabId, kind, rich?, map?, destroy }
+
+function mountPage(tabId, kind) {
+  if (pageState && pageState.tabId === tabId && pageState.kind === kind) return
+  unmountPage()
+  const page = getPage(tabId, activeTab()?.name)
+  pageView.replaceChildren()
+  pageView.dataset.kind = kind
+  if (kind === 'mindmap') {
+    // createMindMap reads note.get('title' | 'body') and note.doc: a page has both
+    const map = createMindMap(pageView, page, { editable: true })
+    pageState = { tabId, kind, map, destroy: () => map.destroy() }
+    return
+  }
+  const sheet = document.createElement('div')
+  sheet.className = 'page-sheet'
+  const body = document.createElement('div')
+  body.className = 'page-body card-body'
+  body.setAttribute('data-ph', 'Start writing…')
+  sheet.appendChild(body)
+  // phones have no ribbon: the document brings its own toolbar, docked at the bottom
+  const fmt = buildFmtBar(() => pageState?.rich)
+  fmt.el.classList.add('page-fmt')
+  pageView.append(sheet, fmt.el)
+  const rich = bindRichText(page.get('body'), body, editorOpts(page, {
+    onState: (marks, line) => {
+      fmt.update(marks, line)
+      if (ribbonTarget?.page) ribbonFmt.update(marks, line)
+    },
+    getRich: () => rich,
+  }))
+  body.addEventListener('focus', () => setRibbonTarget({ page: true }))
+  pageState = { tabId, kind, rich, destroy: () => rich.destroy() }
+  setRibbonTarget({ page: true })
+}
+
+function unmountPage() {
+  if (!pageState) return
+  pageState.destroy()
+  pageState = null
+  pageView.replaceChildren()
+  if (ribbonTarget?.page) setRibbonTarget(null)
+}
+
+// ---- ink between the notes -------------------------------------------------
+const inkKey = (tabId) => 'ink:' + tabId
+// the tab's ink, or null; created the first time someone draws on the tab
+function inkArray(tabId, create) {
+  let a = yDrawings.get(inkKey(tabId))
+  if (!a && create) {
+    doc.transact(() => {
+      if (!yDrawings.get(inkKey(tabId))) yDrawings.set(inkKey(tabId), new Y.Array())
+    })
+    a = yDrawings.get(inkKey(tabId))
+  }
+  return a || null
+}
+yDrawings.observe((e) => {
+  if (activeTabId && e.keysChanged.has(inkKey(activeTabId))) scheduleReconcile() // ink appeared or went
+})
+
+const inkTool = { color: drawTool.color, width: Math.min(drawTool.width, 6), mode: 'pen' }
+ink.setTool(inkTool)
+
+function setInking(on) {
+  const t = activeTab()
+  const want = !!on && freeLayout && isNotesTab(t)
+  if (want) {
+    ink.bind(inkArray(t.id, true))
+    if (boardSel.size) setSelected([])
+    document.activeElement?.blur?.()
+  }
+  ink.setActive(want)
+  board.classList.toggle('inking', want)
+  refreshRibbon()
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && ink.isActive()) setInking(false)
+  const typing = e.target.closest?.('input, textarea, select, [contenteditable="true"]')
+  if (typing || e.ctrlKey || e.metaKey || e.altKey) {
+    // Ctrl/Cmd+Z in ink mode undoes your own last stroke
+    if (ink.isActive() && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      if (e.shiftKey) ink.redo()
+      else ink.undo()
+    }
+    return
+  }
+  if ((e.key === 'd' || e.key === 'D') && isNotesTab(activeTab()) && freeLayout && !full) setInking(!ink.isActive())
+}, true)
+
+// ---- the ribbon (Word-style toolbar under the tabs, desktop) ------------------
+// Acts on the note last clicked or typed in (or the document tab). Its Text and
+// Note groups are greyed out until there is one, like Word with no document.
+let ribbonTarget = null // { card } | { page: true } | null
+const ribbon = createRibbon(document.getElementById('ribbon'))
+
+const textGroup = ribbon.group('Text', 'rib-text')
+const ribbonFmt = buildFmtBar(() => {
+  if (ribbonTarget?.page) return pageState?.rich || null
+  const c = ribbonTarget?.card
+  return c ? c.activeRich || (c.body && c.body.rich) || null : null
+})
+ribbonFmt.el.className = 'rib-fmt'
+textGroup.appendChild(ribbonFmt.el)
+
+const noteGroup = ribbon.group('Note', 'rib-note')
+const targetNote = () => ribbonTarget?.card?.note || null
+const onNote = (fn) => () => {
+  const n = targetNote()
+  if (n) fn(n, ribbonTarget.card)
+}
+const ribColor = ribbon.button(noteGroup, {
+  cls: 'rib-color',
+  title: 'Paper colour',
+  onPress: (b) => {
+    const n = targetNote()
+    if (n) swatchSheet(b, PAPER.concat(getFavorites()), (c) => n.set('color', c))
+  },
+})
+const ribColorDot = document.createElement('span')
+ribColorDot.className = 'rib-color-dot'
+ribColor.prepend(ribColorDot)
+ribbon.sep(noteGroup)
+ribbon.button(noteGroup, { icon: 'minus', title: 'Smaller text', onPress: onNote((n, c) => bumpFont(c, -1)) })
+const ribFs = document.createElement('span')
+ribFs.className = 'rib-value'
+noteGroup.appendChild(ribFs)
+ribbon.button(noteGroup, { icon: 'plus', title: 'Larger text', onPress: onNote((n, c) => bumpFont(c, 1)) })
+ribbon.sep(noteGroup)
+const ribSizes = {}
+for (const [k, label] of [['s', 'S'], ['m', 'M'], ['l', 'L']]) {
+  ribSizes[k] = ribbon.button(noteGroup, {
+    text: label,
+    title: 'Note width ' + label,
+    toggle: true,
+    cls: 'rib-size',
+    onPress: onNote((n) => n.doc.transact(() => { n.set('size', k); n.set('w', SIZE_W[k]) })),
+  })
+}
+ribbon.sep(noteGroup)
+const ribGrow = ribbon.button(noteGroup, {
+  icon: 'rows',
+  text: 'Grow',
+  title: 'Grow with content (no inner scroll)',
+  toggle: true,
+  onPress: onNote((n) => setAutoGrow(n, !growsWithContent(n))),
+})
+const ribPin = ribbon.button(noteGroup, {
+  icon: 'pin',
+  title: 'Pin to the top',
+  toggle: true,
+  onPress: onNote((n) => (n.get('pinned') ? n.delete('pinned') : n.set('pinned', true))),
+})
+ribbon.button(noteGroup, { icon: 'archive', title: 'Archive', onPress: onNote((n, c) => { setRibbonTarget(null); setNoteArchived(c.id, true) }) })
+ribbon.button(noteGroup, { icon: 'trash', title: 'Delete note', cls: 'danger', onPress: onNote((n, c) => { setRibbonTarget(null); deleteNote(c.id) }) })
+ribbon.button(noteGroup, {
+  icon: 'more',
+  text: 'More',
+  title: 'More note settings: layout, title, move to tab, history',
+  cls: 'rib-more',
+  onPress: (b) => {
+    const c = ribbonTarget?.card
+    if (c) togglePopover(c, b)
+  },
+})
+
+const drawGroup = ribbon.group('Draw', 'rib-draw')
+const ribInk = ribbon.button(drawGroup, {
+  icon: 'pencil',
+  text: 'Draw',
+  title: 'Draw between the notes (D)',
+  toggle: true,
+  onPress: () => setInking(!ink.isActive()),
+})
+const inkTools = document.createElement('div')
+inkTools.className = 'rib-ink-tools'
+drawGroup.appendChild(inkTools)
+const ribPens = []
+for (const c of PEN_COLORS.slice(0, 7)) {
+  const b = ribbon.button(inkTools, {
+    cls: 'rib-pen',
+    title: 'Pen colour ' + c,
+    toggle: true,
+    onPress: () => {
+      inkTool.color = c
+      inkTool.mode = 'pen'
+      ink.setTool(inkTool)
+      refreshRibbon()
+    },
+  })
+  b.style.setProperty('--pen', c)
+  b.dataset.color = c
+  ribPens.push(b)
+}
+const ribWidth = document.createElement('input')
+ribWidth.type = 'range'
+ribWidth.min = '1'
+ribWidth.max = '16'
+ribWidth.value = String(inkTool.width)
+ribWidth.className = 'rib-width'
+ribWidth.title = 'Pen size'
+ribWidth.setAttribute('aria-label', 'Pen size')
+ribWidth.addEventListener('input', () => {
+  inkTool.width = Number(ribWidth.value)
+  ink.setTool(inkTool)
+})
+inkTools.appendChild(ribWidth)
+const ribErase = ribbon.button(inkTools, {
+  icon: 'eraser',
+  title: 'Eraser: removes whole strokes',
+  toggle: true,
+  onPress: () => {
+    inkTool.mode = inkTool.mode === 'erase' ? 'pen' : 'erase'
+    ink.setTool(inkTool)
+    refreshRibbon()
+  },
+})
+ribbon.button(inkTools, { icon: 'undo', title: 'Undo your last stroke (Ctrl/Cmd+Z)', onPress: () => ink.undo() })
+ribbon.button(inkTools, { icon: 'redo', title: 'Redo (Ctrl/Cmd+Shift+Z)', onPress: () => ink.redo() })
+
+function setRibbonTarget(next) {
+  if (next && next.el) next = { card: next } // a card
+  const same = next?.card ? ribbonTarget?.card === next.card : !!next?.page === !!ribbonTarget?.page && !next === !ribbonTarget
+  if (same) return
+  ribbonTarget = next
+  ribbonFmt.update({}, {})
+  refreshRibbon()
+}
+
+// an editor reports its marks / line style; mirror them while it is the target
+function ribbonState(card, marks, line) {
+  if (ribbonTarget?.card === card) ribbonFmt.update(marks, line)
+}
+
+function refreshRibbon() {
+  const t = activeTab()
+  const kind = !t || isNotesTab(t) ? 'notes' : t.kind
+  const show = !phoneMode() && (kind === 'notes' || kind === 'doc')
+  const c = ribbonTarget?.card
+  const n = c?.note
+  const prose = !!n && (n.get('kind') || 'note') !== 'todo'
+  ribbon.el.hidden = !show
+  ribbon.el.dataset.kind = kind
+  textGroup.classList.toggle('disabled', !(prose || ribbonTarget?.page))
+  noteGroup.hidden = kind !== 'notes'
+  noteGroup.classList.toggle('disabled', !n)
+  drawGroup.hidden = kind !== 'notes' || !freeLayout
+  for (const b of ribbon.el.querySelectorAll('.rib-text button, .rib-note button')) b.disabled = !!b.closest('.disabled')
+  const inking = ink.isActive()
+  setPressed(ribInk, inking)
+  inkTools.hidden = !inking
+  for (const b of ribPens) setPressed(b, inkTool.mode === 'pen' && b.dataset.color === inkTool.color)
+  setPressed(ribErase, inkTool.mode === 'erase')
+  if (n) {
+    ribColorDot.style.background = renderedPaper(n.get('color') || PAPER[0])
+    ribFs.textContent = (n.get('fontSize') || FS_DEFAULT) + 'px'
+    const sz = n.get('size') || 'm'
+    for (const k in ribSizes) setPressed(ribSizes[k], k === sz)
+    setPressed(ribGrow, growsWithContent(n))
+    setPressed(ribPin, !!n.get('pinned'))
+  } else {
+    ribColorDot.style.background = ''
+    ribFs.textContent = '–'
+    for (const k in ribSizes) setPressed(ribSizes[k], false)
+    setPressed(ribGrow, false)
+    setPressed(ribPin, false)
+  }
+  // "while editing" shows it only when there is something to act on
+  const mode = getSettings().ribbon
+  document.body.classList.toggle('ribbon-auto', mode === 'editing')
+  ribbon.setVisible(show && (mode !== 'editing' || !!ribbonTarget || inking))
+  syncChromeHeight()
+}
+onSettingChange((key) => { if (key === 'ribbon') refreshRibbon() })
+
+// a click on empty board (not a note, the ribbon or one of its menus) ends editing
+document.addEventListener('pointerdown', (e) => {
+  if (!ribbonTarget?.card) return
+  if (e.target.closest('.card, #ribbon, .menu, .card-pop, .dlg-back, .toasts, .full-back')) return
+  setRibbonTarget(null)
+}, true)
+
+// The chrome above the board (top bar + tabs + ribbon) varies in height; the
+// board, canvas, sketch and page views size themselves with --chrome-h.
+const chromeEls = [document.querySelector('.topbar'), tabsEl, ribbon.el]
+function syncChromeHeight() {
+  const [top, tabs, rib] = chromeEls
+  const visible = (el) => el && !el.hidden && getComputedStyle(el).display !== 'none'
+  const above = (visible(top) ? top.offsetHeight : 0) + (visible(tabs) ? tabs.offsetHeight : 0)
+  // "while editing" floats the ribbon over the board, so it never pushes it down
+  const ribH = visible(rib) && !document.body.classList.contains('ribbon-auto') ? rib.offsetHeight : 0
+  const root = document.documentElement.style
+  root.setProperty('--ribbon-top', above + 'px')
+  root.setProperty('--chrome-h', above + ribH + 'px')
+}
+if (typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(rafThrottle(syncChromeHeight))
+  for (const el of chromeEls) if (el) ro.observe(el)
+}
+
 function setPenColor(surface, value) {
   drawTool.color = value
   drawTool.mode = 'pen'
@@ -2667,6 +3010,8 @@ function buildDrawBar(surface) {
   color.className = 'draw-color'
   color.value = normalizeHex(drawTool.color)
   color.title = 'Pen colour'
+
+  color.setAttribute('aria-label', color.title)
   color.addEventListener('input', () => setPenColor(surface, color.value))
 
   // quick preset pen colours
@@ -2678,6 +3023,8 @@ function buildDrawBar(surface) {
     b.className = 'draw-swatch'
     b.style.background = c
     b.title = c
+
+    b.setAttribute('aria-label', b.title)
     b.addEventListener('click', () => setPenColor(surface, c))
     swatches.appendChild(b)
     swatchRefs.push({ el: b, color: c })
@@ -2690,6 +3037,8 @@ function buildDrawBar(surface) {
   width.value = String(drawTool.width)
   width.className = 'draw-width'
   width.title = 'Pen / text size'
+
+  width.setAttribute('aria-label', width.title)
   width.addEventListener('input', () => {
     drawTool.width = Number(width.value)
     surface.setWidth(drawTool.width)
@@ -2766,7 +3115,7 @@ function syncDrawBar() {
 function drawBtn(label, fn) {
   const b = document.createElement('button')
   b.className = 'draw-btn'
-  b.textContent = label
+  iconLabel(b, label)
   b.addEventListener('click', fn)
   return b
 }
@@ -2784,31 +3133,47 @@ function scheduleReconcile() {
 
 function reconcile() {
   const active = activeTab()
-  const drawing = active && active.kind === 'draw'
+  const kind = !active || isNotesTab(active) ? 'notes' : active.kind // 'notes' | 'draw' | 'doc' | 'mindmap'
+  const notesTab = kind === 'notes'
 
-  board.style.display = drawing ? 'none' : ''
-  drawView.style.display = drawing ? 'flex' : 'none'
-  addBtn.style.display = drawing ? 'none' : ''
-  searchWrap.style.visibility = drawing ? 'hidden' : ''
+  board.style.display = notesTab ? '' : 'none'
+  drawView.style.display = kind === 'draw' ? 'flex' : 'none'
+  pageView.hidden = kind !== 'doc' && kind !== 'mindmap'
+  addBtn.style.display = notesTab ? '' : 'none'
+  searchWrap.style.visibility = notesTab ? '' : 'hidden'
+  document.body.dataset.tabKind = kind
 
-  if (drawing) {
+  if (!notesTab) {
     for (const [id, card] of cards) {
       destroyCard(card)
       cards.delete(id)
     }
     setCanvasMode(false)
     if (boardSel.size) setSelected([])
+    setInking(false)
+    ink.bind(null)
     empty.style.display = 'none'
-    mountDraw(active.id)
+    if (kind === 'draw') {
+      unmountPage()
+      mountDraw(active.id)
+    } else {
+      unmountDraw()
+      mountPage(active.id, kind)
+    }
     renderTabs()
     renderPresence()
+    phoneRefresh() // phone title, + button
+    refreshRibbon()
     return
   }
 
   unmountDraw()
+  unmountPage()
   board.classList.toggle('free', freeLayout)
   setCanvasMode(active && active.view === 'canvas', active && active.id)
-  edges.setEnabled(freeLayout)
+  ink.setEnabled(freeLayout)
+  ink.bind(active && freeLayout ? inkArray(active.id) : null)
+  if (!freeLayout) setInking(false)
   const box = container()
 
   let order = yOrder
@@ -2836,11 +3201,11 @@ function reconcile() {
     if (ref !== card.el) box.insertBefore(card.el, ref)
     prev = card.el
   }
-  // the arrow layer and snap guides live with the cards
-  if (edges.el.parentNode !== box) box.appendChild(edges.el)
+  // the ink layer and snap guides live with the cards
+  if (ink.el.parentNode !== box) box.appendChild(ink.el)
   if (guides.el.parentNode !== box) box.appendChild(guides.el)
+  if (ribbonTarget?.card && !cards.has(ribbonTarget.card.id)) setRibbonTarget(null)
   if (boardSel.size) setSelected(Array.from(boardSel).filter((sid) => cards.has(sid)))
-  edges.schedule()
 
   empty.style.display = order.length ? 'none' : 'flex'
   updateBoardExtent()
@@ -2848,6 +3213,7 @@ function reconcile() {
   renderPresence()
   applyFilter()
   phoneRefresh()
+  refreshRibbon()
 }
 
 yOrder.observe(scheduleReconcile)
@@ -2876,6 +3242,7 @@ function openFullscreen(id, opts = {}) {
   const note = yNotes.get(id)
   if (!note || note.get('deleted')) return false
   if (full && full.id === id) return true
+  const sourceRect = cards.get(id)?.el.getBoundingClientRect()
   if (full) closeFullscreenNow()
   closeMenus()
   closeAllPopovers()
@@ -2892,30 +3259,35 @@ function openFullscreen(id, opts = {}) {
   const closeBtn = document.createElement('button')
   closeBtn.className = 'icon-btn full-x'
   closeBtn.title = 'Close (Esc)'
-  closeBtn.innerHTML = '<span class="full-x-back">←</span><span class="full-x-close">×</span>'
+
+  closeBtn.setAttribute('aria-label', closeBtn.title)
+  closeBtn.innerHTML = '<span class="full-x-back">' + iconHTML('back') + '</span><span class="full-x-close">' + iconHTML('close') + '</span>'
+  const backLabel = document.createElement('span')
+  backLabel.className = 'full-back-label'
+  backLabel.textContent = activeTab()?.name || 'Notes'
+  closeBtn.appendChild(backLabel)
   closeBtn.addEventListener('click', () => closeFullscreen())
   const presenceEl = document.createElement('div')
   presenceEl.className = 'card-presence'
   const tools = document.createElement('div')
   tools.className = 'card-tools full-tools'
-  const mapBtn = document.createElement('button')
-  mapBtn.className = 'icon-btn full-map'
-  mapBtn.title = 'Mind map / text'
-  mapBtn.innerHTML = svg('M8 3v4M8 7L4 11M8 7l4 4', '<circle cx="8" cy="2.6" r="1.6"/><circle cx="3.4" cy="12.6" r="1.6"/><circle cx="12.6" cy="12.6" r="1.6"/>')
-  mapBtn.addEventListener('click', () => setNoteView(note, note.get('view') === 'map' ? 'note' : 'map'))
   const optBtn = document.createElement('button')
   optBtn.className = 'icon-btn opt'
   optBtn.title = 'Colour, size, layout & more'
-  optBtn.innerHTML = '&#9881;'
+
+  optBtn.setAttribute('aria-label', optBtn.title)
+  iconLabel(optBtn, '', 'more')
   const del = document.createElement('button')
   del.className = 'icon-btn del'
   del.title = 'Delete note'
-  del.innerHTML = svg('M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5M7 7v4M9 7v4')
+
+  del.setAttribute('aria-label', del.title)
+  del.replaceChildren(makeIcon('trash'))
   del.addEventListener('click', () => {
     closeFullscreen()
     deleteNote(id)
   })
-  tools.append(mapBtn, optBtn, del)
+  tools.append(optBtn, del)
   top.append(closeBtn, presenceEl, tools)
 
   const titleEl = document.createElement('input')
@@ -2961,7 +3333,9 @@ function openFullscreen(id, opts = {}) {
       card.body.rich.focusEnd()
     }
   })
-  el.append(top, titleEl, bodyHost, fmtBar.el, meta)
+  // desktop: the toolbar sits under the title like a document's; phone: above the keyboard
+  if (phoneMode()) el.append(top, titleEl, bodyHost, fmtBar.el, meta)
+  else el.append(top, titleEl, fmtBar.el, bodyHost, meta)
   back.appendChild(el)
   document.body.appendChild(back)
   document.body.classList.add('has-full')
@@ -3000,7 +3374,7 @@ function openFullscreen(id, opts = {}) {
       ui.toast('Moved to ' + (t ? t.name : 'another tab'), { action: 'Open', onAction: () => goToNote(id) })
       return
     }
-    if (e.keysChanged.has('kind') || e.keysChanged.has('layout') || e.keysChanged.has('view')) mountBody(card)
+    if (e.keysChanged.has('kind') || e.keysChanged.has('layout')) mountBody(card)
     if (e.keysChanged.has('lastEditedAt')) card.setMeta()
     applyFullStyle(card)
     if (card.pop) refreshPopover(card)
@@ -3023,6 +3397,8 @@ function openFullscreen(id, opts = {}) {
   }
   renderPresence()
   requestAnimationFrame(() => {
+    el.style.transformOrigin = '0 0'
+    ui.zoomFrom(el, sourceRect)?.finished.then(() => el.getAnimations().forEach(a => a.cancel())).catch(() => {})
     if (opts.focus === false) return
     if (!note.get('title').toString().trim()) titleEl.focus()
     else if (card.body && card.body.rich && !phoneMode()) card.body.rich.focusEnd()
@@ -3033,11 +3409,12 @@ function openFullscreen(id, opts = {}) {
 function applyFullStyle(card) {
   const note = card.note
   const el = card.el
-  const color = note.get('color') || PAPER[0]
+  const color = renderedPaper(note.get('color') || PAPER[0])
   el.style.background = color
   el.style.setProperty('--note-ink', inkFor(color))
   el.style.setProperty('--note-ink-dim', inkDimFor(color))
   el.style.setProperty('--note-line', hairlineFor(color))
+  el.style.setProperty('--note-link', inkFor(color) === '#ffffff' ? '#ffd60a' : '#694b00')
   el.style.setProperty('--note-fs', Math.max(15, (note.get('fontSize') || FS_DEFAULT) + 3) + 'px')
   const ts = note.get('titleSize')
   if (ts) el.style.setProperty('--title-fs', ts + 6 + 'px')
@@ -3051,10 +3428,16 @@ function closeFullscreenNow() {
   const f = full
   full = null
   const card = f.card
-  if (card.pop) card.pop.remove()
+  if (card.pop) { card.closePop?.(); card.pop.remove() }
   if (card.body) card.body.destroy()
   card.unbinds.forEach((fn) => fn())
-  f.back.remove()
+  const target = cards.get(f.id)?.el
+  const anim = target?.isConnected ? ui.zoomFrom(card.el, target.getBoundingClientRect(), { reverse:true }) : null
+  if (anim) {
+    f.back.style.pointerEvents = 'none'
+    const done = () => f.back.remove()
+    anim.finished.then(done, done)
+  } else f.back.remove()
   document.body.classList.remove('has-full')
   if (awareness.getLocalState()?.focus === f.id) awareness.setLocalStateField('focus', null)
   if (phoneMode()) phoneRefresh()
@@ -3117,7 +3500,7 @@ function phoneRefresh() {
   board.classList.toggle('one-col', on && Number(getSettings().phoneCols) === 1)
   const t = activeTab()
   phoneTitle.textContent = t ? t.name : 'notes'
-  fab.hidden = !on || !!(t && t.kind === 'draw')
+  fab.hidden = !on || (!!t && !isNotesTab(t))
   phoneBar.hidden = !on
   if (!on && picked.size) picked.clear()
   for (const id of Array.from(picked)) if (!cards.has(id)) picked.delete(id)
@@ -3218,6 +3601,8 @@ function swatchSheet(anchor, colors, onPick) {
     b.className = 'pop-swatch'
     b.style.background = c
     b.title = c
+
+    b.setAttribute('aria-label', b.title)
     b.addEventListener('click', () => {
       closeMenus()
       onPick(c)
@@ -3228,7 +3613,8 @@ function swatchSheet(anchor, colors, onPick) {
   const r = anchor.getBoundingClientRect()
   m.style.left = Math.max(6, Math.min(r.left, window.innerWidth - m.offsetWidth - 6)) + 'px'
   m.style.top = r.bottom + 6 + 'px'
-  openMenus.push(m)
+  const dismiss = ui.popover(m, anchor, { label: 'Note colour' })
+  openMenus.push({ remove: dismiss })
 }
 
 function renderSelBar() {
@@ -3242,8 +3628,11 @@ function renderSelBar() {
   const b = (html, title, fn, cls) => {
     const x = document.createElement('button')
     x.className = 'sel-btn' + (cls ? ' ' + cls : '')
-    x.innerHTML = html
+    if (html.startsWith('<svg')) x.innerHTML = html
+    else iconLabel(x, html)
     x.title = title
+
+    x.setAttribute('aria-label', x.title)
     x.setAttribute('aria-label', title)
     x.addEventListener('click', (e) => {
       e.stopPropagation()
@@ -3287,7 +3676,7 @@ function renderSelBar() {
     ui.menu(
       x,
       tabsList()
-        .filter((t) => t.kind !== 'draw' && !t.archived && t.id !== activeTabId)
+        .filter((t) => isNotesTab(t) && !t.archived && t.id !== activeTabId)
         .map((t) => ({
           label: t.name,
           onClick: () => {
@@ -3306,7 +3695,7 @@ function renderDrawer() {
   panel.replaceChildren()
   const head = document.createElement('div')
   head.className = 'drawer-head'
-  head.innerHTML = '<span class="brand-dot"></span><span class="brand-name">notes</span>'
+  head.innerHTML = '<span class="brand-dot"></span><span class="brand-name">Notes</span>'
   panel.appendChild(head)
   const counts = new Map()
   yNotes.forEach((n) => {
@@ -3319,7 +3708,7 @@ function renderDrawer() {
     b.className = 'drawer-item' + (cls ? ' ' + cls : '')
     const i = document.createElement('span')
     i.className = 'drawer-icon'
-    i.textContent = icon
+    i.appendChild(makeIcon(icon))
     const l = document.createElement('span')
     l.className = 'drawer-label'
     l.textContent = label
@@ -3342,7 +3731,7 @@ function renderDrawer() {
   }
   sec('Tabs')
   for (const t of tabsList().filter((x) => !x.archived)) {
-    row(t.kind === 'draw' ? '✎' : '☰', t.name, t.kind === 'draw' ? '' : String(counts.get(t.id) || 0), () => {
+    row(kindInfo(t.kind).icon, t.name, isNotesTab(t) ? String(counts.get(t.id) || 0) : '', () => {
       closeDrawer()
       setActiveTab(t.id)
     }, t.id === activeTabId ? 'on' : '')
@@ -3350,6 +3739,14 @@ function renderDrawer() {
   row('+', 'New list', null, () => {
     closeDrawer()
     addTab('notes')
+  }, 'drawer-add')
+  row('+', 'New document', null, () => {
+    closeDrawer()
+    addTab('doc')
+  }, 'drawer-add')
+  row('+', 'New mind map', null, () => {
+    closeDrawer()
+    addTab('mindmap')
   }, 'drawer-add')
   row('+', 'New sketch', null, () => {
     closeDrawer()
@@ -3413,6 +3810,8 @@ function newPhoneNote(kind) {
           { icon: '☑', label: 'New checklist', onClick: () => newPhoneNote('todo') },
           'sep',
           { icon: '☰', label: 'New list tab', onClick: () => addTab('notes') },
+          { icon: 'text', label: 'New document tab', onClick: () => addTab('doc') },
+          { icon: 'map', label: 'New mind map tab', onClick: () => addTab('mindmap') },
           { icon: '✎', label: 'New sketch tab', onClick: () => addTab('draw') },
         ],
         { align: 'right' }
@@ -3467,22 +3866,29 @@ if (window.visualViewport) {
 // ---- overlays: home page, hidden notes (trash / archived), history ----------
 const overlay = document.getElementById('overlay')
 let overlayKind = null // 'home' | 'hidden' | 'history'
+let releasePanelFocus = null
 
 function closeOverlay() {
   overlay.hidden = true
   overlay.replaceChildren()
   overlayKind = null
+  releasePanelFocus?.()
+  releasePanelFocus = null
 }
 function closeHome() {
   if (overlayKind === 'home') closeOverlay()
 }
 function openPanel(kind, title, build) {
+  releasePanelFocus?.()
   closeMenus()
   closeAllPopovers()
   overlay.replaceChildren()
   overlayKind = kind
   const panel = document.createElement('div')
   panel.className = 'panel panel-' + kind
+  panel.setAttribute('role', 'dialog')
+  panel.setAttribute('aria-modal', 'true')
+  panel.setAttribute('aria-label', title)
   const head = document.createElement('div')
   head.className = 'panel-head'
   const h = document.createElement('div')
@@ -3490,8 +3896,10 @@ function openPanel(kind, title, build) {
   h.textContent = title
   const x = document.createElement('button')
   x.className = 'panel-x'
-  x.textContent = '×'
+  iconLabel(x, '×')
   x.title = 'Close (Esc)'
+
+  x.setAttribute('aria-label', x.title)
   x.addEventListener('click', closeOverlay)
   head.append(h, x)
   const body = document.createElement('div')
@@ -3500,6 +3908,9 @@ function openPanel(kind, title, build) {
   overlay.appendChild(panel)
   overlay.hidden = false
   build(body, panel)
+  body.addEventListener('scroll', () => panel.classList.toggle('scrolled', body.scrollTop > 24), { passive:true })
+  releasePanelFocus = ui.trapFocus(panel)
+  requestAnimationFrame(() => panel.querySelector('input, button')?.focus({ preventScroll:true }))
   return body
 }
 overlay.addEventListener('pointerdown', (e) => {
@@ -3576,7 +3987,7 @@ function openHome() {
       top.className = 'home-tab-top'
       const name = document.createElement('span')
       name.className = 'home-tab-name'
-      name.textContent = (t.kind === 'draw' ? '✎ ' : '☰ ') + t.name
+      iconLabel(name, t.name, isNotesTab(t) ? 'folder' : kindInfo(t.kind).icon)
       top.appendChild(name)
       if (people.length) {
         const pp = document.createElement('span')
@@ -3584,8 +3995,10 @@ function openHome() {
         people.slice(0, 4).forEach((u) => {
           const d = document.createElement('span')
           d.className = 'editor-dot'
-          d.style.setProperty('--c', u.color || '#888')
+          d.style.setProperty('--c', u.color || 'var(--label-2)')
           d.title = u.name + ' is here'
+
+          d.setAttribute('aria-label', d.title)
           d.textContent = initials(u.name || '?')
           pp.appendChild(d)
         })
@@ -3594,7 +4007,7 @@ function openHome() {
       const sub = document.createElement('div')
       sub.className = 'home-tab-sub'
       sub.textContent =
-        t.kind === 'draw' ? 'Sketch board' : count + (count === 1 ? ' note' : ' notes') + (at ? ' · edited ' + relTime(at) : '')
+        !isNotesTab(t) ? kindInfo(t.kind).sub : count + (count === 1 ? ' note' : ' notes') + (at ? ' · edited ' + relTime(at) : '')
       c.append(top, sub)
       if (backup.isExcluded(t.id)) {
         const nb = document.createElement('div')
@@ -3728,7 +4141,7 @@ function openHiddenPanel(tabId) {
           for (const [label, fn, danger] of actions) {
             const b = document.createElement('button')
             b.className = 'pop-btn' + (danger ? ' danger' : '')
-            b.textContent = label
+            iconLabel(b, label)
             b.addEventListener('click', () => fn(id, n))
             btns.appendChild(b)
           }
@@ -3809,6 +4222,8 @@ function openHistoryPanel(noteId) {
       const when = new Date(v.ts)
       b.textContent = when.toLocaleString()
       b.title = v.commit
+
+      b.setAttribute('aria-label', b.title)
       b.addEventListener('click', async () => {
         list.querySelectorAll('.hist-item').forEach((x) => x.classList.toggle('on', x === b))
         view.textContent = 'Loading…'
@@ -3896,9 +4311,11 @@ function renderPresence() {
   for (const p of seen) {
     const a = document.createElement('span')
     a.className = 'avatar'
-    a.style.setProperty('--c', p.user.color || '#888')
+    a.style.setProperty('--c', p.user.color || 'var(--label-2)')
     a.textContent = initials(p.user.name || '?')
     a.title = p.self ? p.user.name + ' (you)' : p.user.name
+
+    a.setAttribute('aria-label', a.title)
     peopleEl.appendChild(a)
   }
 
@@ -3917,8 +4334,10 @@ function renderPresence() {
     editors.slice(0, 4).forEach((u) => {
       const d = document.createElement('span')
       d.className = 'editor-dot'
-      d.style.setProperty('--c', u.color || '#888')
+      d.style.setProperty('--c', u.color || 'var(--label-2)')
       d.title = u.name + ' is editing'
+
+      d.setAttribute('aria-label', d.title)
       d.textContent = initials(u.name || '?')
       card.presenceEl.appendChild(d)
     })
@@ -3939,7 +4358,6 @@ function applyFilter() {
     if (!n) continue
     card.el.classList.toggle('hidden', !noteHay(n).includes(q))
   }
-  edges.schedule()
   if (canvasMode) viewport.refreshMap()
 }
 // while searching, folded lines are shown (so a match can't hide inside a fold)
@@ -4013,10 +4431,29 @@ function openSettingsMenu(anchor) {
     }
     menu.appendChild(l)
   }
-  head('Just for this device')
+  head('Appearance')
+  const themeRow = document.createElement('div')
+  themeRow.className = 'settings-enum'
+  const themeLabel = document.createElement('span')
+  iconLabel(themeLabel, 'Theme', 'sun')
+  themeRow.append(themeLabel, ui.segmented('Theme', [['system', 'Automatic'], ['light', 'Light'], ['dark', 'Dark']], st.theme, value => setSetting('theme', value)))
+  menu.appendChild(themeRow)
+  const ribbonRow = document.createElement('div')
+  ribbonRow.className = 'settings-enum'
+  const ribbonLabel = document.createElement('span')
+  iconLabel(ribbonLabel, 'Toolbar', 'rows')
+  ribbonRow.append(ribbonLabel, ui.segmented('Toolbar', [['always', 'Always'], ['editing', 'While editing']], st.ribbon, (value) => setSetting('ribbon', value)))
+  menu.appendChild(ribbonRow)
+  const colsRow = document.createElement('div')
+  colsRow.className = 'settings-enum'
+  const colsLabel = document.createElement('span')
+  iconLabel(colsLabel, 'Phone columns', 'grid')
+  colsRow.append(colsLabel, ui.segmented('Phone columns', [['1', 'One'], ['2', 'Two']], String(st.phoneCols), value => { setSetting('phoneCols', Number(value)); phoneRefresh() }))
+  menu.appendChild(colsRow)
+  head('Editing')
   check('Spell-check underline', 'spellcheck', 'Red squiggles in notes')
   check('Smart arrows', 'arrows', '-> becomes →, -- becomes —')
-  check('Keep an offline copy', 'offline', 'The board opens even with the Pi off')
+  head('Board')
   check('Snap notes to each other', 'snap', 'Edges and centres line up while dragging (hold Alt to place freely)')
   check('Snap to a grid', 'grid', 'Every ' + (st.gridSize || 20) + ' px')
   const launch = document.createElement('label')
@@ -4031,10 +4468,11 @@ function openSettingsMenu(anchor) {
   menu.appendChild(launch)
 
   head('Backup on this device')
+  check('Keep an offline copy', 'offline', 'The board opens even with the Pi off')
   const btn = (label, fn, cls) => {
     const b = document.createElement('button')
     b.className = 'menu-item' + (cls ? ' ' + cls : '')
-    b.textContent = label
+    iconLabel(b, label)
     b.addEventListener('click', () => {
       closeMenus()
       fn()
@@ -4046,7 +4484,7 @@ function openSettingsMenu(anchor) {
     const a = document.createElement('a')
     a.className = 'menu-item menu-sub'
     a.href = href
-    a.textContent = label
+    iconLabel(a, label)
     a.addEventListener('click', () => closeMenus())
     menu.appendChild(a)
   }
@@ -4077,8 +4515,22 @@ function openSettingsMenu(anchor) {
   link('⬇  Download from the Pi (everything, Markdown)', '/api/export.md')
   link('⬇  Download from the Pi (everything, JSON)', '/api/export.json')
 
+  head('Account')
+  btn('Change your name', () => document.getElementById('rename').click())
+  for (const input of menu.querySelectorAll('input[type="checkbox"]')) {
+    input.classList.add('switch')
+    input.setAttribute('role', 'switch')
+  }
+  for (const row of menu.querySelectorAll('.menu-check')) {
+    const tile = document.createElement('span')
+    tile.className = 'settings-tile'
+    tile.appendChild(makeIcon(row.textContent.includes('offline') ? 'cloud' : row.textContent.includes('launch') ? 'home' : row.textContent.includes('Snap') ? 'grid' : 'text'))
+    row.prepend(tile)
+  }
+
   document.body.appendChild(menu)
-  openMenus.push(menu)
+  const dismiss = ui.popover(menu, anchor, { menu: !menu.classList.contains('settings-menu'), label: 'Settings' })
+  openMenus.push({ remove: dismiss })
 }
 
 onSettingChange((key, value) => {
@@ -4140,8 +4592,8 @@ function followHash(initial) {
       /* ignore */
     }
     const t = activeTab()
-    if (t && t.kind === 'draw') {
-      const n = tabsList().find((x) => x.kind !== 'draw' && !x.archived)
+    if (t && !isNotesTab(t)) {
+      const n = tabsList().find((x) => isNotesTab(x) && !x.archived)
       if (n) setActiveTab(n.id)
     }
     const id = createNote(PAPER[Math.floor(Math.random() * 4)])
@@ -4184,3 +4636,32 @@ setTimeout(() => {
   if (!provider.synced && !everConnected) migrateBoard()
 }, 2500)
 reconcile()
+
+mountIcons()
+tabsEl.setAttribute('role', 'tablist')
+window.addEventListener('notes-theme-change', () => {
+  for (const [, card] of cards) {
+    applyNoteStyle(card.el, card.note)
+    card.pop?.querySelectorAll('.pop-swatch').forEach(b => { b.style.background = renderedPaper(b.dataset.color); b.style.color = inkFor(renderedPaper(b.dataset.color)) })
+  }
+  if (full) applyFullStyle(full.card)
+  viewport.refreshMap()
+})
+const searchClear = document.getElementById('search-clear')
+search.addEventListener('input', () => { searchClear.hidden = !search.value })
+searchClear.addEventListener('click', () => { search.value = ''; search.dispatchEvent(new Event('input')); search.focus() })
+document.getElementById('empty-add').addEventListener('click', () => phoneMode() ? newPhoneNote('note') : addBtn.click())
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault(); if (phoneMode()) document.body.classList.add('searching'); search.focus(); search.select()
+  }
+})
+const syncScrollChrome = rafThrottle(() => {
+  document.querySelector('.topbar').classList.toggle('scrolled', scrollY > 8 || board.scrollTop > 8)
+  document.body.classList.toggle('compact-title', scrollY > 40)
+})
+window.addEventListener('scroll', syncScrollChrome, { passive: true })
+board.addEventListener('scroll', syncScrollChrome, { passive: true })
+let pullStart = null
+board.addEventListener('touchstart', e => { if (phoneMode() && scrollY <= 0) pullStart = e.touches[0].clientY }, { passive: true })
+board.addEventListener('touchend', e => { if (pullStart != null && e.changedTouches[0].clientY - pullStart > 70) document.body.classList.add('searching'); pullStart = null }, { passive: true })

@@ -66,11 +66,11 @@ function cdp(ws) {
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-cdp-'))
 let server, chrome, ws
 const watchdog = setTimeout(async () => {
-  console.log('FAIL  watchdog: harness exceeded 90s')
+  console.log('FAIL  watchdog: harness exceeded 150s')
   failures++
   await cleanup()
   process.exit(1)
-}, 90000)
+}, 150000)
 watchdog.unref?.()
 async function cleanup() {
   try { ws && ws.close() } catch {}
@@ -217,6 +217,13 @@ try {
       const r = document.createRange(); r.selectNodeContents(t); r.collapse(false)
       const s = getSelection(); s.removeAllRanges(); s.addRange(r)
     })()`)
+  // the ribbon acts on the note last focused; its More button opens the note's options
+  const openOpts = (id) =>
+    evaluate(`(() => {
+      ${sel(id, '.card-body')}.focus()
+      document.querySelector('#ribbon .rib-more').click()
+      return !!document.querySelector('.card-pop.open')
+    })()`)
   const lines = (id) =>
     evaluate(`[...${sel(id, '.card-body')}.querySelectorAll(':scope > .rb-line')].map((l) => ({
       cls: l.className, text: l.querySelector('.rb-text').textContent, mark: (l.querySelector('.rb-mark') || {}).textContent || '',
@@ -237,16 +244,24 @@ try {
     return {
       cards: document.querySelectorAll('.card').length,
       editable: body && body.getAttribute('contenteditable') === 'true',
-      fmtBtns: card ? card.querySelectorAll('.card-fmt .fmt-btn').length : 0,
-      optBtn: !!(card && card.querySelector('.icon-btn.opt')),
+      fmtBtns: document.querySelectorAll('#ribbon .rib-fmt .fmt-btn').length,
+      noChin: !!card && !card.querySelector('.card-fmt') && !card.querySelector('.icon-btn.opt'),
+      ribbon: !document.getElementById('ribbon').hidden,
+      grows: !!card && card.classList.contains('autogrow'),
     }
   })()`)
   check('clicking + Note adds a card', made.cards >= 1)
   check('note body is contentEditable', made.editable === true)
-  check('format toolbar has marks, lists, checkbox, align and picture buttons', made.fmtBtns >= 8)
-  check('options (gear) button present', made.optBtn === true)
+  check('the ribbon has marks, lists, checkbox, align and picture buttons', made.ribbon && made.fmtBtns >= 8)
+  check('notes carry no toolbar or settings button of their own', made.noChin)
+  check('a new note grows with its content', made.grows)
 
+  await evaluate(`document.activeElement && document.activeElement.blur()`)
+  await evaluate(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`)
+  check('with no note being edited the ribbon is greyed out', await evaluate(`document.querySelector('#ribbon .rib-note').classList.contains('disabled') && document.querySelector('#ribbon .fmt-b').disabled`))
   await evaluate(`${sel(A, '.card-body')}.focus()`)
+  check('clicking into a note enables the ribbon', await evaluate(`!document.querySelector('#ribbon .rib-note').classList.contains('disabled') && !document.querySelector('#ribbon .fmt-b').disabled`))
+  check('a focused note shows no focus ring', (await evaluate(`getComputedStyle(${sel(A, '.card-body')}).outlineStyle`)) === 'none')
   await type('hello world')
   const typed = await evaluate(`${sel(A, '.card-body')}.textContent`)
   check('typing fills the body through the controlled editor', typed === 'hello world')
@@ -264,6 +279,11 @@ try {
   })()`)
   check('Ctrl+B wraps the selection in <strong>', afterBold.strong === true)
   check('bolding preserves the text', afterBold.text === 'hello world')
+  await evaluate(`document.querySelector('#ribbon .fmt-b').click()`) // the ribbon keeps the selection: unbold
+  await sleep(100)
+  check('the ribbon Bold button works on the selection', await evaluate(`!${sel(A, '.card-body')}.querySelector('strong') && ${sel(A, '.card-body')}.textContent === 'hello world'`))
+  await key('b', 'KeyB', 66, 2)
+  await sleep(80)
 
   const layout = await evaluate(`(() => {
     const card = ${sel(A)}
@@ -277,8 +297,8 @@ try {
   check('board is in free (corkboard) layout', layout.boardFree === true)
   check('card is absolutely positioned with a grip', layout.cardFree && layout.grip && layout.positioned)
 
-  const popover = await evaluate(`(() => { ${sel(A, '.icon-btn.opt')}.click(); return !!document.querySelector('.card-pop.open') })()`)
-  check('options popover opens', popover === true)
+  const popover = await openOpts(A)
+  check('the ribbon opens the note options popover', popover === true)
   await evaluate(`document.body.click()`)
   await sleep(60)
   check('outside click closes the popover', await evaluate(`!document.querySelector('.card-pop.open')`))
@@ -347,7 +367,7 @@ try {
   check('clicking the count unfolds', (await evaluate(`${sel(A, '.card-body')}.querySelectorAll('.rb-hidden').length`)) === 0)
   // toolbar list menu
   await focusEnd(A)
-  await evaluate(`${sel(A, '.fmt-list')}.click()`)
+  await evaluate(`document.querySelector('#ribbon .fmt-list').click()`)
   await sleep(60)
   const menuItems = await evaluate(`[...document.querySelectorAll('.fmt-menu .menu-item')].map((b) => b.textContent)`)
   check('list menu offers bullets, squares, arrows, numbers, letters, roman, heading', menuItems.length >= 8 && menuItems.some((t) => /Roman/.test(t)))
@@ -428,8 +448,8 @@ try {
   await evaluate(`${sel(B, '.icon-btn.fold')}.click()`)
 
   // options popover: view, book layout, title size, archive, history, move
+  await openOpts(B)
   const popNew = await evaluate(`(() => {
-    ${sel(B, '.icon-btn.opt')}.click()
     const pop = document.querySelector('.card-pop.open')
     const labels = [...pop.querySelectorAll('.pop-btn')].map((b) => b.textContent.trim())
     const btn = [...pop.querySelectorAll('.pop-btn')].find((b) => b.textContent.trim() === 'Book')
@@ -437,8 +457,8 @@ try {
     return { labels, move: !!pop.querySelector('.pop-select') }
   })()`)
   check(
-    'popover offers Mind map, Book, Archive, History and Move-to-tab',
-    ['Mind map', 'Book', 'Archive', 'History'].every((l) => popNew.labels.includes(l)) && popNew.move
+    'popover offers Book, Archive, History and Move-to-tab (no per-note mind map)',
+    ['Book', 'Archive', 'History'].every((l) => popNew.labels.includes(l)) && !popNew.labels.includes('Mind map') && popNew.move
   )
   await sleep(250)
   const bookState = await evaluate(`(() => {
@@ -474,10 +494,8 @@ try {
   check('Enter saves the new tab name', (await evaluate(`document.querySelector('#tabs .tab.on .tab-name').textContent`)) === 'Renamed')
 
   // history panel reaches the server (git may or may not have committed yet)
-  await evaluate(`(() => {
-    ${sel(B, '.icon-btn.opt')}.click()
-    ;[...document.querySelectorAll('.card-pop.open .pop-btn')].find((b) => b.textContent.trim() === 'History').click()
-  })()`)
+  await openOpts(B)
+  await evaluate(`[...document.querySelectorAll('.card-pop.open .pop-btn')].find((b) => b.textContent.trim() === 'History').click()`)
   await sleep(900)
   const hist = await evaluate(`(() => {
     const p = document.querySelector('.panel-history')
@@ -588,27 +606,37 @@ try {
   const posC = await evaluate(`({ l: parseFloat(${sel(C)}.style.left), t: parseFloat(${sel(C)}.style.top) })`)
   check('dragging a note by its header moves it', posC.l > 500)
 
-  // ---------------------------------------------------------------- arrows between notes
-  const hA = await rectOf(sel(A, '.link-handle'))
-  const bB = await rectOf(sel(B, '.card-meta'))
-  await evaluate(`(() => {
-    const h = ${sel(A, '.link-handle')}
-    h.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 7, button: 0, clientX: ${hA.x + 5}, clientY: ${hA.y + 5} }))
-    window.dispatchEvent(new PointerEvent('pointermove', { pointerId: 7, clientX: ${bB.x + 20}, clientY: ${bB.y + 4} }))
-    window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 7, clientX: ${bB.x + 20}, clientY: ${bB.y + 4} }))
+  // ---------------------------------------------------------------- ink between the notes
+  check('notes have no arrow handle any more', await evaluate(`!document.querySelector('.link-handle')`))
+  await evaluate(`document.activeElement && document.activeElement.blur()`)
+  const inkSpot = await evaluate(`(() => {
+    const b = document.getElementById('board').getBoundingClientRect()
+    for (let y = Math.max(b.top, 260) + 20; y < Math.min(b.bottom, innerHeight) - 80; y += 15)
+      for (let x = b.left + 20; x < b.right - 200; x += 15) {
+        const ok = [0, 60, 120].every((d) => document.elementFromPoint(x + d, y + d / 3)?.id === 'board')
+        if (ok) return { x, y }
+      }
+    return null
   })()`)
+  await evaluate(`[...document.querySelectorAll('#ribbon .rib-draw .rib-btn')].find((b) => b.title.startsWith('Draw')).click()`)
+  await sleep(80)
+  check('Draw in the ribbon turns on ink mode', await evaluate(`document.getElementById('board').classList.contains('inking') && !document.querySelector('.ink-capture').hidden`))
+  if (inkSpot) await dragMouse(inkSpot.x, inkSpot.y, inkSpot.x + 120, inkSpot.y + 40, 0, 10)
   await sleep(150)
-  const arrow1 = await evaluate(`({ n: document.querySelectorAll('.edges .edge').length, pop: !!document.querySelector('.edge-pop') })`)
-  check('dragging the dot onto another note draws an arrow', arrow1.n === 1)
-  check('a new arrow is selected with its options open', arrow1.pop)
-  await evaluate(`(() => { const i = document.querySelector('.edge-pop .edge-input'); i.value = 'next'; i.dispatchEvent(new Event('input')) })()`)
-  await sleep(120)
-  check('arrows take a label', (await evaluate(`document.querySelector('.edges .edge-label')?.textContent`)) === 'next')
-  const d0 = await evaluate(`document.querySelector('.edges .edge-line').getAttribute('d')`)
-  await moveCard(B, 470, 330)
-  const d1 = await evaluate(`document.querySelector('.edges .edge-line').getAttribute('d')`)
-  check('the arrow re-routes when a note moves', d0 !== d1)
-  await evaluate(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`)
+  check('dragging on the board draws a stroke under the notes', !!inkSpot && (await evaluate(`document.querySelectorAll('.ink .ink-stroke').length`)) === 1)
+  const inkSaved = await evaluate(`fetch('/api/export.json').then((r) => r.ok)`)
+  check('the board still exports with ink on it', inkSaved)
+  await evaluate(`[...document.querySelectorAll('#ribbon .rib-btn')].find((b) => /Eraser/.test(b.title)).click()`)
+  if (inkSpot) await dragMouse(inkSpot.x + 60, inkSpot.y - 20, inkSpot.x + 60, inkSpot.y + 50, 0, 8)
+  await sleep(150)
+  check('the eraser removes the whole stroke', (await evaluate(`document.querySelectorAll('.ink .ink-stroke').length`)) === 0)
+  await key('z', 'KeyZ', 90, 2)
+  await sleep(150)
+  check('Ctrl+Z in ink mode brings the erased stroke back', (await evaluate(`document.querySelectorAll('.ink .ink-stroke').length`)) === 1)
+  await evaluate(`[...document.querySelectorAll('#ribbon .rib-btn')].find((b) => /Eraser/.test(b.title)).click()`)
+  await key('Escape', 'Escape', 27)
+  await sleep(80)
+  check('Escape leaves ink mode and the ink stays', await evaluate(`!document.getElementById('board').classList.contains('inking') && document.querySelectorAll('.ink .ink-stroke').length === 1`))
 
   // ---------------------------------------------------------------- multi-select + align + layout undo
   await evaluate(`document.activeElement && document.activeElement.blur()`)
@@ -629,47 +657,6 @@ try {
   check('Ctrl+Z undoes the alignment as one step', tops2[0] === tops0[0] && tops2[1] === tops0[1])
   await key('Escape', 'Escape', 27)
   check('Escape clears the selection', await evaluate(`document.querySelectorAll('.card.sel').length === 0`))
-
-  // ---------------------------------------------------------------- mind map view
-  await evaluate(`(() => {
-    ${sel(A, '.icon-btn.opt')}.click()
-    ;[...document.querySelectorAll('.card-pop.open .pop-btn')].find((b) => b.textContent.trim() === 'Mind map').click()
-  })()`)
-  await sleep(350)
-  await evaluate(`document.body.click()`)
-  const mm = await evaluate(`(() => {
-    const w = ${sel(A, '.mm-wrap')}
-    return { on: !!w, nodes: w ? w.querySelectorAll('.mm-node').length : 0, root: w ? w.querySelector('.mm-root text').textContent : '' }
-  })()`)
-  check('mind map view draws the outline as nodes under the title', mm.on && mm.nodes >= 6 && mm.root === 'Groceries')
-  const tapNode = (q) =>
-    evaluate(`(() => {
-      const n = ${sel(A, q)}
-      const o = { bubbles: true, cancelable: true, pointerId: 9, button: 0, clientX: 1, clientY: 1 }
-      n.dispatchEvent(new PointerEvent('pointerdown', o))
-      n.dispatchEvent(new PointerEvent('pointerup', o))
-    })()`)
-  await tapNode('.mm-root')
-  await sleep(100)
-  check('clicking a node edits it', await evaluate(`!!${sel(A, '.mm-input')}`))
-  await key('Tab', 'Tab', 9)
-  await sleep(150)
-  await type('Branch X')
-  await evaluate(`document.activeElement.blur()`)
-  await sleep(250)
-  const mm2 = await evaluate(`(() => {
-    const w = ${sel(A, '.mm-wrap')}
-    return { nodes: w.querySelectorAll('.mm-node').length, has: [...w.querySelectorAll('.mm-node text')].some((t) => t.textContent === 'Branch X') }
-  })()`)
-  check('Tab on a node adds a branch, typed into the note', mm2.has && mm2.nodes === mm.nodes + 1)
-  await evaluate(`(() => {
-    ${sel(A, '.icon-btn.opt')}.click()
-    ;[...document.querySelectorAll('.card-pop.open .pop-btn')].find((b) => b.textContent.trim() === 'Note').click()
-  })()`)
-  await sleep(300)
-  await evaluate(`document.body.click()`)
-  L = await lines(A)
-  check('the new branch is a line of the note in text view', L.some((l) => l.text === 'Branch X'))
 
   // ---------------------------------------------------------------- canvas view (pan & zoom)
   await evaluate(`document.querySelector('#tabs .tab.on .tab-x').click()`)
@@ -704,6 +691,9 @@ try {
   const pt1 = await evaluate(`document.querySelector('.plane').style.transform`)
   check('dragging the background pans', !!ep && pt0 !== pt1)
   // drag a note to the left of where the old board started: x goes negative
+  // notes grow with their content, so raise C above any neighbour that now overlaps its header
+  await evaluate(`${sel(C, '.card-title')}.focus(); document.activeElement.blur()`)
+  await sleep(100)
   const tC = await rectOf(sel(C, '.card-top'))
   await dragMouse(tC.x + 30, tC.y + tC.h / 2, br.x + 12, tC.y + tC.h / 2, 0, 12)
   const cx = await evaluate(`parseFloat(${sel(C)}.style.left)`)
@@ -756,6 +746,37 @@ try {
     return { blob: !!href && href.startsWith('blob:'), text }
   })()`)
   check('the device backup is built locally and leaves out the excluded tab', exp.blob && exp.text.includes('Shared Notes export') && !exp.text.includes('Groceries'))
+
+  // ---------------------------------------------------------------- appearance
+  await evaluate(`document.querySelector('.settings-menu') || document.getElementById('settings').click()`)
+  await sleep(80)
+  const theme = await evaluate(`(async () => {
+    const seg = (v) => document.querySelector('.settings-menu .segmented .segment[data-value="' + v + '"]')
+    const card = document.querySelector('#board .card[data-id]')
+    const stored = async () => (await (await fetch('/api/notes/' + card.dataset.id)).json()).color
+    const before = { bg: card.style.background, color: await stored() }
+    seg('dark').click()
+    await new Promise((r) => setTimeout(r, 50))
+    const dark = { theme: document.documentElement.dataset.theme, bg: card.style.background, pressed: seg('dark').getAttribute('aria-pressed'), color: await stored() }
+    seg('light').click()
+    await new Promise((r) => setTimeout(r, 50))
+    const light = { theme: document.documentElement.dataset.theme, bg: card.style.background }
+    seg('system').click()
+    return { before, dark, light, saved: JSON.parse(localStorage.getItem('notesSettings')).theme }
+  })()`)
+  check('the Dark theme switches the page and renders paper in a dark shade', theme.dark.theme === 'dark' && theme.dark.pressed === 'true' && theme.dark.bg !== theme.before.bg)
+  check('the theme never rewrites a note’s stored colour', !!theme.before.color && theme.dark.color === theme.before.color)
+  check('the Light theme restores the original paper, and Automatic is remembered', theme.light.theme === 'light' && theme.light.bg === theme.before.bg && theme.saved === 'system')
+  const sw = await evaluate(`(async () => {
+    const box = [...document.querySelectorAll('.settings-menu .menu-check')].find((l) => /Spell-check/.test(l.textContent)).querySelector('input.switch')
+    const read = () => JSON.parse(localStorage.getItem('notesSettings') || '{}').spellcheck
+    const was = box.checked
+    box.click()
+    const flipped = read()
+    box.click()
+    return { role: box.getAttribute('role'), was, flipped, back: read() }
+  })()`)
+  check('settings switches are role=switch and toggle their setting', sw.role === 'switch' && sw.flipped === !sw.was && sw.back === sw.was)
   await evaluate(`document.body.click()`)
   await evaluate(`document.querySelector('#tabs .tab.on .tab-x').click()`)
   await sleep(60)
@@ -829,6 +850,78 @@ try {
     clearBtn: [...document.querySelectorAll('.draw-btn')].some((b) => b.textContent === 'Clear'),
   }))()`)
   check('new sketch tab via the in-app dialog', dlg.open && sketch.tabName === 'Doodles' && sketch.drawShown && sketch.clearBtn)
+
+  // ---------------------------------------------------------------- document and mind map tabs
+  const newTab = async (label, name) => {
+    await evaluate(`document.querySelector('#tabs .tab-add').click()`)
+    await sleep(60)
+    await evaluate(`[...document.querySelectorAll('.menu-item')].find((b) => b.textContent.trim() === ${JSON.stringify(label)}).click()`)
+    await sleep(80)
+    await evaluate(`(() => { const i = document.querySelector('.dlg .dlg-input'); i.value = ${JSON.stringify(name)}; document.querySelector('.dlg .dlg-btn.primary').click() })()`)
+    await sleep(250)
+  }
+  await newTab('Document', 'Essay')
+  const docTab = await evaluate(`({
+    shown: !document.getElementById('page-view').hidden && !!document.querySelector('.page-sheet .page-body[contenteditable="true"]'),
+    board: getComputedStyle(document.getElementById('board')).display === 'none',
+    ribbon: !document.getElementById('ribbon').hidden && document.querySelector('#ribbon .rib-note').hidden,
+  })`)
+  check('a Document tab shows one full page to write on, with the ribbon for formatting', docTab.shown && docTab.board && docTab.ribbon)
+  await evaluate(`document.querySelector('.page-body').focus()`)
+  await type('Dear diary')
+  await evaluate(`(() => {
+    const t = document.querySelector('.page-body .rb-text'); const r = document.createRange(); r.selectNodeContents(t)
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r)
+  })()`)
+  await evaluate(`document.querySelector('#ribbon .fmt-i').click()`)
+  await sleep(100)
+  check('the ribbon formats the document', await evaluate(`!!document.querySelector('.page-body em')`))
+  const docTabId = await evaluate(`localStorage.getItem('notesActiveTab')`)
+
+  await newTab('Mind map', 'Plans')
+  const mmTab = await evaluate(`(() => {
+    const w = document.querySelector('#page-view .mm-wrap')
+    return { on: !!w, root: w ? w.querySelector('.mm-root text')?.textContent : '', ribbon: document.getElementById('ribbon').hidden }
+  })()`)
+  check('a Mind map tab draws a map around its name', mmTab.on && mmTab.root === 'Plans' && mmTab.ribbon)
+  await evaluate(`(() => {
+    const n = document.querySelector('#page-view .mm-root')
+    const o = { bubbles: true, cancelable: true, pointerId: 9, button: 0, clientX: 1, clientY: 1 }
+    n.dispatchEvent(new PointerEvent('pointerdown', o)); n.dispatchEvent(new PointerEvent('pointerup', o))
+  })()`)
+  await sleep(100)
+  await key('Tab', 'Tab', 9)
+  await sleep(150)
+  await type('Holiday')
+  await evaluate(`document.activeElement.blur()`)
+  await sleep(250)
+  check('Tab on the centre adds a branch', await evaluate(`[...document.querySelectorAll('#page-view .mm-node text')].some((t) => t.textContent === 'Holiday')`))
+
+  // both survive a reload (shared doc)
+  await evaluate(`localStorage.setItem('notesActiveTab', '${docTabId}')`)
+  await c.send('Page.reload')
+  await sleep(2500)
+  check('the document keeps its text after a reload', await evaluate(`document.querySelector('.page-body')?.textContent === 'Dear diary'`))
+  const mirror = await evaluate(`fetch('/api/export.md').then((r) => r.text())`)
+  check('the Markdown export includes the document and the mind map', /Dear diary/.test(mirror) && /# Plans/.test(mirror) && /Holiday/.test(mirror))
+
+  // the toolbar can hide until something is being edited
+  await evaluate(`(() => {
+    const t = [...document.querySelectorAll('#tabs .tab')].find((x) => x.querySelector('.tab-name')?.textContent === 'Renamed')
+    t && t.click()
+  })()`)
+  await sleep(300)
+  await evaluate(`document.getElementById('settings').click()`)
+  await sleep(80)
+  await evaluate(`document.querySelector('.settings-menu .segmented[aria-label="Toolbar"] .segment[data-value="editing"]').click()`)
+  await evaluate(`document.body.click()`)
+  await evaluate(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`)
+  await sleep(250)
+  const hiddenRib = await evaluate(`getComputedStyle(document.getElementById('ribbon')).visibility`)
+  await evaluate(`document.querySelector('#board .card .card-body')?.focus()`)
+  await sleep(250)
+  const shownRib = await evaluate(`getComputedStyle(document.getElementById('ribbon')).visibility`)
+  check('"While editing" hides the ribbon until a note is focused', hiddenRib === 'hidden' && shownRib === 'visible')
 
   check('no native alert/confirm/prompt dialogs were used', nativeDialogs === 0)
   check('no console errors or uncaught exceptions', errors.length === 0)

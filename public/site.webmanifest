@@ -1,11 +1,11 @@
 {
   "name": "Shared Notes",
-  "short_name": "notes",
+  "short_name": "Notes",
   "description": "Live collaborative sticky notes and sketches.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0e1014",
-  "theme_color": "#0e1014",
+  "background_color": "#f2f2f7",
+  "theme_color": "#f2f2f7",
   "icons": [
     {
       "src": "/favicon.svg",

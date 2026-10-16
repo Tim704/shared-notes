@@ -1,3 +1,4 @@
+import { icon, iconHTML } from './icons.js'
 import * as Y from 'yjs'
 import {
   MARKS,
@@ -235,7 +236,10 @@ export function bindRichText(ytext, el, opts = {}) {
       const f = document.createElement('span')
       f.className = 'rb-fold'
       f.contentEditable = 'false'
-      f.textContent = '▸'
+      f.appendChild(icon('right'))
+      f.setAttribute('aria-expanded', String(!folded))
+      f.setAttribute('role', 'button'); f.tabIndex = 0
+      f.setAttribute('aria-label', folded ? 'Unfold lines' : 'Fold lines')
       f.title = folded ? 'Show what is folded here (Ctrl+.)' : 'Fold (Ctrl+.)'
       line.appendChild(f)
     }
@@ -250,6 +254,8 @@ export function bindRichText(ytext, el, opts = {}) {
       c.className = 'rb-check'
       c.contentEditable = 'false'
       c.setAttribute('role', 'checkbox')
+      c.tabIndex = 0
+      c.setAttribute('aria-label', L.runs.map(r => r.text).join('') || 'Checklist item')
       c.setAttribute('aria-checked', a.done ? 'true' : 'false')
       c.title = a.done ? 'Done' : 'Tick'
       line.appendChild(c)
@@ -275,7 +281,9 @@ export function bindRichText(ytext, el, opts = {}) {
       const more = document.createElement('span')
       more.className = 'rb-more'
       more.contentEditable = 'false'
-      more.textContent = '… ' + nKids
+      more.append(icon('more'), document.createTextNode(String(nKids)))
+      more.setAttribute('role', 'button'); more.tabIndex = 0
+      more.setAttribute('aria-label', 'Show ' + nKids + ' folded lines')
       more.title = nKids + ' folded line' + (nKids === 1 ? '' : 's')
       line.appendChild(more)
     }
@@ -292,6 +300,8 @@ export function bindRichText(ytext, el, opts = {}) {
       const a = document.createElement('a')
       a.className = 'rb-link' + (m[0] === '[' ? ' rb-wiki' : '')
       a.dataset.href = m
+      a.setAttribute('role', 'link'); a.tabIndex = 0
+      a.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); onLink(m) } })
       a.textContent = m
       frag.appendChild(a)
       last = idx + m.length
@@ -323,8 +333,9 @@ export function bindRichText(ytext, el, opts = {}) {
       thumb.className = 'rb-play'
       thumb.type = 'button'
       thumb.title = 'Play (loads YouTube)'
-      thumb.style.backgroundImage = `url("https://i.ytimg.com/vi/${emb.id}/hqdefault.jpg")`
-      thumb.innerHTML = '<span class="rb-play-btn">▶</span>'
+      // Keep the placeholder offline and private until the user loads the player.
+      thumb.innerHTML = '<span class="rb-play-btn">' + iconHTML('play') + '</span>'
+      thumb.setAttribute('aria-label', 'Play video (loads YouTube)')
       thumb.addEventListener('click', (e) => {
         e.preventDefault()
         const f = document.createElement('iframe')
@@ -333,6 +344,7 @@ export function bindRichText(ytext, el, opts = {}) {
         f.allowFullscreen = true
         f.referrerPolicy = 'strict-origin-when-cross-origin'
         f.className = 'rb-frame rb-frame-yt'
+        f.title = 'YouTube video'
         thumb.replaceWith(f)
       })
       box.appendChild(thumb)
@@ -340,12 +352,13 @@ export function bindRichText(ytext, el, opts = {}) {
       const ph = document.createElement('button')
       ph.className = 'rb-insta'
       ph.type = 'button'
-      ph.innerHTML = '<span class="rb-insta-logo">◎</span><span>Instagram post · tap to load</span>'
+      ph.innerHTML = '<span class="rb-insta-logo">' + iconHTML('camera') + '</span><span>Instagram post · tap to load</span>'
       ph.addEventListener('click', (e) => {
         e.preventDefault()
         const f = document.createElement('iframe')
         f.src = `https://www.instagram.com/p/${encodeURIComponent(emb.id)}/embed`
         f.className = 'rb-frame rb-frame-ig'
+        f.title = 'Instagram post'
         f.referrerPolicy = 'strict-origin-when-cross-origin'
         f.setAttribute('scrolling', 'no')
         ph.replaceWith(f)
@@ -1488,6 +1501,9 @@ export function bindRichText(ytext, el, opts = {}) {
     const hit = e.target && e.target.closest ? e.target.closest('.rb-check, .rb-fold, .rb-more') : null
     if (hit && el.contains(hit)) e.preventDefault() // don't move the caret / steal focus
   }
+  el.addEventListener('keydown', e => {
+    if ((e.key === ' ' || e.key === 'Enter') && e.target.matches('.rb-check, .rb-fold, .rb-more')) { e.preventDefault(); e.stopImmediatePropagation(); e.target.click() }
+  }, true)
   function onClick(e) {
     const tgt = e.target && e.target.closest ? e.target : null
     if (!tgt) return

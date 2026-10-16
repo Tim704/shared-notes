@@ -15,6 +15,9 @@ const LINE_H = 1.25 // sketch text line height (must match src/draw.js)
 
 // ---- small helpers -------------------------------------------------------
 
+// Tab kinds besides 'notes': a sketch board, a document, a mind map. Anything else reads as notes.
+const PAGE_KINDS = new Set(['draw', 'doc', 'mindmap'])
+
 /** Tabs live in a Y.Array as either plain objects (legacy) or Y.Maps. Read both. */
 export function tabRec(entry) {
   if (!entry) return { id: null, name: '', kind: 'notes', archived: false, view: 'board' }
@@ -22,7 +25,7 @@ export function tabRec(entry) {
   return {
     id: get('id') == null ? null : String(get('id')),
     name: get('name') == null ? '' : String(get('name')),
-    kind: get('kind') === 'draw' ? 'draw' : 'notes',
+    kind: PAGE_KINDS.has(get('kind')) ? get('kind') : 'notes',
     archived: get('archived') === true,
     view: get('view') === 'canvas' ? 'canvas' : 'board',
   }
@@ -166,7 +169,6 @@ export function noteToMarkdown(note, tab, opts) {
     ['lastEditedBy', editorName ? String(editorName).replace(/\n/g, ' ') : null],
     ['archived', get('archived') === true ? 'true' : null],
     ['pinned', get('pinned') === true ? 'true' : null],
-    ['view', get('view') === 'map' ? 'map' : null],
     ['titleAlign', get('titleAlign') || null],
     ['x', Math.round(Number(get('x')) || 0)],
     ['y', Math.round(Number(get('y')) || 0)],
@@ -274,6 +276,48 @@ export function sketchToSvg(strokes) {
     (texts.length ? '\n' : '') +
     `</svg>\n`
   )
+}
+
+/** Ink drawn between the notes of a tab, as an SVG cropped to the strokes (no background). */
+export function inkToSvg(strokes) {
+  const arr = strokes && typeof strokes.toArray === 'function' ? strokes.toArray() : strokes || []
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  const paths = []
+  for (const s of arr) {
+    const get = getter(s)
+    const raw = get('points')
+    const pts = raw && typeof raw.toArray === 'function' ? raw.toArray() : raw || []
+    if (pts.length < 2) continue
+    const w = num(get('width')) || 3
+    const pairs = []
+    for (let i = 0; i + 1 < pts.length; i += 2) {
+      const x = num(pts[i]), y = num(pts[i + 1])
+      pairs.push(x + ',' + y)
+      x0 = Math.min(x0, x - w); y0 = Math.min(y0, y - w); x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + w)
+    }
+    if (pairs.length === 1) pairs.push(pairs[0])
+    paths.push(
+      `<polyline fill="none" stroke="${esc(get('color') || '#1c1c1e')}" stroke-width="${w}" ` +
+        `stroke-linecap="round" stroke-linejoin="round" points="${pairs.join(' ')}"/>`
+    )
+  }
+  if (!paths.length) return null
+  const vw = num(x1 - x0), vh = num(y1 - y0)
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${num(x0)} ${num(y0)} ${vw} ${vh}" width="${vw}" height="${vh}">\n` +
+    paths.join('\n') +
+    `\n</svg>\n`
+  )
+}
+
+/** The text of a document or mind map tab as Markdown (a mind map starts with its centre as a heading). */
+export function pageMarkdown(ydoc, tab, opts = {}) {
+  const page = ydoc.getMap('pages').get(tab.id)
+  if (!page || typeof page.get !== 'function') return ''
+  const body = richToMarkdown(page.get('body'), opts)
+  if (tab.kind !== 'mindmap') return body
+  const title = text(page.get('title')).replace(/\s*\n\s*/g, ' ') || tab.name || 'Mind map'
+  return `# ${title}\n\n${body}`
 }
 
 // ---- board walking -------------------------------------------------------
@@ -392,6 +436,10 @@ export function exportMarkdown(ydoc, opts = {}) {
       out.push('_Sketch tab: see sketch.svg in the export folder._', '')
       continue
     }
+    if (tab.kind === 'doc' || tab.kind === 'mindmap') {
+      out.push(pageMarkdown(ydoc, tab, opts), '')
+      continue
+    }
     for (const [, n] of notes) {
       out.push(`## ${text(n.get('title')).replace(/\s*\n\s*/g, ' ') || 'Untitled'}`, '')
       out.push(noteBodyMarkdown(n, opts), '')
@@ -407,7 +455,11 @@ export function exportJson(ydoc, opts = {}) {
   for (const g of groups) for (const [id] of g.notes) ids.add(id)
   return {
     exportedAt: new Date().toISOString(),
-    tabs: groups.map(({ tab, notes }) => ({ ...tab, notes: notes.map(([id, n]) => noteView(id, n)) })),
+    tabs: groups.map(({ tab, notes }) => ({
+      ...tab,
+      notes: notes.map(([id, n]) => noteView(id, n)),
+      ...(tab.kind === 'doc' || tab.kind === 'mindmap' ? { page: pageView(ydoc, tab) } : {}),
+    })),
     edges: edgesOf(ydoc).filter((e) => ids.has(e.from) && ids.has(e.to)),
   }
 }
@@ -418,8 +470,8 @@ export const MIRROR_README =
   '# Shared Notes export\n\n' +
   'This folder is a read-only, human-readable mirror of the shared board, regenerated a few ' +
   'seconds after every change: one Markdown file per note (grouped in a folder per tab, trash ' +
-  'excluded), an SVG per sketch tab, and `index.json` listing what is where (plus the arrows ' +
-  'between notes). Edits made here are overwritten on the next change, so treat it as a backup ' +
+  'excluded), an SVG per sketch tab (and `ink.svg` for drawings between notes), one Markdown ' +
+  'file per document or mind map tab, and `index.json` listing what is where. Edits made here are overwritten on the next change, so treat it as a backup ' +
   'and a browsable history rather than a place to edit. On the Pi this folder is also a git ' +
   'repo, which is what powers the per-note version history in the app. Pictures live next to ' +
   'it in `media/` and are linked from the notes.\n'
@@ -479,11 +531,17 @@ export function buildMirror(ydoc, opts = {}) {
   }
 
   for (const tab of tabs) {
-    if (tab.kind !== 'draw') continue
     try {
-      files[`${tab.dir}/sketch.svg`] = sketchToSvg(yDrawings.get(tab.id))
+      if (tab.kind === 'draw') files[`${tab.dir}/sketch.svg`] = sketchToSvg(yDrawings.get(tab.id))
+      // named like a note (--<id>.md) so the git history finds earlier versions
+      else if (tab.kind === 'doc') files[`${tab.dir}/document--${tab.id}.md`] = pageMarkdown(ydoc, tab, opts)
+      else if (tab.kind === 'mindmap') files[`${tab.dir}/mindmap--${tab.id}.md`] = pageMarkdown(ydoc, tab, opts)
+      else if (tab.id != null) {
+        const svg = inkToSvg(yDrawings.get('ink:' + tab.id))
+        if (svg) files[`${tab.dir}/ink.svg`] = svg
+      }
     } catch (err) {
-      if (opts.onError) opts.onError('sketch export failed for tab ' + tab.id + ': ' + err.message)
+      if (opts.onError) opts.onError('export failed for tab ' + tab.id + ': ' + err.message)
     }
   }
 
@@ -507,6 +565,13 @@ export function buildMirror(ydoc, opts = {}) {
     ) + '\n'
   files['README.md'] = MIRROR_README
   return files
+}
+
+/** A document or mind map page as plain data (JSON export). */
+function pageView(ydoc, tab) {
+  const page = ydoc.getMap('pages').get(tab.id)
+  if (!page || typeof page.get !== 'function') return { title: '', markdown: '' }
+  return { title: text(page.get('title')), markdown: richToMarkdown(page.get('body')) }
 }
 
 /** A thin view over a note Y.Map that also answers `id` (which lives on the parent map's key). */

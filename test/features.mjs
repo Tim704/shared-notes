@@ -1,6 +1,7 @@
 import * as Y from 'yjs'
 import { connect, sleep } from './lib.mjs'
 import { linesOf } from '../shared/lines.js'
+import { tabRec, buildMirror, exportMarkdown } from '../shared/serialise.js'
 
 // Exercises the v2 data model through the real server: tabs, per-note fields,
 // rich-text formatting attributes, and collaborative drawing strokes all sync.
@@ -223,6 +224,75 @@ check(
   'B text object carries text + position',
   bTextObj.get('text') === 'hello canvas' && bTextObj.get('x') === 200 && bTextObj.get('y') === 150
 )
+
+// --- document / mind map tabs and ink: shared data and the Markdown mirror ---
+{
+  const ydoc = new Y.Doc()
+  const docId = 'doc_tab'
+  const mapId = 'map_tab'
+  const notesId = 'notes_tab'
+  ydoc.transact(() => {
+    const tabs = ydoc.getArray('tabs')
+    for (const [id, name, kind] of [[notesId, 'Board', 'notes'], [docId, 'Essay', 'doc'], [mapId, 'Plans', 'mindmap']]) {
+      const t = new Y.Map()
+      t.set('id', id)
+      t.set('name', name)
+      t.set('kind', kind)
+      tabs.push([t])
+    }
+    const page = (title, body) => {
+      const p = new Y.Map()
+      const tt = new Y.Text()
+      tt.insert(0, title)
+      const bb = new Y.Text()
+      bb.insert(0, body)
+      p.set('title', tt)
+      p.set('body', bb)
+      return p
+    }
+    ydoc.getMap('pages').set(docId, page('Essay', 'Dear diary\n'))
+    ydoc.getMap('pages').set(mapId, page('Plans', 'Holiday\n'))
+    const ink = new Y.Array()
+    const s = new Y.Map()
+    s.set('color', '#ff3b30')
+    s.set('width', 3)
+    const pts = new Y.Array()
+    pts.push([10, 20, 110, 60])
+    s.set('points', pts)
+    ink.push([s])
+    ydoc.getMap('drawings').set('ink:' + notesId, ink)
+    // an old board: an arrow between notes and a note shown as a mind map
+    const n = new Y.Map()
+    const nt = new Y.Text()
+    nt.insert(0, 'Old map note')
+    n.set('title', nt)
+    const nb = new Y.Text()
+    nb.insert(0, '- a\n')
+    n.set('body', nb)
+    n.set('tabId', notesId)
+    n.set('view', 'map')
+    ydoc.getMap('notes').set('old1', n)
+    ydoc.getArray('order').push(['old1'])
+    const e = new Y.Map()
+    e.set('id', 'e1')
+    e.set('from', 'old1')
+    e.set('to', 'old1')
+    ydoc.getArray('edges').push([e])
+  })
+  const kinds = ydoc.getArray('tabs').toArray().map((t) => tabRec(t).kind)
+  check('tabRec keeps the doc and mindmap kinds', kinds.join(',') === 'notes,doc,mindmap')
+  const files = buildMirror(ydoc)
+  const names = Object.keys(files)
+  const docFile = names.find((f) => f.endsWith(`document--${docId}.md`))
+  const mapFile = names.find((f) => f.endsWith(`mindmap--${mapId}.md`))
+  const inkFile = names.find((f) => f.endsWith('/ink.svg'))
+  check('the mirror writes a document tab as document--<id>.md', !!docFile && /Dear diary/.test(files[docFile]))
+  check('the mirror writes a mind map with its centre as a heading', !!mapFile && /^# Plans/.test(files[mapFile]) && /Holiday/.test(files[mapFile]))
+  check('ink between notes is mirrored as a cropped ink.svg', !!inkFile && /polyline/.test(files[inkFile]) && !/<rect/.test(files[inkFile]))
+  const oldNote = names.find((f) => f.endsWith('--old1.md'))
+  check('an old note shown as a mind map still mirrors, without the view key', !!oldNote && !/view: map/.test(files[oldNote]))
+  check('old arrows do not break the export', !!files['index.json'] && /Dear diary/.test(exportMarkdown(ydoc)))
+}
 
 A.close()
 B.close()

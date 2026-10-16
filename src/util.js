@@ -69,10 +69,18 @@ export function relLuminance(hex) {
 
 // Pick readable ink for a given paper colour. Dark ink on light paper, light on dark.
 export function inkFor(bg) {
-  return relLuminance(bg) > 0.48 ? '#1f2228' : '#f3f5f8'
+  return relLuminance(bg) > 0.179 ? '#000000' : '#ffffff'
 }
 export function inkDimFor(bg) {
-  return relLuminance(bg) > 0.48 ? 'rgba(20,24,30,0.5)' : 'rgba(243,245,248,0.55)'
+  // Start with subdued ink, increase opacity until normal text reaches AA.
+  const rgb = parseHex(bg) || [255, 255, 255]
+  const dark = relLuminance(bg) > 0.179
+  for (const alpha of [.65, .75, .85, 1]) {
+    const hex = '#' + rgb.map(c => Math.round(c * (1 - alpha) + (dark ? 0 : 255) * alpha).toString(16).padStart(2, '0')).join('')
+    const a = relLuminance(bg), b = relLuminance(hex)
+    if ((Math.max(a, b) + .05) / (Math.min(a, b) + .05) >= 4.5) return hex
+  }
+  return inkFor(bg)
 }
 // A faint hairline that reads on either paper.
 export function hairlineFor(bg) {
@@ -91,28 +99,26 @@ export const PAPER = [
   '#ffffff',
 ]
 
+// Render only: never persist adapted colours into the shared document.
+export const DARK_PAPER = Object.fromEntries(PAPER.map((hex, i) => [hex,
+  ['#39351f', '#3d3022', '#40282b', '#203737', '#293724', '#332b42', '#253443', '#1c1c1e'][i]]))
+export function renderedPaper(hex, theme = document.documentElement.dataset.theme) {
+  return theme === 'dark' ? DARK_PAPER[normalizeHex(hex)] || hex : hex
+}
+
+// Fixed inks for drawings and exported documents; intentionally theme independent.
+export const SYSTEM_COLORS = ['#ff3b30', '#ff9500', '#34c759', '#007aff', '#5856d6', '#af52de', '#ff2d55', '#30b0c7']
+export const DOCUMENT_INK = '#1c1c1e'
+export const DOCUMENT_PAPER = '#ffffff'
+
 export const PRESENCE = [
-  '#ef4444',
-  '#f59e0b',
-  '#10b981',
-  '#3b82f6',
-  '#8b5cf6',
-  '#ec4899',
-  '#14b8a6',
-  '#f97316',
+  ...SYSTEM_COLORS,
 ]
 
 // Quick pen colours for the sketch toolbar — a few inks that read on the light
 // canvas, the brand yellow, and a couple of brights.
 export const PEN_COLORS = [
-  '#1f2228',
-  '#e23b3b',
-  '#f5a623',
-  '#ffd23f',
-  '#2ca24c',
-  '#2d7ff9',
-  '#8b5cf6',
-  '#ffffff',
+  DOCUMENT_INK, '#ff3b30', '#ff9500', '#ffcc00', '#248a3d', '#007aff', '#af52de', DOCUMENT_PAPER,
 ]
 
 // ---- per-user favourites (local only) -------------------------------------

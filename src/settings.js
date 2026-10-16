@@ -4,6 +4,8 @@
 const KEY = 'notesSettings'
 
 const DEFAULTS = {
+  theme: 'system', // resolved at paint time; never shared in the document
+  ribbon: 'always', // the toolbar under the tabs: 'always' shown, or only while 'editing'
   spellcheck: false, // red squiggles in note bodies
   arrows: true, // auto-replace -> => <- -- with real glyphs while typing
   offline: true, // keep a copy of the board in this browser (IndexedDB)
@@ -49,3 +51,21 @@ export function onSettingChange(fn) {
     if (i >= 0) listeners.splice(i, 1)
   }
 }
+
+const systemTheme = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-scheme: dark)') : null
+export function applyTheme() {
+  if (!systemTheme) return
+  const choice = getSettings().theme
+  const theme = choice === 'light' || choice === 'dark' ? choice : systemTheme.matches ? 'dark' : 'light'
+  document.documentElement.dataset.theme = theme
+  document.documentElement.style.colorScheme = theme
+  document.querySelectorAll('meta[name="theme-color"]').forEach(meta => {
+    meta.content = choice === 'light' || choice === 'dark'
+      ? theme === 'dark' ? '#000000' : '#f2f2f7'
+      : meta.media.includes('dark') ? '#000000' : '#f2f2f7'
+  })
+  window.dispatchEvent(new CustomEvent('notes-theme-change', { detail: theme }))
+}
+systemTheme?.addEventListener('change', () => { if (getSettings().theme === 'system') applyTheme() })
+onSettingChange(key => { if (key === 'theme') applyTheme() })
+if (systemTheme) applyTheme()

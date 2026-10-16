@@ -9,8 +9,8 @@ browser at it.
 
 ## What it does
 
-- **Tabs**: organise everything into tabs: lists of notes ("Ideas", "Work",
-  "Shopping", …) and **sketch** tabs for free-hand drawing. Add, rename (double-click),
+- **Tabs** come in four kinds (the + at the end of the tab bar): **sticky notes** ("Ideas",
+  "Work", "Shopping", …), a **document**, a **mind map** and a **sketch board**. Add, rename (double-click),
   reorder (drag), archive and delete tabs. Tabs are shared; your last-open tab is
   remembered per device.
 - **A real corkboard**: notes float wherever you put them. Drag a note by its header to
@@ -23,7 +23,7 @@ browser at it.
   and zoom are remembered per device. *Back to the board view* offers to bring stray
   notes back into the window.
 - **Alignment**: while dragging, a note snaps to its neighbours' edges and centres
-  (pink guide lines; hold Alt to place freely); optionally to a grid too (⚙ settings).
+  (pink guide lines; hold Alt to place freely); optionally to a grid too (Settings → Board).
   Shift/Ctrl-click headers, or drag a box on empty board (Shift+drag on the canvas), to
   select several notes. They move together, and a toolbar aligns them (left, centre,
   right, top, middle, bottom), spaces them evenly, matches sizes or tidies them into a
@@ -49,16 +49,34 @@ browser at it.
   Click to see it full size, drag its corner to resize it. A YouTube or Instagram link on a
   line of its own becomes a click-to-load player (privacy-friendly: nothing loads from
   YouTube until you click).
-- **Full screen**: ⤢ on a note (or double-click its header) opens it large, with its own
+- **Full screen**: the expand button on a note (or double-click its header) opens it large, with its own
   live editor. The back button or Esc closes it, and `#note=<id>&full` links straight to it.
-- **Mind maps**: gear → View → *Mind map* shows a note's outline as a mind map: the title
-  in the middle, headings and paragraphs as branches, bullet points nested under them.
-  Click a node to edit it (Enter adds a sibling, Tab a child), drag a node onto another to
-  move it and what hangs off it, and save the map as PNG or SVG. The map and the text are
-  the same lines, so editing either changes both.
-- **Arrows between notes**: drag the yellow dot on a note's right edge onto another note.
-  Click an arrow to label it, recolour it, make it dashed, double-headed or headless,
-  reverse it or delete it. Arrows re-route live as notes move.
+- **Mind map tabs**: the tab's name sits in the middle. Click a node to edit it (Enter adds
+  a sibling, Tab a child, Backspace on an empty node removes it), drag a node onto another
+  to move it and what hangs off it, pan by dragging, zoom with Ctrl/⌘ + wheel, and save the
+  map as PNG or SVG.
+- **Document tabs**: one blank page to write on, like Word or Docs, with the same lists,
+  checkboxes, headings, pictures and links as notes. Formatting is in the ribbon.
+- **Drawing between the notes**: on a sticky-note tab, *Draw* in the ribbon (or the D key)
+  turns on ink mode: drag anywhere to draw little characters, arrows or circles in the
+  space around the notes. Pick a colour and size, the eraser removes a whole stroke,
+  Ctrl/⌘+Z undoes your own strokes, Esc goes back to the notes. The ink sits under the
+  notes and pans and zooms with them on the canvas. It does not move when a note moves
+  (and on a very narrow window, notes squeezed in from the right can drift from ink drawn
+  next to them). Desktop only.
+- **The ribbon**: a Word-style toolbar under the tabs, so notes carry no toolbars of their
+  own. It acts on the note you last clicked or typed in: text (bold, italic, underline,
+  strikethrough, list styles, checkbox, alignment, picture), the note's colour, text size,
+  width, *Grow*, pin, archive, delete and *More* (book layout, title size and alignment,
+  move to tab, history, favourite colours). With no note being edited it is greyed out.
+  Settings → Appearance → *Toolbar* chooses *Always* or *While editing* (it then slides in
+  only while you edit). Phones keep the toolbar above the keyboard instead.
+- **Light and dark**: the look follows Apple's design language (system font, translucent
+  toolbars, grouped settings) and follows your device's appearance. Settings → Appearance
+  switches this device between *Automatic*, *Light* and *Dark*. Coloured notes keep their
+  colour in shared data and are shown in a deeper shade in the dark theme. Fonts and
+  icons ship with the app, so nothing is fetched from the internet and it all works
+  offline. `DESIGN.md` documents the tokens.
 - **Phones get their own layout**, Google Keep style: a two-column grid of previews
   (pinned notes first; one column if you prefer), a bottom bar, a drawer for tabs and a
   round + button (hold it for a checklist or a new tab). Tap a note to edit it full
@@ -71,19 +89,20 @@ browser at it.
 - Real-time editing: when a friend types, draws, or moves a note, you see it happen.
   Concurrent edits merge cleanly (a CRDT, [Yjs](https://github.com/yjs/yjs)).
 - Presence: little coloured dots show who is online and who is editing which note.
-- Search filters the current tab, and the **home page** (⌂) lists every tab, shows who is
+- Search filters the current tab, and the **home page** (the house button at the left of the tab bar) lists every tab, shows who is
   on each one, and searches across all of them.
 - **Safe delete**: deleting a note moves it to the tab's trash and offers Undo. Trash is
   kept for 30 days. Notes and whole tabs can also be **archived**.
-- **Collapse** any note to its title (the ⌄ chevron, or "Collapse all" in the tab bar).
+- **Collapse** any note to its title (the chevron in its header, or "Collapse all" in the tab bar).
 - **Links**: URLs in a note are clickable, and typing `[[` opens a picker to link to
   another note or tab by title.
-- **Book notes**: two pages side by side (gear → Layout → Book).
+- **Book notes**: two pages side by side (ribbon → More → Layout → Book).
 - **Smart arrows**: `->` becomes →, `<-` ←, `=>` ⇒, `--` —. Backspace straight after
   restores what you typed.
-- Per note: optional separate **title size** and **title alignment**, **grow with
-  content**, and **pin** (pinned notes come first on phones and in the widget).
-- **Version history**: gear → History shows earlier versions of a note from the Pi's git
+- Per note: optional separate **title size** and **title alignment**, and **pin** (pinned
+  notes come first on phones and in the widget). Notes **grow with their content** by
+  default; resizing one by its corner (or *Grow* in the ribbon) gives it a fixed height.
+- **Version history**: ribbon → More → History shows earlier versions of a note from the Pi's git
   history of the Markdown mirror, with one-click restore (lists and checkboxes included).
 - **Offline copy**: each browser keeps the board in IndexedDB and the app shell (and any
   picture it has shown) is cached, so the board opens and can be edited with the Pi off.
@@ -112,12 +131,13 @@ browser at it.
 | Undo / Redo | Ctrl/Cmd + Z / Ctrl/Cmd + Shift + Z |
 | Link to a note or tab | type `[[` then pick |
 
-The toolbar along the bottom of a focused note has the same: B / I / U / S, a list menu,
-checkbox, alignment and picture buttons. Colour, text size, width, layout, view, pin,
-archive, history and "move to tab" are in the **⚙** on each note.
+The ribbon under the tabs has the same: B / I / U / S, a list menu, checkbox, alignment
+and picture buttons, plus the note's colour, text size, width, *Grow*, pin, archive, delete
+and *More* (layout, title, move to tab, history). In full screen the toolbar sits under the
+title and the note's ⋯ has the settings.
 
 On the board (nothing being edited): Ctrl/Cmd+Z undoes the last move, resize or
-alignment; Esc clears a selection; Delete removes a selected arrow.
+alignment; Esc clears a selection; D toggles drawing between the notes.
 
 ## Requirements
 
@@ -271,7 +291,8 @@ Four layers, so losing the Pi never means losing the notes:
    any change: one Markdown file per note (`<tab>/<title>--<id>.md`, with the note's
    colour, position and dates in the front matter; lists as `- `, `1. `, `a. `; checkboxes
    as `- [ ]` lines; pictures as `![](../../media/…)` links), one `sketch.svg` per sketch
-   tab, and an `index.json` (which also lists the arrows between notes). If git is
+   tab, `ink.svg` for drawings between notes, `document--<id>.md` / `mindmap--<id>.md` for
+   document and mind map tabs, and an `index.json`. If git is
    installed, that folder is a git repo committed about once a minute after edits, which
    is what the in-app History panel reads. Back it up anywhere (`rsync`, a USB stick,
    `git push` to a private remote) and you have every note, readable without this app.
@@ -279,8 +300,8 @@ Four layers, so losing the Pi never means losing the notes:
    *not* in the git history (photos would bloat the SD card's repo); back it up next to
    `data/export/`. Pictures no note mentions any more are removed after `NOTES_TRASH_DAYS`.
 4. **Every device keeps its own copy.** With "Keep an offline copy" on (the default,
-   ⚙ settings), the board is stored in that browser's IndexedDB and the app shell is
-   cached, so it opens and works offline. ⚙ → *Backup on this device* builds a backup
+   Settings → Board), the board is stored in that browser's IndexedDB and the app shell is
+   cached, so it opens and works offline. Settings → *Backup on this device* builds a backup
    **in the browser**, so it works with the Pi switched off:
    - *Download all notes* as one Markdown or JSON file;
    - *Auto-save to a folder* (desktop Chrome / Edge): pick a folder once; the same layout as
@@ -337,7 +358,7 @@ deleted notes. GETs that a widget polls send an `ETag` and answer `304` to a mat
 | Method and path | Does |
 | --- | --- |
 | `GET /api/tabs` | List tabs with note counts. |
-| `GET /api/tabs/:id` | One tab, all its notes (title, `lines`, plain-text body, colour, position…) and the arrows between them. |
+| `GET /api/tabs/:id` | One tab and all its notes (title, `lines`, plain-text body, colour, position…). Tab `kind` is `notes`, `draw`, `doc` or `mindmap`. |
 | `GET /api/tabs/:id?summary=1` | What a widget needs: per note the title, colour, pinned, a snippet and its checkboxes (`{ id, index, text, done }`), pinned first. |
 | `POST /api/tabs/:id/notes` | Create a note: `{ "title", "body", "color" }`. In `body`, lines starting `- [ ] `, `- `, `1. `, `# ` become checkboxes, bullets, numbers, headings. Or send `lines: [{ text, type: "p"/"li"/"todo"/"h", done, indent }]`. |
 | `GET /api/notes/:id` | One note, with its tab id. |
@@ -382,8 +403,16 @@ without the Android SDK available).
   a friend's edit elsewhere in the note.
 - Deleting a note only sets a `deleted` timestamp; the server purges old ones. Archiving
   sets `archived`. Both are ordinary CRDT writes, which is why Undo is trivial.
-- Arrows between notes live in `doc.getArray('edges')` as `{ id, from, to, label, color,
-  style, head }`; hard-deleting a note removes its arrows.
+- Document and mind map tabs keep their text in `doc.getMap('pages')` (tab id →
+  `{ title: Y.Text, body: Y.Text }`), with the same line model as note bodies, so a mind map
+  is an outline and the same editor and Markdown code serve both.
+- Ink between the notes is `doc.getMap('drawings').get('ink:<tabId>')`: strokes
+  `{ color, width, points }` in board pixels. Undo uses a `Y.UndoManager` with a local
+  origin, so it only takes back your own strokes.
+- An unset `autoGrow` means a note grows with its content; a fixed height stores
+  `autoGrow: false`.
+- Removed features leave their data alone: old arrows (`doc.getArray('edges')`) and the
+  old per-note mind map view (`view: 'map'`) are simply no longer shown.
 - Moves, resizes and alignments are written with a `layout` origin, so a board-level
   `Y.UndoManager` can undo each as one step without touching anyone's typing.
 - The browser keeps the document in IndexedDB via `y-indexeddb` and registers a service
@@ -414,8 +443,9 @@ shared-notes/
   build.js             esbuild bundling step (src/client.js -> public/bundle.js)
   src/client.js        Browser app: tabs, cards, layout, full screen, phone UI, panels, sync wiring
   src/richbody.js      contentEditable <-> Y.Text editor: lines, lists, todos, folding, embeds, links
-  src/mindmap.js       Mind map view of a note's outline
-  src/edges.js         Arrows between notes
+  src/mindmap.js       Mind map of an outline (the mind map tab type)
+  src/ribbon.js        The Word-style toolbar under the tabs
+  src/ink.js           Free-hand ink between the notes of a tab
   src/viewport.js      Canvas view: pan, zoom, minimap
   src/snap.js          Snapping, guide lines, align / distribute / tidy
   src/backup.js        This device's backup: downloads and auto-save to a folder
@@ -444,8 +474,9 @@ Every suite starts its own server on a throwaway data directory, so your real bo
 never touched. The browser test needs Chrome, Chromium or Edge installed (set `CHROME=path`
 if it cannot find one). It drives the editor with real key events (lists, numbering,
 checkboxes, alignment, folding, the list menu, Tab, smart arrows, links), full screen and
-its deep link, pictures and video embeds, dragging notes, drawing and re-routing arrows,
-multi-select + align + undo, the mind map, the canvas (pan, zoom, negative positions, fit,
+its deep link, pictures and video embeds, dragging notes, the ribbon (greyed out with no
+note, formatting, options, "while editing"), ink between notes (draw, erase, undo),
+multi-select + align + undo, document and mind map tabs, the canvas (pan, zoom, negative positions, fit,
 back to the board), this device's backup and the tab opt-out, the phone layout (tap,
 long-press, pin, drawer), soft delete and Undo, collapse, book layout, the home page,
 inline tab rename and the history panel. It asserts that no native browser dialogs and

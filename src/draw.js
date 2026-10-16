@@ -1,4 +1,5 @@
 import * as Y from 'yjs'
+import { DOCUMENT_INK } from './util.js'
 import { rafThrottle, clamp } from './util.js'
 
 // ---------------------------------------------------------------------------
@@ -14,7 +15,7 @@ import { rafThrottle, clamp } from './util.js'
 const LW = 1600
 const LH = 1000
 const MIN_STEP = 1.6 // logical units between recorded points
-const FONT = '"Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif'
+const FONT = '-apple-system, BlinkMacSystemFont, "Inter var", "Segoe UI", system-ui, sans-serif'
 const LINE_H = 1.25
 
 export function createDrawSurface(host, yStrokes, opts = {}) {
@@ -32,7 +33,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
   host.appendChild(textInput)
 
   const tool = {
-    color: opts.color || '#1f2228',
+    color: opts.color || DOCUMENT_INK,
     width: opts.width || 4,
     mode: 'pen',
   }
@@ -76,7 +77,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
     const arr = pts.toArray ? pts.toArray() : pts
     ctx.save()
     ctx.globalCompositeOperation = s.get('mode') === 'erase' ? 'destination-out' : 'source-over'
-    ctx.strokeStyle = s.get('color') || '#1f2228'
+    ctx.strokeStyle = s.get('color') || DOCUMENT_INK
     ctx.fillStyle = ctx.strokeStyle
     ctx.lineWidth = Math.max(0.5, (s.get('width') || 4) * scale)
     ctx.lineCap = 'round'
@@ -106,7 +107,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
     const size = (s.get('size') || 28) * scale
     ctx.save()
     ctx.globalCompositeOperation = 'source-over'
-    ctx.fillStyle = s.get('color') || '#1f2228'
+    ctx.fillStyle = s.get('color') || DOCUMENT_INK
     ctx.font = `600 ${size}px ${FONT}`
     ctx.textBaseline = 'top'
     const lh = size * LINE_H

@@ -1,0 +1,119 @@
+/* Semantic colours, type, geometry, materials and motion. See DESIGN.md. */
+@font-face {
+  font-family: 'Inter var';
+  src: url('/fonts/inter-latin-variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+:root {
+  color-scheme: light dark;
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Inter var', 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --bg: #f2f2f7;
+  --bg-elevated: #ffffff;
+  --bg-tertiary: #f2f2f7;
+  --fill: rgba(120,120,128,.12);
+  --fill-strong: rgba(120,120,128,.20);
+  --label: #000000;
+  --label-2: #636366;
+  --label-3: #76767b;
+  --separator: rgba(60,60,67,.29);
+  --accent: #e6a700;
+  --tint: #805c00;
+  --red: #c5221f;
+  --orange: #c46800;
+  --yellow: #ffcc00;
+  --green: #248a3d;
+  --switch-green: #34c759;
+  --teal: #007f91;
+  --blue: #007aff;
+  --indigo: #5856d6;
+  --purple: #af52de;
+  --pink: #d70055;
+  --white: #ffffff;
+  --black: #000000;
+  --paper: #fff7a8;
+  --document-paper: #ffffff;
+  --document-ink: #1c1c1e;
+  --scrim: rgba(0,0,0,.20);
+  --lightbox: rgba(0,0,0,.92);
+  --dot: rgba(60,60,67,.12);
+  --on-accent: #000000;
+  --material-thin: color-mix(in srgb, var(--bg-elevated) 60%, transparent);
+  --material-regular: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+  --material-thick: color-mix(in srgb, var(--bg-elevated) 90%, transparent);
+  --accent-fill: color-mix(in srgb, var(--accent) 16%, transparent);
+  --focus: color-mix(in srgb, var(--accent) 80%, transparent);
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px;
+  --s-5: 20px; --s-6: 24px; --s-7: 28px; --s-8: 32px;
+  --r-control: 6px; --r-field: 8px; --r-search: 10px; --r-card: 12px;
+  --r-dialog: 14px; --r-sheet: 16px; --r-pill: 999px;
+  --radius: var(--r-card);
+  --hairline: 1px;
+  --elev-1: 0 .5px 1px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.06);
+  --elev-2: 0 4px 16px rgba(0,0,0,.12);
+  --elev-3: 0 10px 40px rgba(0,0,0,.18), 0 0 0 .5px var(--separator);
+  --ease: cubic-bezier(.32,.72,0,1);
+  --ease-out: cubic-bezier(.2,0,0,1);
+  --dur-fast: 120ms; --dur: 220ms; --dur-slow: 380ms;
+  --fs-large-title: 26px; --lh-large-title: 32px;
+  --fs-title-1: 22px; --lh-title-1: 28px;
+  --fs-title-2: 17px; --lh-title-2: 22px;
+  --fs-title-3: 15px; --lh-title-3: 20px;
+  --fs-headline: 13px; --lh-headline: 16px;
+  --fs-body: 13px; --lh-body: 16px;
+  --fs-callout: 12px; --lh-callout: 15px;
+  --fs-subhead: 11px; --lh-subhead: 14px;
+  --fs-footnote: 10px; --lh-footnote: 13px;
+  --fs-caption: 10px; --lh-caption: 13px;
+  --fs-note: 14px; --lh-note: 20px;
+  --t-large-title: 700 var(--fs-large-title)/var(--lh-large-title) var(--font);
+  --t-title-1: 700 var(--fs-title-1)/var(--lh-title-1) var(--font);
+  --t-title-2: 700 var(--fs-title-2)/var(--lh-title-2) var(--font);
+  --t-title-3: 600 var(--fs-title-3)/var(--lh-title-3) var(--font);
+  --t-headline: 600 var(--fs-headline)/var(--lh-headline) var(--font);
+  --t-body: 400 var(--fs-body)/var(--lh-body) var(--font);
+  --t-callout: 400 var(--fs-callout)/var(--lh-callout) var(--font);
+  --t-subhead: 400 var(--fs-subhead)/var(--lh-subhead) var(--font);
+  --t-footnote: 400 var(--fs-footnote)/var(--lh-footnote) var(--font);
+  --t-caption: 400 var(--fs-caption)/var(--lh-caption) var(--font);
+  /* Existing JS/CSS semantic aliases retained for compatibility. */
+  --bg-2: var(--bg-elevated); --line: var(--separator);
+  --ink: var(--label); --ink-dim: var(--label-2);
+  --shadow: var(--elev-1); --shadow-hi: var(--elev-2);
+}
+:root[data-theme='dark'] {
+  --bg: #000000; --bg-elevated: #1c1c1e; --bg-tertiary: #2c2c2e;
+  --fill: rgba(120,120,128,.24); --fill-strong: rgba(120,120,128,.36);
+  --label: #ffffff; --label-2: #aeaeb2; --label-3: #8e8e93;
+  --separator: rgba(84,84,88,.65); --accent: #ffd60a; --tint: #ffd60a;
+  --red: #ff6961; --orange: #ff9f0a; --yellow: #ffd60a; --green: #30d158;
+  --switch-green: #30d158; --teal: #40c8e0; --blue: #0a84ff;
+  --indigo: #a4a2ff; --purple: #da8fff; --pink: #ff6482;
+  --scrim: rgba(0,0,0,.45); --dot: rgba(235,235,245,.13);
+  --elev-1: 0 1px 3px rgba(0,0,0,.24), 0 0 0 .5px var(--separator);
+  --elev-2: 0 6px 20px rgba(0,0,0,.36);
+  --elev-3: 0 12px 44px rgba(0,0,0,.5), 0 0 0 .5px var(--separator);
+}
+@media (min-resolution: 2dppx) { :root { --hairline: .5px; } }
+@media (max-width: 600px) {
+  :root {
+    --fs-large-title: 34px; --lh-large-title: 41px;
+    --fs-title-1: 28px; --lh-title-1: 34px;
+    --fs-title-2: 22px; --lh-title-2: 28px;
+    --fs-title-3: 20px; --lh-title-3: 25px;
+    --fs-headline: 17px; --lh-headline: 22px;
+    --fs-body: 17px; --lh-body: 22px;
+    --fs-callout: 16px; --lh-callout: 21px;
+    --fs-subhead: 15px; --lh-subhead: 20px;
+    --fs-footnote: 13px; --lh-footnote: 18px;
+    --fs-caption: 12px; --lh-caption: 16px;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root { --material-thin: var(--bg-elevated); --material-regular: var(--bg-elevated); --material-thick: var(--bg-elevated); }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root { --material-thin: var(--bg-elevated); --material-regular: var(--bg-elevated); --material-thick: var(--bg-elevated); }
+}

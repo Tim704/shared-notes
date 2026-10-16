@@ -3,6 +3,7 @@
 // only stores the returned /media/<hash>.<ext> path on a line of its own.
 
 import * as ui from './ui.js'
+import { icon, iconLabel } from './icons.js'
 
 const MAX_SIDE = 2000 // px; phone photos are 4000+ and the Pi has an SD card
 const MAX_UPLOAD = 8 * 1024 * 1024 // matches the server default (NOTES_MEDIA_MAX_MB)
@@ -101,20 +102,28 @@ export function openLightbox(emb) {
   if (!src) return
   const back = document.createElement('div')
   back.className = 'lightbox'
+  back.setAttribute('role', 'dialog')
+  back.setAttribute('aria-modal', 'true')
+  back.setAttribute('aria-label', 'Picture preview')
   const img = document.createElement('img')
   img.src = src
-  img.alt = ''
+  img.alt = 'Full size picture from your note'
   const open = document.createElement('a')
   open.className = 'lightbox-open'
   open.href = src
   open.target = '_blank'
   open.rel = 'noopener'
-  open.textContent = 'Open original ↗'
+  iconLabel(open, 'Open original', 'external')
   open.addEventListener('click', (e) => e.stopPropagation())
-  back.append(img, open)
+  const dismiss = document.createElement('button')
+  dismiss.className = 'lightbox-close icon-btn'
+  dismiss.setAttribute('aria-label', 'Close picture')
+  dismiss.appendChild(icon('close'))
+  back.append(img, open, dismiss)
   const close = () => {
     document.removeEventListener('keydown', onKey, true)
     back.remove()
+    releaseFocus()
   }
   const onKey = (e) => {
     if (e.key === 'Escape') {
@@ -126,4 +135,8 @@ export function openLightbox(emb) {
   back.addEventListener('click', close)
   document.addEventListener('keydown', onKey, true)
   document.body.appendChild(back)
+  const releaseFocus = ui.trapFocus(back)
+  dismiss.focus()
+  const thumb = [...document.querySelectorAll('.rb-embed img')].find(n => n.src === img.src)
+  img.addEventListener('load', () => { if (thumb) { img.style.transformOrigin = '0 0'; ui.zoomFrom(img, thumb.getBoundingClientRect()) } }, { once:true })
 }

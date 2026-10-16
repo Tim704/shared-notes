@@ -3,18 +3,25 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0e1014" />
-    <title>notes</title>
+    <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+    <script>
+      (() => {
+        let theme = 'system';
+        try { theme = JSON.parse(localStorage.getItem('notesSettings') || '{}').theme || 'system'; } catch {}
+        const resolved = theme === 'light' || theme === 'dark' ? theme : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.style.colorScheme = resolved;
+        if (theme === 'light' || theme === 'dark') document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.content = resolved === 'dark' ? '#000000' : '#f2f2f7');
+      })();
+    </script>
+    <title>Shared Notes</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
+    <link rel="preload" href="/fonts/inter-latin-variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/tokens.css" />
     <link rel="stylesheet" href="/style.css" />
     <script src="/bundle.js" defer></script>
   </head>
@@ -22,33 +29,36 @@
     <header class="topbar">
       <div class="brand">
         <span class="brand-dot"></span>
-        <span class="brand-name">notes</span>
+        <span class="brand-name">Notes</span>
       </div>
-      <button id="phone-title" class="phone-title" title="Tabs">notes</button>
+      <button id="phone-title" class="phone-title" title="Tabs" aria-label="Open tabs">Notes</button>
 
       <div id="search-wrap" class="search-wrap">
         <svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true">
           <circle cx="11" cy="11" r="7"></circle>
           <line x1="16.5" y1="16.5" x2="21" y2="21"></line>
         </svg>
-        <input id="search" type="search" placeholder="Search this tab" autocomplete="off" />
+        <input id="search" type="search" placeholder="Search this tab" aria-label="Search this tab" autocomplete="off" />
+        <button id="search-clear" class="search-clear icon-btn" title="Clear search" aria-label="Clear search" data-icon="close" hidden></button>
       </div>
 
       <div class="bar-right">
         <div id="people" class="people"></div>
-        <span id="conn-dot" class="conn-dot" title="Reconnecting..."></span>
+        <span id="conn-dot" class="conn-dot" title="Reconnecting…" role="status" aria-label="Reconnecting"></span>
         <div class="you-chip">
           <span id="you-name" class="you-name"></span>
-          <button id="rename" class="icon-btn" title="Change your name">&#9998;</button>
+          <button id="rename" class="icon-btn" title="Change your name" aria-label="Change your name" data-icon="pencil"></button>
         </div>
-        <button id="settings" class="icon-btn settings-btn" title="Settings &amp; backup">&#9881;</button>
+        <button id="settings" class="icon-btn settings-btn" title="Settings &amp; backup" aria-label="Settings and backup" data-icon="settings"></button>
         <button id="add" class="add-btn">
-          <span class="plus">+</span><span class="add-label">Note</span>
+          <span class="plus" data-icon="compose"></span><span class="add-label">New Note</span>
         </button>
       </div>
     </header>
 
     <nav id="tabs" class="tabbar"></nav>
+
+    <div id="ribbon" class="ribbon" role="toolbar" aria-label="Formatting and note settings" hidden></div>
 
     <main id="board" class="board"></main>
 
@@ -57,23 +67,27 @@
       <div id="canvas-host" class="canvas-host"></div>
     </section>
 
+    <section id="page-view" class="page-view" hidden></section>
+
     <div id="sel-bar" class="sel-bar" hidden></div>
 
     <nav id="phone-bar" class="phone-bar" hidden>
-      <button data-act="tabs" title="Tabs"><span>☰</span><small>Tabs</small></button>
-      <button data-act="search" title="Search"><span>⌕</span><small>Search</small></button>
-      <button data-act="home" title="Home"><span>⌂</span><small>Home</small></button>
-      <button data-act="settings" title="Settings"><span>⚙</span><small>Settings</small></button>
+      <button data-act="tabs" title="Tabs" class="on"><span data-icon="folder"></span><small>Tabs</small></button>
+      <button data-act="search" title="Search"><span data-icon="search"></span><small>Search</small></button>
+      <button data-act="home" title="Home"><span data-icon="home"></span><small>Home</small></button>
+      <button data-act="settings" title="Settings"><span data-icon="settings"></span><small>Settings</small></button>
     </nav>
-    <button id="fab" class="fab" title="New note (hold for more)" hidden>+</button>
+    <button id="fab" class="fab" title="New note (hold for more)" aria-label="New note (hold for more)" data-icon="compose" hidden></button>
     <div id="drawer" class="drawer" hidden><div class="drawer-panel"></div></div>
 
     <div id="overlay" class="overlay" hidden></div>
 
     <div id="empty" class="empty">
       <div class="empty-card">
+        <span class="empty-icon" data-icon="note"></span>
         <p class="empty-title">No notes yet</p>
-        <p class="empty-sub">Hit <b>+ Note</b> and start typing. Anyone on the board sees it appear, letter by letter.</p>
+        <p class="empty-sub">A little space for your next idea.<br />Write together, wherever you are.</p>
+        <button id="empty-add" class="primary-btn"><span data-icon="compose"></span>New Note</button>
       </div>
     </div>
   </body>

@@ -1,3 +1,5 @@
+import { iconLabel } from './icons.js'
+import { DOCUMENT_INK, DOCUMENT_PAPER } from './util.js'
 // A note's bullet points drawn as a mind map. The outline IS the map: the
 // title is the root, headings / paragraphs are its branches, list items nest
 // under them by indent (see outlineTree in shared/lines.js). Editing the map
@@ -16,9 +18,9 @@ import { setLineText, insertLinesAfter, insertLinesAt, deleteLines, moveLines, s
 import { rafThrottle } from './util.js'
 
 const NS = 'http://www.w3.org/2000/svg'
-const BRANCH = ['#e8590c', '#2f9e44', '#1c7ed6', '#ae3ec9', '#f08c00', '#0c8599', '#d6336c', '#5c940d']
-const FONT = '600 13px "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif'
-const ROOT_FONT = '700 16px "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif'
+const BRANCH = ['#a95000', '#248a3d', '#0062cc', '#8944ab', '#805c00', '#007f91', '#b80048', '#4845a2']
+const FONT = '600 13px -apple-system, BlinkMacSystemFont, "Inter var", "Segoe UI", system-ui, sans-serif'
+const ROOT_FONT = '700 16px -apple-system, BlinkMacSystemFont, "Inter var", "Segoe UI", system-ui, sans-serif'
 const PAD_X = 10
 const NODE_H = 28
 const ROOT_H = 38
@@ -68,8 +70,9 @@ export function createMindMap(host, note, opts = {}) {
     const b = document.createElement('button')
     b.type = 'button'
     b.className = 'mm-tool'
-    b.textContent = label
+    iconLabel(b, label)
     b.title = title
+    b.setAttribute('aria-label', title)
     b.addEventListener('click', (e) => {
       e.stopPropagation()
       fn()
@@ -224,8 +227,8 @@ export function createMindMap(host, note, opts = {}) {
           y: -n.h / 2,
           width: n.w,
           height: n.h,
-          rx: n.kind === 'root' ? 12 : 8,
-          fill: n.kind === 'root' ? 'var(--mm-root, #1f2228)' : n.depth === 1 ? n.color : 'var(--mm-node, #ffffff)',
+          rx: n.h / 2,
+          fill: n.kind === 'root' ? 'var(--mm-root, #e6a700)' : n.depth === 1 ? n.color : 'var(--mm-node, #ffffff)',
           stroke: n.kind === 'root' ? 'none' : n.color,
           'stroke-width': n.depth === 1 ? 0 : 1.6,
         },
@@ -238,7 +241,7 @@ export function createMindMap(host, note, opts = {}) {
           y: 1,
           'text-anchor': 'middle',
           'dominant-baseline': 'middle',
-          fill: n.kind === 'root' ? '#fff' : n.depth === 1 ? '#fff' : '#1f2228',
+          fill: n.kind === 'root' ? DOCUMENT_INK : n.depth === 1 ? DOCUMENT_PAPER : 'var(--mm-ink, #1c1c1e)',
           style: 'font:' + (n.kind === 'root' ? ROOT_FONT : FONT) + (a.lt === 'todo' && a.done ? ';text-decoration:line-through' : ''),
         },
         g
@@ -564,12 +567,13 @@ export function createMindMap(host, note, opts = {}) {
     bg.setAttribute('y', bounds.y)
     bg.setAttribute('width', bounds.w)
     bg.setAttribute('height', bounds.h)
-    bg.setAttribute('fill', '#fbfaf5')
+    bg.setAttribute('fill', DOCUMENT_PAPER)
     clone.insertBefore(bg, clone.querySelector('.mm-scene'))
     return new XMLSerializer()
       .serializeToString(clone)
       .replace(/var\(--mm-root, ([^)]+)\)/g, '$1')
       .replace(/var\(--mm-node, ([^)]+)\)/g, '$1')
+      .replace(/var\(--mm-ink, ([^)]+)\)/g, '$1')
   }
   const fileBase = () => (title.toString().trim() || 'mind-map').replace(/[^\w-]+/g, '-').slice(0, 40)
   function save(blob, name) {

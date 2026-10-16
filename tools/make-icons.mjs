@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const OUT = path.join(__dirname, '..', 'public')
 
-const ACCENT = [0xff, 0xd2, 0x3f]
-const DARK = [0x0e, 0x10, 0x14]
-const INK = [0x2a, 0x23, 0x00]
+const ACCENT = [0xff, 0xd6, 0x0a]
+const LIGHT = [0xf2, 0xf2, 0xf7]
+const INK = [0x80, 0x5c, 0x00]
 const SS = 4 // supersample for smooth edges
 
 function inRoundRect(px, py, x, y, w, h, r) {
@@ -58,12 +58,17 @@ function renderHi(N) {
       }
     }
   }
-  fillRR(0, 0, N, N, 7 * u, DARK)
-  // rotation is omitted in the raster (keeps it crisp at tiny sizes)
+  fillRR(0, 0, N, N, 7 * u, LIGHT)
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    if (inRoundRect(x + .5, y + .5, 0, 0, N, N, 7 * u)) {
+      const t = y / N
+      set(x, y, LIGHT.map(v => Math.round(255 * (1 - t) + v * t)))
+    }
+  }
   fillRR(7 * u, 5.5 * u, 18 * u, 21 * u, 3.5 * u, ACCENT)
-  fillRR(10 * u, 11 * u, 12 * u, 2 * u, 1 * u, INK)
-  fillRR(10 * u, 15.5 * u, 12 * u, 2 * u, 1 * u, INK)
-  fillRR(10 * u, 20 * u, 8 * u, 2 * u, 1 * u, INK)
+  fillRR(10 * u, 11 * u, 12 * u, 1.5 * u, .75 * u, INK)
+  fillRR(10 * u, 15.5 * u, 12 * u, 1.5 * u, .75 * u, INK)
+  fillRR(10 * u, 20 * u, 8 * u, 1.5 * u, .75 * u, INK)
   return buf
 }
 

@@ -1,3 +1,5 @@
+import { iconLabel } from './icons.js'
+import { renderedPaper, PAPER } from './util.js'
 // The "canvas" view of a tab: an endless plane you pan and zoom, instead of a
 // board that only grows downwards. Notes keep their shared x/y/w/h (which may
 // now be negative); the pan and zoom are this device's own business and are
@@ -46,8 +48,9 @@ export function createViewport({ board, plane, getRects, onChange = () => {}, sh
     const b = document.createElement('button')
     b.type = 'button'
     b.className = 'vp-btn'
-    b.textContent = label
+    iconLabel(b, label)
     b.title = title
+    b.setAttribute('aria-label', title)
     b.addEventListener('click', (e) => {
       e.stopPropagation()
       fn()
@@ -161,12 +164,16 @@ export function createViewport({ board, plane, getRects, onChange = () => {}, sh
     const oy = (MH - (y1 - y0) * s) / 2 - y0 * s
     mapScale = { s, ox, oy }
     for (const r of getRects()) {
-      ctx.fillStyle = r.color || '#fff7a8'
+      ctx.fillStyle = renderedPaper(r.color || PAPER[0])
       ctx.globalAlpha = 0.9
       ctx.fillRect(ox + r.x * s, oy + r.y * s, Math.max(2, r.w * s), Math.max(2, r.h * s))
     }
     ctx.globalAlpha = 1
-    ctx.strokeStyle = '#ffd23f'
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
+    ctx.fillStyle = ctx.strokeStyle
+    ctx.globalAlpha = .12
+    ctx.fillRect(ox + vis.x * s, oy + vis.y * s, vis.w * s, vis.h * s)
+    ctx.globalAlpha = 1
     ctx.lineWidth = 1.5
     ctx.strokeRect(ox + vis.x * s, oy + vis.y * s, vis.w * s, vis.h * s)
   }
@@ -195,7 +202,7 @@ export function createViewport({ board, plane, getRects, onChange = () => {}, sh
 
   // ---- input ---------------------------------------------------------------------
   const isBackground = (t) =>
-    t === board || t === plane || (t && t.classList && (t.classList.contains('edges') || t.classList.contains('guides')))
+    t === board || t === plane || (t && t.classList && (t.classList.contains('ink') || t.classList.contains('guides')))
 
   function onWheel(e) {
     if (!on) return

@@ -513,8 +513,18 @@ section 3 ─┬── section 5
   (stored in `data/media`, cache-first offline), title alignment, pinned notes, an
   install-ready web manifest, and a password-protection test suite.
 
+**Update (12 Oct 2026): Apple-style redesign and round 4.** The UI follows Apple's design
+language (light and dark, `DESIGN.md`). Then, at Tim's request: mind maps became their own
+**tab type** (the per-note mind map view and the **arrows between notes were removed**; their
+old data is kept but no longer shown); a **document** tab type; a Word-style **ribbon** under
+the tabs replaced the toolbar and ⋯ button inside notes (setting: always / while editing);
+**ink** between the notes of a sticky-note tab; notes **grow with their content** by default;
+no focus ring while typing in a note.
+
 Still not done:
 
+- **Ink that moves with a note** (strokes are free-floating; attaching them to notes would
+  need a note id and offsets per stroke).
 - **Per-tab documents** (one `Y.Doc` per tab). Still recommended against until the board
   file gets large.
 - **Building and testing the Android app** on a real device (see its README checklist).

@@ -11,6 +11,7 @@
 import express from 'express'
 import http from 'http'
 import fs from 'fs'
+import crypto from 'crypto'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
@@ -220,7 +221,32 @@ app.use(auth.middleware) // gate everything below (no-op when no password is set
 app.use('/api/media', media.router)
 app.use('/media', media.files)
 app.use('/api', createApi({ ydoc }))
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }))
+// index.html names its stylesheets and script with a content hash (?v=…). Cloudflare
+// tells browsers to keep .css/.js for hours, so without this a deploy would not reach
+// a browser, or the installed app, until that ran out.
+const PUBLIC = path.join(__dirname, 'public')
+const VERSIONED = ['tokens.css', 'style.css', 'bundle.js']
+const versions = new Map() // file -> { stamp, v }
+function assetVersion(file) {
+  const st = fs.statSync(path.join(PUBLIC, file))
+  const stamp = st.mtimeMs + ':' + st.size
+  const hit = versions.get(file)
+  if (hit && hit.stamp === stamp) return hit.v
+  const v = crypto.createHash('md5').update(fs.readFileSync(path.join(PUBLIC, file))).digest('hex').slice(0, 10)
+  versions.set(file, { stamp, v })
+  return v
+}
+app.get(['/', '/index.html'], (_req, res, next) => {
+  try {
+    let html = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8')
+    for (const f of VERSIONED) html = html.replace(`"/${f}"`, `"/${f}?v=${assetVersion(f)}"`)
+    res.set('Cache-Control', 'no-cache')
+    res.type('html').send(html)
+  } catch (err) {
+    next(err)
+  }
+})
+app.use(express.static(PUBLIC, { extensions: ['html'] }))
 
 const server = http.createServer(app)
 // noServer so we can check the password cookie before completing the handshake

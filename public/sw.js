@@ -4,7 +4,7 @@
 // itself comes from IndexedDB (see y-indexeddb in src/client.js).
 // Pictures (/media/<hash>.<ext>) never change, so they are cache first: once
 // seen on a device they keep showing with the Pi off.
-const CACHE = 'shared-notes-shell-v4'
+const CACHE = 'shared-notes-shell-v5'
 const MEDIA = 'shared-notes-media-v1'
 const MEDIA_MAX = 300 // pictures kept per device
 const SHELL = ['/', '/index.html', '/tokens.css', '/style.css', '/bundle.js', '/site.webmanifest', '/favicon.svg', '/favicon-32.png', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/fonts/inter-latin-variable.woff2', '/fonts/OFL.txt']
@@ -13,7 +13,7 @@ self.addEventListener('install', (e) => {
   e.waitUntil(
     caches
       .open(CACHE)
-      .then((c) => c.addAll(SHELL).catch(() => {}))
+      .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))).catch(() => {})) // never precache a stale copy
       .then(() => self.skipWaiting())
   )
 })
@@ -66,7 +66,10 @@ self.addEventListener('fetch', (e) => {
         return res
       })
       .catch(() =>
-        caches.match(req).then((hit) => hit || (req.mode === 'navigate' ? caches.match('/') : undefined))
+        caches
+          .match(req)
+          .then((hit) => hit || caches.match(req, { ignoreSearch: true })) // style.css?v=… offline: any copy will do
+          .then((hit) => hit || (req.mode === 'navigate' ? caches.match('/') : undefined))
       )
   )
 })

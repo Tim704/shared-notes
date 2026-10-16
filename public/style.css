@@ -357,12 +357,50 @@ body {
   position: absolute;
   margin: 0;
 }
+.card.free {
+  padding-top: 0; /* the header strip below supplies the top space */
+}
+/* The header is the handle: a full-width strip along the top edge with a grabber
+   pill, tinted on hover, so it is clear where a note can be picked up. */
 .card.free .card-top {
+  position: relative;
+  min-height: 22px;
+  margin: 0 calc(-1 * var(--s-4)) var(--s-1);
+  padding: 2px var(--s-2) 0;
+  border-radius: calc(var(--r-card) - 1px) calc(var(--r-card) - 1px) 0 0;
   cursor: grab;
   touch-action: none;
+  transition: background var(--dur) var(--ease);
+}
+.card.free .card-top::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 7px;
+  width: 32px;
+  height: 4px;
+  margin-left: -16px;
+  border-radius: var(--r-pill);
+  background: var(--note-ink-dim, var(--label-2));
+  opacity: .3;
+  pointer-events: none;
+  transition: opacity var(--dur) var(--ease);
+}
+.card.free .card-top:hover {
+  background: var(--fill);
+}
+.card.free .card-top:hover::before, .card.free.dragging .card-top::before {
+  opacity: .65;
 }
 .card.free.dragging .card-top {
   cursor: grabbing;
+}
+@media (pointer: fine) {
+  .card.free .card-tools .icon-btn {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 2px;
+  }
 }
 .card.free.dragging, .card.free.resizing {
   user-select: none;
@@ -1627,13 +1665,24 @@ body:has(.align-bar:not([hidden])) .toasts {
 .rb-line.al-right > .rb-text {
   text-align: right;
 }
+/* The "Take a note…" / "Start writing…" hint works like an <input placeholder>: it is
+   drawn over the empty line, out of the text flow, so the caret stays at the start and
+   the hint stays until the first character lands. */
 .rb-empty .rb-text[data-ph]::before {
   content: attr(data-ph);
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--note-ink-dim, var(--label-2));
   pointer-events: none;
+  user-select: none;
 }
-.rb-empty:focus-within .rb-text[data-ph]::before {
-  content: none; /* the hint goes when you click in, so the caret sits at the start of the line */
+.rb-composing .rb-text[data-ph]::before {
+  content: none; /* an IME word in progress (Android keyboards) is not in the document yet */
 }
 /* Fold arrow. On a list line it sits over the bullet (the glyph fades out under
    it on hover, or while folded); on a heading, paragraph or checklist line it

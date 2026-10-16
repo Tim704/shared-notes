@@ -1317,9 +1317,11 @@ export function bindRichText(ytext, el, opts = {}) {
 
   function onCompositionStart() {
     composing = true
+    el.classList.add('rb-composing') // hides the empty-note hint while an IME word is in progress
   }
   function onCompositionEnd() {
     composing = false
+    el.classList.remove('rb-composing')
     reconcilePlain(pendingMarks || {})
     emitState()
   }

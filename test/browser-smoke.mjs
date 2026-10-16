@@ -255,6 +255,32 @@ try {
   check('the ribbon has marks, lists, checkbox, align and picture buttons', made.ribbon && made.fmtBtns >= 8)
   check('notes carry no toolbar or settings button of their own', made.noChin)
   check('a new note grows with its content', made.grows)
+  await evaluate(`${sel(A, '.card-body')}.focus()`)
+  await sleep(80)
+  const notePh = await evaluate(`(() => {
+    const t = document.querySelector('.card[data-id="${A}"] .card-body.rb-empty .rb-text[data-ph]')
+    if (!t) return { ph: '', start: false }
+    const br = t.querySelector('br')
+    return { ph: getComputedStyle(t, '::before').content, start: !!br && Math.abs(br.getBoundingClientRect().left - t.getBoundingClientRect().left) < 2 }
+  })()`)
+  check('"Take a note…" stays while the empty body is focused, like the title, with the caret at the start', /Take a note/.test(notePh.ph) && notePh.start)
+  await c.send('Input.imeSetComposition', { text: 'hel', selectionStart: 3, selectionEnd: 3 }).catch(() => null)
+  await sleep(60)
+  const composing = await evaluate(`${sel(A, '.card-body')}.classList.contains('rb-composing') ? getComputedStyle(${sel(A, '.card-body .rb-text')}, '::before').content : 'skip'`)
+  if (composing !== 'skip') check('the hint hides while a keyboard composes a word', composing === 'none')
+  await c.send('Input.imeSetComposition', { text: '', selectionStart: 0, selectionEnd: 0 }).catch(() => null) // cancel it
+  await sleep(80)
+  if (await evaluate(`!!${sel(A, '.card-body')}.textContent`)) { // a cancel that left text behind: clear it
+    await key('a', 'KeyA', 65, 2)
+    await backspace()
+  }
+  const head = await evaluate(`(() => {
+    const card = ${sel(A)}, top = card.querySelector('.card-top'), title = card.querySelector('.card-title')
+    const c = card.getBoundingClientRect(), t = top.getBoundingClientRect(), ti = title.getBoundingClientRect()
+    const pill = getComputedStyle(top, '::before')
+    return { gap: ti.top - c.top, full: Math.abs(t.width - c.width) < 3, pill: pill.content !== 'none' && parseFloat(pill.width) >= 24, cursor: getComputedStyle(top).cursor }
+  })()`)
+  check('the note header is slim (title within 30px of the top) and spans the card as a drag handle with a grabber', head.gap <= 30 && head.full && head.pill && head.cursor === 'grab')
 
   await evaluate(`document.activeElement && document.activeElement.blur()`)
   await evaluate(`document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`)
@@ -915,11 +941,15 @@ try {
     ribbon: !document.getElementById('ribbon').hidden && document.querySelector('#ribbon .rib-note').hidden,
   })`)
   check('a Document tab shows one full page to write on, with the ribbon for formatting', docTab.shown && docTab.board && docTab.ribbon)
-  const phBefore = await evaluate(`getComputedStyle(document.querySelector('.page-body.rb-empty .rb-text[data-ph]'), '::before').content`)
   await evaluate(`document.querySelector('.page-body').focus()`)
   await sleep(100)
-  const phFocused = await evaluate(`getComputedStyle(document.querySelector('.page-body.rb-empty .rb-text[data-ph]'), '::before').content`)
-  check('the "Start writing…" hint shows on an empty page and goes when you click in', /Start writing/.test(phBefore) && phFocused === 'none')
+  const pagePh = await evaluate(`(() => {
+    const t = document.querySelector('.page-body.rb-empty .rb-text[data-ph]')
+    if (!t) return { ph: '', start: false }
+    const br = t.querySelector('br')
+    return { ph: getComputedStyle(t, '::before').content, start: !!br && Math.abs(br.getBoundingClientRect().left - t.getBoundingClientRect().left) < 2 }
+  })()`)
+  check('"Start writing…" stays while the empty page is focused, with the caret at the start', /Start writing/.test(pagePh.ph) && pagePh.start)
   await type('Dear diary')
   await evaluate(`(() => {
     const t = document.querySelector('.page-body .rb-text'); const r = document.createRange(); r.selectNodeContents(t)

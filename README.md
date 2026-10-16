@@ -30,7 +30,8 @@ browser at it.
   grid. Each move or alignment is one Ctrl/⌘+Z away from undone.
 - **Rich text** in the note body: **bold**, *italic*, underline and strikethrough, and
   lines that are:
-  - **bullet lists** in six styles: • discs, ▪ squares, → arrows, – dashes, 1. numbers,
+  - **bullet lists** (• at the top level, – dashes for sub-points by default) in six
+    styles: • discs, ▪ squares, → arrows, – dashes, 1. numbers,
     a. letters and i. roman numerals. Nested numbers go 1. → a. → i. by default;
   - **checkboxes mixed in with normal text** (a shopping list under a paragraph,
     sub-tasks under a task);
@@ -41,8 +42,9 @@ browser at it.
   use the toolbar. Tab / Shift+Tab nest list items. Enter on an empty item leaves the
   list, and Backspace right after a shortcut undoes it. All of it is CRDT data, so it
   merges like the text does.
-- **Folding**: a line with bullet points under it gets a ▸ arrow. Fold it to hide them
-  (shows "… 3"), or press Ctrl/⌘+. on the line. Folding is per device, so it never hides
+- **Folding**: hover a bullet that has points under it and its marker turns into a ▸
+  arrow (headings and paragraphs show the arrow at the right edge). Fold it to hide
+  them (shows "… 3"), or press Ctrl/⌘+. on the line. Folding is per device, so it never hides
   anything for anyone else, and searching shows folded lines again.
 - **Pictures and videos**: paste or drop a picture into a note (or use the 🖼 button).
   It is shrunk to at most 2000 px in the browser, stored on the Pi, and shown in the note.

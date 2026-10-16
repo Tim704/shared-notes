@@ -4,6 +4,7 @@ import {
   MARKS,
   deltaToLines,
   computeMarkers,
+  markOf,
   subtreeEnds,
   embedOf,
   pickLine,
@@ -32,9 +33,12 @@ import {
 // plain-text diff so the text can never silently desync.
 //
 // DOM shape, one element per line:
-//   <div class="rb-line rb-li" data-i="3">
-//     <span class="rb-fold">  (lines that own others)   contenteditable=false
+//   <div class="rb-line rb-li has-kids" data-i="3">
 //     <span class="rb-mark">• / 1. / a.  or  <span class="rb-check">
+//       <span class="rb-fold">  (a list line that owns others: the arrow sits
+//                               over the bullet, so nothing moves)
+//     <span class="rb-fold">  (a heading / paragraph / checklist line that owns
+//                             others: the arrow floats at the right edge)
 //     <div class="rb-embed">  (a line that is only a picture/video URL)
 //     <span class="rb-text">…the characters…</span>
 //   </div>
@@ -161,10 +165,8 @@ export function bindRichText(ytext, el, opts = {}) {
     const ends = subtreeEnds(ls)
     const showAll = !!reveal()
     const hidden = new Array(ls.length).fill(false)
-    let anyKids = false
     for (let i = 0; i < ls.length; i++) {
       if (ends[i] > i + 1) {
-        anyKids = true
         const bid = ls[i].attrs.bid
         if (!showAll && folds && bid && folds.has(bid) && !hidden[i]) for (let j = i + 1; j < ends[i]; j++) hidden[j] = true
       }
@@ -216,7 +218,6 @@ export function bindRichText(ytext, el, opts = {}) {
     }
     while (el.childNodes.length > rec.length) el.lastChild.remove()
     lines = rec
-    el.classList.toggle('rb-has-folds', anyKids)
     el.classList.toggle('rb-empty', emptyDoc)
   }
 
@@ -230,24 +231,26 @@ export function bindRichText(ytext, el, opts = {}) {
       (a.al ? ' al-' + a.al : '') +
       (hidden ? ' rb-hidden' : '') +
       (folded ? ' folded' : '') +
+      (kids ? ' has-kids' : '') +
       (emb ? ' has-embed embed-' + emb.kind : '')
     if (isList(a) && a.ind) line.style.setProperty('--ind', a.ind)
+    let fold = null
     if (kids) {
-      const f = document.createElement('span')
-      f.className = 'rb-fold'
-      f.contentEditable = 'false'
-      f.appendChild(icon('right'))
-      f.setAttribute('aria-expanded', String(!folded))
-      f.setAttribute('role', 'button'); f.tabIndex = 0
-      f.setAttribute('aria-label', folded ? 'Unfold lines' : 'Fold lines')
-      f.title = folded ? 'Show what is folded here (Ctrl+.)' : 'Fold (Ctrl+.)'
-      line.appendChild(f)
+      fold = document.createElement('span')
+      fold.className = 'rb-fold'
+      fold.contentEditable = 'false'
+      fold.appendChild(icon('right'))
+      fold.setAttribute('aria-expanded', String(!folded))
+      fold.setAttribute('role', 'button'); fold.tabIndex = 0
+      fold.setAttribute('aria-label', folded ? 'Unfold lines' : 'Fold lines')
+      fold.title = folded ? 'Show what is folded here (Ctrl+.)' : 'Fold (Ctrl+.)'
     }
     if (a.lt === 'li') {
       const m = document.createElement('span')
-      m.className = 'rb-mark mk-' + (a.mk || 'disc')
+      m.className = 'rb-mark mk-' + markOf(a) + (fold ? ' has-fold' : '')
       m.contentEditable = 'false'
       m.textContent = marker
+      if (fold) m.appendChild(fold) // over the bullet: the text never shifts
       line.appendChild(m)
     } else if (a.lt === 'todo') {
       const c = document.createElement('span')
@@ -277,6 +280,7 @@ export function bindRichText(ytext, el, opts = {}) {
     }
     if (!L.len) body.appendChild(document.createElement('br'))
     line.appendChild(body)
+    if (fold && a.lt !== 'li') line.appendChild(fold) // floats at the right edge
     if (folded) {
       const more = document.createElement('span')
       more.className = 'rb-more'
@@ -585,7 +589,7 @@ export function bindRichText(ytext, el, opts = {}) {
     if (a.lt === 'h') return a.al ? { al: a.al } : {}
     const out = {}
     if (a.lt) out.lt = a.lt
-    if (a.lt === 'li') out.mk = a.mk || 'disc'
+    if (a.lt === 'li') out.mk = markOf(a)
     if (isList(a) && a.ind) out.ind = a.ind
     if (a.al) out.al = a.al
     if (isList(a)) out.bid = genLineId()
@@ -691,7 +695,7 @@ export function bindRichText(ytext, el, opts = {}) {
     const r = selectedLineRange()
     if (!r) return
     const want = mk || 'disc'
-    const all = lines.slice(r.a, r.b + 1).every((L) => L.attrs.lt === 'li' && (L.attrs.mk || 'disc') === want)
+    const all = lines.slice(r.a, r.b + 1).every((L) => L.attrs.lt === 'li' && markOf(L.attrs) === want)
     keepSelection(r.sel)
     patchLines(r.a, r.b, (cur) =>
       all

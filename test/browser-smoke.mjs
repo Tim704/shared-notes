@@ -316,7 +316,10 @@ try {
   await tab()
   L = await lines(A)
   check('Tab nests a list item', /rb-li/.test(L[2].cls) && /--ind|ind/.test(await evaluate(`${sel(A, '.card-body')}.querySelectorAll('.rb-line')[2].getAttribute('style') || ''`)))
+  check('a nested item gets a dash, its parent keeps the disc', L[2].mark === '–' && L[1].mark === '•')
   await tab(true)
+  L = await lines(A)
+  check('Shift+Tab brings the disc back', L[2].mark === '•')
   await enter()
   await enter() // Enter on an empty item leaves the list
   L = await lines(A)
@@ -355,6 +358,14 @@ try {
   // fold: "hello world" owns the bullets after it
   const foldable = await evaluate(`!!${sel(A, '.card-body')}.querySelector('.rb-line .rb-fold')`)
   check('a line with bullets under it gets a fold arrow', foldable)
+  check('the fold arrow takes no room: the editor has no gutter and a bullet with children keeps its marker in place', await evaluate(`(() => {
+    const b = ${sel(A, '.card-body')}
+    if (parseFloat(getComputedStyle(b).paddingLeft) > 0) return false
+    const f = b.querySelector('.rb-line.rb-li.has-kids > .rb-mark.has-fold > .rb-fold')
+    if (!f) return true // only non-list owners here
+    const m = f.parentNode.getBoundingClientRect(), r = f.getBoundingClientRect()
+    return Math.abs(m.left + m.width / 2 - (r.left + r.width / 2)) < 1 && Math.abs(m.top + m.height / 2 - (r.top + r.height / 2)) < 1 // the arrow is centred over the bullet (it is rotated, so compare centres)
+  })()`))
   await evaluate(`${sel(A, '.card-body')}.querySelector('.rb-line .rb-fold').click()`)
   await sleep(80)
   const folded = await evaluate(`(() => {

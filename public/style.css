@@ -1566,6 +1566,7 @@ body:has(.align-bar:not([hidden])) .toasts {
   display: none !important;
 }
 .rb-mark {
+  position: relative;
   flex: none;
   min-width: 1em;
   text-align: right;
@@ -1634,25 +1635,37 @@ body:has(.align-bar:not([hidden])) .toasts {
 .rb-empty:focus-within .rb-text[data-ph]::before {
   content: none; /* the hint goes when you click in, so the caret sits at the start of the line */
 }
-.rb.rb-has-folds {
-  padding-left: var(--s-5);
-}
+/* Fold arrow. On a list line it sits over the bullet (the glyph fades out under
+   it on hover, or while folded); on a heading, paragraph or checklist line it
+   floats at the right edge. Either way it takes no room, so text never moves. */
 .rb-fold {
   position: absolute;
-  left: calc(var(--ind, 0) * 22px - 18px);
-  top: 0;
-  width: var(--s-4);
-  line-height: 1.42em;
-  text-align: center;
+  inset: 0;
+  display: grid;
+  place-items: center;
   font-size: inherit;
   color: var(--note-ink-dim, var(--label-2));
   cursor: default;
   user-select: none;
   opacity: 0;
   transform: rotate(90deg);
-  transition: opacity var(--dur), transform var(--dur);
+  transition: opacity var(--dur), transform var(--dur), color var(--dur);
 }
-.rb-line.folded > .rb-fold {
+.rb-line > .rb-fold {
+  inset: auto 0 auto auto;
+  top: 0;
+  width: 1.45em;
+  height: 1.45em;
+  border-radius: var(--r-pill);
+  background: var(--fill);
+}
+.rb-mark.has-fold {
+  transition: color var(--dur);
+}
+.rb-line:hover > .rb-mark.has-fold, .rb-line.folded > .rb-mark.has-fold {
+  color: transparent;
+}
+.rb-line.folded .rb-fold {
   transform: none;
   color: var(--note-ink, var(--document-ink));
 }
@@ -3163,7 +3176,7 @@ html::-webkit-scrollbar-thumb:hover {
 .rb-check:hover {
   border-color: var(--note-ink, var(--document-ink));
 }
-.rb-line:hover > .rb-fold, .rb-line.folded > .rb-fold {
+.rb-line:hover .rb-fold, .rb-line.folded .rb-fold {
   opacity: 1;
 }
 .rb-play:hover .rb-play-btn {
@@ -3231,6 +3244,9 @@ from {
 @media (hover: none) {
 .rb-fold {
   opacity: 0.55;
+}
+.rb-mark.has-fold {
+  color: transparent; /* no hover: the arrow stands in for the bullet */
 }
 }
 

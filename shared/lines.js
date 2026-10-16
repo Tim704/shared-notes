@@ -153,6 +153,17 @@ export function numericForLevel(ind) {
 const GLYPH = { disc: '•', square: '▪', arrow: '→', dash: '–' }
 
 /**
+ * The marker a list line shows. Unset (or the default "disc") follows the
+ * depth: discs at the top level, dashes for sub-points. An explicit square,
+ * arrow or numbered style is kept at any depth.
+ */
+export function markOf(a) {
+  const mk = a.mk
+  if (!mk || mk === 'disc') return (a.ind || 0) > 0 ? 'dash' : 'disc'
+  return mk
+}
+
+/**
  * The marker text for every line ('' for non-list lines; todo lines get '').
  * Numbering counts consecutive list items per indent level and restarts after
  * any paragraph/heading, or when the marker style at a level changes.
@@ -172,7 +183,7 @@ export function computeMarkers(lines) {
     counters.length = lvl + 1
     styles.length = lvl + 1
     if (a.lt === 'todo') continue
-    const mk = a.mk || 'disc'
+    const mk = markOf(a)
     if (styles[lvl] !== mk) {
       styles[lvl] = mk
       counters[lvl] = 0

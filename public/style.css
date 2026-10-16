@@ -9,6 +9,7 @@
 html, body {
   margin: 0;
   height: 100%;
+  overscroll-behavior-x: none; /* a sideways swipe is ours (phone pages), not the browser's back/forward */
 }
 body {
   background: var(--bg);

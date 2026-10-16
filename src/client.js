@@ -3837,10 +3837,10 @@ phoneBar.addEventListener('click', (e) => {
   const act = b.dataset.act
   if (act === 'tabs') openDrawer()
   else if (act === 'home') toggleHome()
-  else if (act === 'search') {
-    document.body.classList.add('searching')
-    search.focus()
-  } else if (act === 'settings') openSettingsMenu(b)
+  else if (act === 'settings') {
+    if (phonePage() === 'settings') closeMenus()
+    else openSettingsMenu(b)
+  }
 })
 phoneTitle.addEventListener('click', (e) => {
   e.stopPropagation()
@@ -3924,6 +3924,55 @@ function toggleHome() {
   if (overlayKind === 'home') closeOverlay()
   else openHome()
 }
+
+// Phone pages: Home sits to the left of the current tab, Settings to the right.
+// Swipe right for Home (and left to come back), swipe left for Settings (and
+// right to come back). A swipe that starts on a note still archives it (see
+// attachPhoneGestures), so page swipes come from the title, the bottom bar, the
+// gaps between notes, the open page itself, or the edges of the screen.
+function phonePage() {
+  if (overlayKind === 'home') return 'home'
+  if (document.querySelector('.settings-menu')) return 'settings'
+  return 'tabs'
+}
+function syncPhoneBar() {
+  const page = phonePage()
+  for (const b of phoneBar.querySelectorAll('button')) b.classList.toggle('on', b.dataset.act === page)
+}
+new MutationObserver(syncPhoneBar).observe(document.body, { childList: true })
+new MutationObserver(syncPhoneBar).observe(overlay, { attributes: true, attributeFilter: ['hidden'] })
+let pageSwipe = null
+let swallowClickUntil = 0
+document.addEventListener('click', (e) => {
+  if (Date.now() < swallowClickUntil) { e.stopPropagation(); e.preventDefault() }
+}, true)
+document.addEventListener('touchstart', (e) => {
+  pageSwipe = null
+  if (!phoneMode() || e.touches.length !== 1 || full || !drawer.hidden) return
+  const t = e.touches[0]
+  const el = e.target instanceof Element ? e.target : null
+  if (!el) return
+  if (el.closest('input, textarea, select, [contenteditable="true"], .drawer, .full-back, .dlg-back, .draw-view, .page-view, .mm-wrap, .sel-bar, .lightbox')) return
+  const edge = t.clientX < 28 || t.clientX > window.innerWidth - 28
+  if (!edge && el.closest('.card')) return // swiping a note archives it
+  pageSwipe = { x: t.clientX, y: t.clientY, at: Date.now(), page: phonePage() }
+}, { passive: true, capture: true })
+document.addEventListener('touchend', (e) => {
+  const s = pageSwipe
+  pageSwipe = null
+  if (!s || !e.changedTouches.length) return
+  const t = e.changedTouches[0]
+  const dx = t.clientX - s.x
+  const dy = t.clientY - s.y
+  if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 2 || Date.now() - s.at > 700) return
+  const right = dx > 0
+  swallowClickUntil = Date.now() + 400 // a browser may still synthesise a click after the swipe
+  if (s.page === 'tabs') {
+    if (right) openHome()
+    else openSettingsMenu(phoneBar.querySelector('[data-act="settings"]'))
+  } else if (s.page === 'home' && !right) closeOverlay()
+  else if (s.page === 'settings' && right) closeMenus()
+}, { passive: true, capture: true })
 
 function noteSnippet(n, max = 90) {
   return snippetOf(n, max)

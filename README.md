@@ -78,10 +78,13 @@ browser at it.
   icons ship with the app, so nothing is fetched from the internet and it all works
   offline. `DESIGN.md` documents the tokens.
 - **Phones get their own layout**, Google Keep style: a two-column grid of previews
-  (pinned notes first; one column if you prefer), a bottom bar, a drawer for tabs and a
-  round + button (hold it for a checklist or a new tab). Tap a note to edit it full
+  (pinned notes first; one column if you prefer), a bottom bar (Home, Tabs, Settings), a
+  drawer for tabs and a round + button (hold it for a checklist or a new tab). Swipe
+  right for Home (every tab, with search), swipe left for Settings, and swipe back to the
+  notes; pull the grid down to search the current tab. Tap a note to edit it full
   screen with the toolbar above the keyboard. Long-press to select notes (colour, pin,
-  archive, delete, move). Swipe a note sideways to archive it. Checkboxes in the previews
+  archive, delete, move). Swipe a note sideways to archive it (so page swipes start on
+  the title, the bottom bar, a gap or a screen edge). Checkboxes in the previews
   can be ticked directly. A phone never moves or resizes notes, so it can't disturb the
   desktop board. The app installs to the home screen (manifest + icons).
 - **Sketch boards**: draw together on a shared canvas with a pen (quick colour swatches +

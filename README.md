@@ -81,8 +81,9 @@ browser at it.
   offline. `DESIGN.md` documents the tokens.
 - **Phones get their own layout**, Google Keep style: a two-column grid of previews
   (pinned notes first; one column if you prefer), a bottom bar (Home, Tabs, Settings), a
-  drawer for tabs and a round + button (hold it for a checklist or a new tab). Swipe
-  right for Home (every tab, with search), swipe left for Settings, and swipe back to the
+  drawer for tabs and a round + button (hold it for a checklist or a new tab). The pages
+  form one strip: swipe left and right to move between your tabs, with Home (every tab,
+  with search) before the first tab and Settings after the last, and swipe back to the
   notes; pull the grid down to search the current tab. Tap a note to edit it full
   screen with the toolbar above the keyboard. Long-press to select notes (colour, pin,
   archive, delete, move). Swipe a note sideways to archive it (so page swipes start on

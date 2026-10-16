@@ -3925,9 +3925,10 @@ function toggleHome() {
   else openHome()
 }
 
-// Phone pages: Home sits to the left of the current tab, Settings to the right.
-// Swipe right for Home (and left to come back), swipe left for Settings (and
-// right to come back). A swipe that starts on a note still archives it (see
+// Phone pages form one strip: Home, then every tab in order, then Settings.
+// Swipe left for the next tab (Settings after the last), swipe right for the
+// previous one (Home before the first). Home and Settings swipe back to the tab
+// you were on. A swipe that starts on a note still archives it (see
 // attachPhoneGestures), so page swipes come from the title, the bottom bar, the
 // gaps between notes, the open page itself, or the edges of the screen.
 function phonePage() {
@@ -3968,7 +3969,13 @@ document.addEventListener('touchend', (e) => {
   const right = dx > 0
   swallowClickUntil = Date.now() + 400 // a browser may still synthesise a click after the swipe
   if (s.page === 'tabs') {
-    if (right) openHome()
+    const list = tabsList().filter((t) => !t.archived)
+    const cur = activeTab()
+    const i = cur ? list.findIndex((t) => t.id === cur.id) : -1
+    if (right) {
+      if (i > 0) setActiveTab(list[i - 1].id)
+      else openHome()
+    } else if (i >= 0 && i < list.length - 1) setActiveTab(list[i + 1].id)
     else openSettingsMenu(phoneBar.querySelector('[data-act="settings"]'))
   } else if (s.page === 'home' && !right) closeOverlay()
   else if (s.page === 'settings' && right) closeMenus()

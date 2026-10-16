@@ -153,13 +153,13 @@ export function numericForLevel(ind) {
 const GLYPH = { disc: '•', square: '▪', arrow: '→', dash: '–' }
 
 /**
- * The marker a list line shows. Unset (or the default "disc") follows the
- * depth: discs at the top level, dashes for sub-points. An explicit square,
- * arrow or numbered style is kept at any depth.
+ * The marker a list line shows. Unset (or the default "disc") alternates with
+ * the depth: • at the top level, – one level in, • the next, and so on. An
+ * explicit square, arrow or numbered style is kept at any depth.
  */
 export function markOf(a) {
   const mk = a.mk
-  if (!mk || mk === 'disc') return (a.ind || 0) > 0 ? 'dash' : 'disc'
+  if (!mk || mk === 'disc') return (a.ind || 0) % 2 ? 'dash' : 'disc'
   return mk
 }
 

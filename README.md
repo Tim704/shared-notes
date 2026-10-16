@@ -30,7 +30,7 @@ browser at it.
   grid. Each move or alignment is one Ctrl/⌘+Z away from undone.
 - **Rich text** in the note body: **bold**, *italic*, underline and strikethrough, and
   lines that are:
-  - **bullet lists** (• at the top level, – dashes for sub-points by default) in six
+  - **bullet lists** (by default alternating • and – by depth: •, then – under it, then •) in six
     styles: • discs, ▪ squares, → arrows, – dashes, 1. numbers,
     a. letters and i. roman numerals. Nested numbers go 1. → a. → i. by default;
   - **checkboxes mixed in with normal text** (a shopping list under a paragraph,

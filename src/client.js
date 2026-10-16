@@ -4666,10 +4666,26 @@ function followHash(initial) {
   goToNote(m[1], { unarchive: false, keepHash: !!m[2] })
   if (m[2]) openFullscreen(m[1], { fromHash: true, focus: !initial })
 }
+let hashFollowed = false
+function followHashOnce() {
+  if (hashFollowed) return
+  hashFollowed = true
+  followHash(true)
+}
 provider.onSync(() => {
   migrateBoard()
-  followHash(true)
+  followHashOnce()
 })
+// With the Pi unreachable the server never syncs, but the board is in IndexedDB:
+// still follow a deep link (the Android widgets' #tab= / #note= / #new) from the
+// local copy once it has loaded and the server has had a moment to answer.
+if (localStore) {
+  localStore.whenSynced.then(() => {
+    setTimeout(() => {
+      if (!provider.synced && location.hash) followHashOnce()
+    }, 1500)
+  })
+}
 awareness.setLocalStateField('tab', activeTabId)
 window.addEventListener('hashchange', () => {
   if (ignoreHash) return

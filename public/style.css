@@ -526,11 +526,6 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.card-body:empty::before {
-  content: attr(data-ph);
-  color: var(--note-ink-dim, var(--label-2));
-  pointer-events: none;
-}
 .card-body::-webkit-scrollbar {
   width: 6px;
 }
@@ -1635,6 +1630,9 @@ body:has(.align-bar:not([hidden])) .toasts {
   content: attr(data-ph);
   color: var(--note-ink-dim, var(--label-2));
   pointer-events: none;
+}
+.rb-empty:focus-within .rb-text[data-ph]::before {
+  content: none; /* the hint goes when you click in, so the caret sits at the start of the line */
 }
 .rb.rb-has-folds {
   padding-left: var(--s-5);

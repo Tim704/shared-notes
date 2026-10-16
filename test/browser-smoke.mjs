@@ -886,7 +886,11 @@ try {
     ribbon: !document.getElementById('ribbon').hidden && document.querySelector('#ribbon .rib-note').hidden,
   })`)
   check('a Document tab shows one full page to write on, with the ribbon for formatting', docTab.shown && docTab.board && docTab.ribbon)
+  const phBefore = await evaluate(`getComputedStyle(document.querySelector('.page-body.rb-empty .rb-text[data-ph]'), '::before').content`)
   await evaluate(`document.querySelector('.page-body').focus()`)
+  await sleep(100)
+  const phFocused = await evaluate(`getComputedStyle(document.querySelector('.page-body.rb-empty .rb-text[data-ph]'), '::before').content`)
+  check('the "Start writing…" hint shows on an empty page and goes when you click in', /Start writing/.test(phBefore) && phFocused === 'none')
   await type('Dear diary')
   await evaluate(`(() => {
     const t = document.querySelector('.page-body .rb-text'); const r = document.createRange(); r.selectNodeContents(t)

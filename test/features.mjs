@@ -3,6 +3,7 @@ import { connect, sleep } from './lib.mjs'
 import { linesOf } from '../shared/lines.js'
 import { tabRec, buildMirror, exportMarkdown } from '../shared/serialise.js'
 import { smoothPoint, simplify } from '../src/stroke.js'
+import { taskTree, progress, dueState, dueLabel, dueCount, orderBetween } from '../shared/tasks.js'
 
 // Exercises the v2 data model through the real server: tabs, per-note fields,
 // rich-text formatting attributes, and collaborative drawing strokes all sync.
@@ -306,6 +307,59 @@ check(
   check('simplify keeps both end points', lean[0] === 0 && lean[lean.length - 2] === 50)
   check('simplify drops points on a near-straight line', lean.length < 10)
   check('simplify keeps a corner', simplify([0, 0, 10, 0, 10, 10], 0.5).length === 6)
+}
+
+// --- To-do tab: tree, progress over leaf parts, due dates, mirror ---
+{
+  const ydoc = new Y.Doc()
+  const tid = 'tasks1'
+  const item = (items, id, text, extra = {}) => {
+    const m = new Y.Map()
+    m.set('text', text)
+    m.set('order', extra.order ?? 1)
+    if (extra.parent) m.set('parent', extra.parent)
+    if (extra.done) m.set('done', true)
+    if (extra.due) m.set('due', extra.due)
+    items.set(id, m)
+  }
+  ydoc.transact(() => {
+    const t = new Y.Map()
+    t.set('id', tid)
+    t.set('name', 'School')
+    t.set('kind', 'tasks')
+    ydoc.getArray('tabs').push([t])
+    const page = new Y.Map()
+    const title = new Y.Text()
+    title.insert(0, 'School')
+    page.set('title', title)
+    const items = new Y.Map()
+    page.set('items', items)
+    ydoc.getMap('pages').set(tid, page)
+    item(items, 'calc', 'Calc HW', { due: '2026-10-30' })
+    item(items, 'p1', 'Part 1', { parent: 'calc', order: 1 })
+    item(items, 'p2', 'Part 2', { parent: 'calc', order: 2, done: true })
+    item(items, 'q1', 'Q1', { parent: 'p1', order: 1, done: true, due: '2026-10-20' })
+    item(items, 'q2', 'Q2', { parent: 'p1', order: 2 })
+    item(items, 'essay', 'Essay', { order: 2, due: '2026-10-24' })
+  })
+  const items = ydoc.getMap('pages').get(tid).get('items')
+  const tree = taskTree(items)
+  check('tasks: tabRec keeps the tasks kind', tabRec(ydoc.getArray('tabs').get(0)).kind === 'tasks')
+  check('tasks: the tree nests parts under their task in order', tree.map((n) => n.id).join() === 'calc,essay' && tree[0].children.map((n) => n.id).join() === 'p1,p2' && tree[0].children[0].children.length === 2)
+  const pr = progress(tree[0])
+  check('tasks: progress counts the leaf parts (2 of 3)', pr.done === 2 && pr.total === 3)
+  const today = '2026-10-24'
+  check('tasks: due states', dueState('2026-10-20', today) === 'overdue' && dueState(today, today) === 'today' && dueState('2026-10-26', today) === 'soon' && dueState('2026-11-20', today) === 'later' && dueState(null, today) === null)
+  check('tasks: due labels', dueLabel('2026-10-20', today) === '4 days overdue' && dueLabel(today, today) === 'Today' && dueLabel('2026-10-25', today) === 'Tomorrow' && dueLabel('2026-11-20', today) === 'Nov 20' && dueLabel('2020-01-01', today) === 'Overdue since Jan 1 2020')
+  check('tasks: the badge counts unticked items due today or overdue', dueCount(items, today) === 1)
+  check('tasks: orderBetween', orderBetween(1, 2) === 1.5 && orderBetween(null, 1) === 0 && orderBetween(3, null) === 4)
+  const files = buildMirror(ydoc)
+  const f = Object.keys(files).find((k) => k.endsWith(`todo--${tid}.md`))
+  check('tasks: the mirror writes todo--<id>.md as a nested checklist', !!f && /^- \[ \] Calc HW \(due 2026-10-30\)$/m.test(files[f]) && /^    - \[x\] Q1 \(due 2026-10-20\)$/m.test(files[f]))
+  check('tasks: the Markdown export includes the list', /- \[x\] Part 2/.test(exportMarkdown(ydoc)))
+  // a parent loop must not lose items
+  ydoc.transact(() => { items.get('calc').set('parent', 'q2') })
+  check('tasks: a parent loop keeps every item reachable', taskTree(items).length >= 1 && JSON.stringify(taskTree(items)).split('"id"').length - 1 === 6)
 }
 
 A.close()

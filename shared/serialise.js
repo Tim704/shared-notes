@@ -8,6 +8,7 @@
 //   README.md                           what this folder is
 
 import { linesOf, linesToMarkdown, linesToPlain, isList, MARKS } from './lines.js'
+import { tasksMarkdown, tasksView } from './tasks.js'
 
 const LW = 1600 // sketch logical width  (must match src/draw.js)
 const LH = 1000 // sketch logical height
@@ -15,8 +16,8 @@ const LINE_H = 1.25 // sketch text line height (must match src/draw.js)
 
 // ---- small helpers -------------------------------------------------------
 
-// Tab kinds besides 'notes': a sketch board, a document, a mind map. Anything else reads as notes.
-const PAGE_KINDS = new Set(['draw', 'doc', 'mindmap'])
+// Tab kinds besides 'notes': a sketch board, a document, a mind map, a to-do list. Anything else reads as notes.
+const PAGE_KINDS = new Set(['draw', 'doc', 'mindmap', 'tasks'])
 
 /** Tabs live in a Y.Array as either plain objects (legacy) or Y.Maps. Read both. */
 export function tabRec(entry) {
@@ -314,6 +315,7 @@ export function inkToSvg(strokes) {
 export function pageMarkdown(ydoc, tab, opts = {}) {
   const page = ydoc.getMap('pages').get(tab.id)
   if (!page || typeof page.get !== 'function') return ''
+  if (tab.kind === 'tasks') return tasksMarkdown(text(page.get('title')) || tab.name || 'To-do', page.get('items'))
   const body = richToMarkdown(page.get('body'), opts)
   if (tab.kind !== 'mindmap') return body
   const title = text(page.get('title')).replace(/\s*\n\s*/g, ' ') || tab.name || 'Mind map'
@@ -436,7 +438,7 @@ export function exportMarkdown(ydoc, opts = {}) {
       out.push('_Sketch tab: see sketch.svg in the export folder._', '')
       continue
     }
-    if (tab.kind === 'doc' || tab.kind === 'mindmap') {
+    if (tab.kind === 'doc' || tab.kind === 'mindmap' || tab.kind === 'tasks') {
       out.push(pageMarkdown(ydoc, tab, opts), '')
       continue
     }
@@ -458,7 +460,7 @@ export function exportJson(ydoc, opts = {}) {
     tabs: groups.map(({ tab, notes }) => ({
       ...tab,
       notes: notes.map(([id, n]) => noteView(id, n)),
-      ...(tab.kind === 'doc' || tab.kind === 'mindmap' ? { page: pageView(ydoc, tab) } : {}),
+      ...(tab.kind === 'doc' || tab.kind === 'mindmap' || tab.kind === 'tasks' ? { page: pageView(ydoc, tab) } : {}),
     })),
     edges: edgesOf(ydoc).filter((e) => ids.has(e.from) && ids.has(e.to)),
   }
@@ -536,6 +538,7 @@ export function buildMirror(ydoc, opts = {}) {
       // named like a note (--<id>.md) so the git history finds earlier versions
       else if (tab.kind === 'doc') files[`${tab.dir}/document--${tab.id}.md`] = pageMarkdown(ydoc, tab, opts)
       else if (tab.kind === 'mindmap') files[`${tab.dir}/mindmap--${tab.id}.md`] = pageMarkdown(ydoc, tab, opts)
+      else if (tab.kind === 'tasks') files[`${tab.dir}/todo--${tab.id}.md`] = pageMarkdown(ydoc, tab, opts)
       else if (tab.id != null) {
         const svg = inkToSvg(yDrawings.get('ink:' + tab.id))
         if (svg) files[`${tab.dir}/ink.svg`] = svg
@@ -571,6 +574,7 @@ export function buildMirror(ydoc, opts = {}) {
 function pageView(ydoc, tab) {
   const page = ydoc.getMap('pages').get(tab.id)
   if (!page || typeof page.get !== 'function') return { title: '', markdown: '' }
+  if (tab.kind === 'tasks') return { title: text(page.get('title')), tasks: tasksView(page.get('items')) }
   return { title: text(page.get('title')), markdown: richToMarkdown(page.get('body')) }
 }
 

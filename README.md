@@ -93,6 +93,9 @@ browser at it.
 - **Tab types** (the + at the end of the tab bar):
   - **NotePad**: sticky notes, drawings and images on a board.
   - **Document**: a full text editor with images.
+  - **To-do**: tasks broken into parts (as deep as you like), each with a tick, a due
+    date and a progress bar over its smallest parts. List, Week and Month views; the
+    tab shows a red count of what is due today or overdue. Mirrored as `todo--<id>.md`.
   - **Sketch Pad**: free drawing with images, more freedom.
   - **Mind map**: ideas branching out from one centre.
 - **Sketch Pads**: draw together on a shared canvas with a pen (quick colour swatches +

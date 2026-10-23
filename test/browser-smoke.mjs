@@ -884,7 +884,7 @@ try {
   const firstName = await evaluate(`document.getElementById('phone-title').textContent`)
   await evaluate(`document.querySelector('#phone-bar [data-act="tabs"]').click()`)
   await sleep(250)
-  await evaluate(`[...document.querySelectorAll('.drawer-item')].find((b) => /New list/.test(b.textContent)).click()`)
+  await evaluate(`[...document.querySelectorAll('.drawer-item')].find((b) => /New NotePad/.test(b.textContent)).click()`)
   await sleep(150)
   await evaluate(`(() => { const i = document.querySelector('.dlg .dlg-input'); i.value = 'Second'; document.querySelector('.dlg .dlg-btn.primary').click() })()`)
   await sleep(400)

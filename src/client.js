@@ -17,6 +17,8 @@ import { uploadImages, openLightbox, pickImages } from './media.js'
 import { createFoldStore } from './folds.js'
 import * as backup from './backup.js'
 import { createMindMap } from './mindmap.js'
+import { createTasksView } from './tasks.js'
+import { dueCount, ymd } from '../shared/tasks.js'
 import { createViewport } from './viewport.js'
 import { createInk } from './ink.js'
 import { initTooltips } from './tooltip.js'
@@ -620,6 +622,7 @@ const TAB_KINDS = {
   draw: { label: 'Sketch Pad', menu: 'Sketch Pad', icon: 'pencil', sub: 'Sketch Pad', blurb: 'Free drawing with images, more freedom' },
   doc: { label: 'Document', menu: 'Document', icon: 'text', sub: 'Document', blurb: 'Full text editor with images' },
   mindmap: { label: 'Mind map', menu: 'Mind map', icon: 'map', sub: 'Mind map', blurb: 'Ideas branching out from one centre' },
+  tasks: { label: 'To-do', menu: 'To-do', icon: 'todo', sub: 'To-do', blurb: 'Tasks broken into parts, with due dates and a calendar' },
 }
 const kindInfo = (kind) => TAB_KINDS[kind] || TAB_KINDS.notes
 const isNotesTab = (t) => !!t && !TAB_KINDS[t.kind]?.sub
@@ -632,7 +635,7 @@ async function addTab(kind) {
   const id = genId()
   doc.transact(() => {
     yTabs.push([makeTabMap({ id, name, kind })])
-    if (kind === 'doc' || kind === 'mindmap') getPage(id, name)
+    if (kind === 'doc' || kind === 'mindmap' || kind === 'tasks') getPage(id, name)
   })
   setActiveTab(id)
 }
@@ -731,6 +734,17 @@ function moveTab(fromId, toId) {
 // ---- tab bar rendering ----
 let dragTabId = null
 let renamingTabId = null
+// a change inside a To-do tab's items can change its badge
+const renderTabsSoon = rafThrottle(() => {
+  if (!renamingTabId) renderTabs()
+})
+yPages.observeDeep((events) => {
+  if (events.some((e) => e.path[1] === 'items')) renderTabsSoon()
+})
+setInterval(() => {
+  if (tabsList().some((t) => t.kind === 'tasks')) renderTabsSoon() // the badge moves on at midnight
+}, 5 * 60000)
+
 function renderTabs() {
   const all = tabsList()
   const active = activeTab()
@@ -804,6 +818,17 @@ function renderTabs() {
     label.className = 'tab-name'
     label.textContent = t.name
     tab.appendChild(label)
+    if (t.kind === 'tasks') {
+      // a To-do tab shows how many unticked tasks are due today or overdue
+      const due = dueCount(yPages.get(t.id)?.get('items'), ymd(new Date()))
+      if (due) {
+        const badge = document.createElement('span')
+        badge.className = 'tab-badge'
+        badge.textContent = String(due)
+        badge.title = due + (due === 1 ? ' task' : ' tasks') + ' due today or overdue'
+        tab.appendChild(badge)
+      }
+    }
 
     if (isActive) {
       const more = document.createElement('button')
@@ -979,7 +1004,7 @@ function openAddMenu(anchor) {
     })
     return b
   }
-  menu.append(mkItem('notes'), mkItem('doc'), mkItem('mindmap'), mkItem('draw'))
+  menu.append(mkItem('notes'), mkItem('doc'), mkItem('tasks'), mkItem('mindmap'), mkItem('draw'))
   document.body.appendChild(menu)
   const dismiss = ui.popover(menu, anchor, { menu: !menu.classList.contains('settings-menu'), label: 'Settings' })
   openMenus.push({ remove: dismiss })
@@ -2995,6 +3020,11 @@ function mountPage(tabId, kind) {
   const page = getPage(tabId, activeTab()?.name)
   pageView.replaceChildren()
   pageView.dataset.kind = kind
+  if (kind === 'tasks') {
+    const list = createTasksView(pageView, page, { tabId })
+    pageState = { tabId, kind, list, destroy: () => list.destroy() }
+    return
+  }
   if (kind === 'mindmap') {
     // createMindMap reads note.get('title' | 'body') and note.doc: a page has both
     const map = createMindMap(pageView, page, { editable: true })
@@ -3435,7 +3465,7 @@ function reconcile() {
 
   board.style.display = notesTab ? '' : 'none'
   drawView.style.display = kind === 'draw' ? 'flex' : 'none'
-  pageView.hidden = kind !== 'doc' && kind !== 'mindmap'
+  pageView.hidden = kind !== 'doc' && kind !== 'mindmap' && kind !== 'tasks'
   addBtn.style.display = notesTab ? '' : 'none'
   searchWrap.style.visibility = notesTab ? '' : 'hidden'
   document.body.dataset.tabKind = kind
@@ -3837,7 +3867,7 @@ function phoneRefresh() {
   board.classList.toggle('one-col', on && Number(getSettings().phoneCols) === 1)
   const t = activeTab()
   phoneTitle.textContent = t ? t.name : 'notes'
-  fab.hidden = !on || (!!t && !isNotesTab(t))
+  fab.hidden = !on || (!!t && !isNotesTab(t) && t.kind !== 'tasks')
   phoneBar.hidden = !on
   if (!on && picked.size) picked.clear()
   for (const id of Array.from(picked)) if (!cards.has(id)) picked.delete(id)
@@ -4074,9 +4104,13 @@ function renderDrawer() {
       setActiveTab(t.id)
     }, t.id === activeTabId ? 'on' : '')
   }
-  row('+', 'New list', null, () => {
+  row('+', 'New NotePad', null, () => {
     closeDrawer()
     addTab('notes')
+  }, 'drawer-add')
+  row('+', 'New to-do list', null, () => {
+    closeDrawer()
+    addTab('tasks')
   }, 'drawer-add')
   row('+', 'New document', null, () => {
     closeDrawer()
@@ -4086,7 +4120,7 @@ function renderDrawer() {
     closeDrawer()
     addTab('mindmap')
   }, 'drawer-add')
-  row('+', 'New sketch', null, () => {
+  row('+', 'New Sketch Pad', null, () => {
     closeDrawer()
     addTab('draw')
   }, 'drawer-add')
@@ -4147,10 +4181,11 @@ function newPhoneNote(kind) {
           { icon: '✎', label: 'New note', onClick: () => newPhoneNote('note') },
           { icon: '☑', label: 'New checklist', onClick: () => newPhoneNote('todo') },
           'sep',
-          { icon: '☰', label: 'New list tab', onClick: () => addTab('notes') },
+          { icon: '☰', label: 'New NotePad tab', onClick: () => addTab('notes') },
+          { icon: 'todo', label: 'New to-do tab', onClick: () => addTab('tasks') },
           { icon: 'text', label: 'New document tab', onClick: () => addTab('doc') },
           { icon: 'map', label: 'New mind map tab', onClick: () => addTab('mindmap') },
-          { icon: '✎', label: 'New sketch tab', onClick: () => addTab('draw') },
+          { icon: '✎', label: 'New Sketch Pad tab', onClick: () => addTab('draw') },
         ],
         { align: 'right' }
       )
@@ -4164,7 +4199,8 @@ function newPhoneNote(kind) {
   fab.addEventListener('click', (e) => {
     e.stopPropagation()
     if (long) return
-    newPhoneNote('note')
+    if (pageState?.list) pageState.list.addTask() // a To-do tab: + adds a task
+    else newPhoneNote('note')
   })
 })()
 

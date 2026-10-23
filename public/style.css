@@ -3683,3 +3683,150 @@ body.phone .page-view[data-kind='mindmap'] .mm-wrap { min-height: calc(100dvh - 
 .card.is-image .card-bodyhost, .card.is-image .card-body { padding: 0; margin: 0; overflow: hidden; }
 .card.is-image .rb-embed { margin: 0; }
 .card.is-image .rb-embed img { display: block; width: 100%; height: auto; border-radius: 0; }
+
+/* ---------------------------------------------------------------- To-do tab (src/tasks.js) */
+.tab-badge {
+  min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 8px; background: var(--red); color: #fff;
+  font-size: 11px; line-height: 16px; font-weight: 600; text-align: center;
+}
+.tasks {
+  width: 100%; max-width: 760px; margin: 0 auto;
+  background: var(--bg-elevated); color: var(--label);
+  border-radius: var(--r-card); box-shadow: var(--elev-1);
+  padding: var(--s-6) var(--s-6) var(--s-8);
+  box-sizing: border-box;
+}
+.tasks[data-view='month'] { max-width: 1040px; }
+.tasks-head { display: flex; align-items: center; gap: var(--s-4); margin-bottom: var(--s-4); }
+.tasks-title {
+  flex: 1; min-width: 0; border: 0; background: transparent; color: var(--label);
+  font: var(--t-title-1); padding: 0; outline: none;
+}
+.tasks-views { flex: none; width: 240px; }
+.tasks-empty { text-align: center; padding: var(--s-8) var(--s-4) var(--s-4); color: var(--label-2); }
+.tasks-empty-h { font-weight: 600; color: var(--label); margin-bottom: var(--s-1); }
+
+/* list rows */
+.task-row {
+  display: flex; align-items: center; gap: var(--s-1);
+  padding: 2px var(--s-1) 2px calc(var(--depth, 0) * 24px);
+  border-radius: var(--r-control); min-height: 34px;
+}
+.task-row:hover, .task-row:focus-within { background: var(--fill); }
+.task-row.flash { animation: task-flash 1.4s ease-out; }
+@keyframes task-flash { 0%, 30% { background: color-mix(in srgb, var(--tint) 25%, transparent); } }
+.task-fold {
+  flex: none; width: 22px; height: 22px; border: 0; padding: 0; background: transparent;
+  color: var(--label-2); display: flex; align-items: center; justify-content: center; border-radius: var(--r-control);
+}
+.task-fold:disabled { visibility: hidden; }
+.task-fold .icon, .task-done-h .icon { transition: transform var(--dur-fast) var(--ease-out); }
+.task-fold.open .icon, .task-done-h .icon.open { transform: rotate(90deg); }
+.task-check { flex: none; width: 18px; height: 18px; margin: 0 4px 0 0; accent-color: var(--green); }
+.task-text {
+  flex: 1; min-width: 60px; border: 0; background: transparent; color: var(--label);
+  font: var(--t-body); padding: 4px 2px; outline: none;
+}
+.task-row.has-parts > .task-text { font-weight: 600; }
+.task-row.done > .task-text { color: var(--label-2); text-decoration: line-through; }
+.task-prog { flex: none; display: flex; align-items: center; gap: 6px; }
+.task-bar { width: 72px; height: 6px; border-radius: 3px; background: var(--fill-strong); overflow: hidden; }
+.task-fill { display: block; height: 100%; background: var(--green); border-radius: 3px; transition: width .25s var(--ease-out); }
+.task-count { font-size: 12px; color: var(--label-2); font-variant-numeric: tabular-nums; min-width: 28px; }
+.task-due-wrap { position: relative; flex: none; display: flex; }
+.task-date { position: absolute; inset: auto 0 0 auto; width: 1px; height: 1px; opacity: 0; pointer-events: none; border: 0; padding: 0; }
+.task-due {
+  border: 0; border-radius: 10px; padding: 2px 8px; min-height: 22px;
+  background: var(--fill); color: var(--label-2); font-size: 12px; line-height: 18px; white-space: nowrap;
+  display: inline-flex; align-items: center;
+}
+.task-due.empty { background: transparent; opacity: 0; }
+.task-row:hover .task-due.empty, .task-row:focus-within .task-due.empty { opacity: 1; }
+.task-due[data-state='overdue'] { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); font-weight: 600; }
+.task-due[data-state='today'] { background: color-mix(in srgb, var(--orange) 18%, transparent); color: var(--orange); font-weight: 600; }
+.task-due[data-state='soon'] { color: var(--label); }
+.task-due[data-state='done'] { text-decoration: line-through; }
+.task-more {
+  flex: none; width: 26px; height: 26px; border: 0; padding: 0; background: transparent; color: var(--label-2);
+  border-radius: var(--r-control); display: flex; align-items: center; justify-content: center; opacity: 0;
+}
+.task-row:hover .task-more, .task-row:focus-within .task-more { opacity: 1; }
+.task-more:hover, .task-fold:hover { background: var(--fill-strong); }
+.task-add, .task-done-h {
+  display: flex; align-items: center; gap: var(--s-2); width: 100%;
+  border: 0; background: transparent; color: var(--label-2); font: var(--t-body);
+  padding: var(--s-2) var(--s-1); border-radius: var(--r-control); text-align: left;
+}
+.task-add:hover, .task-done-h:hover { background: var(--fill); color: var(--label); }
+.task-done-h { margin-top: var(--s-4); font-weight: 600; border-top: var(--hairline) solid var(--separator); border-radius: 0; padding-top: var(--s-3); }
+
+/* week */
+.task-day { margin-bottom: var(--s-4); }
+.task-day-h { font: var(--t-subhead); font-weight: 600; color: var(--label-2); margin: 0 0 var(--s-1); padding: 0 var(--s-1); }
+.task-day.overdue .task-day-h { color: var(--red); }
+.task-day.today .task-day-h { color: var(--orange); }
+.task-entry { display: flex; align-items: center; gap: var(--s-2); padding: 4px var(--s-1); border-radius: var(--r-control); min-height: 34px; }
+.task-entry:hover { background: var(--fill); }
+.task-entry-text {
+  flex: 1; min-width: 0; border: 0; background: transparent; padding: 0; text-align: left; color: var(--label);
+  display: flex; flex-direction: column; font: var(--t-body);
+}
+.task-entry.done .task-entry-name { text-decoration: line-through; color: var(--label-2); }
+.task-entry-path { font-size: 12px; line-height: 16px; color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* month */
+.task-month-bar { display: flex; align-items: center; gap: var(--s-1); margin-bottom: var(--s-2); }
+.task-month-h { flex: 1; margin: 0; font: var(--t-title-3, var(--t-body)); font-weight: 600; }
+.task-nav {
+  border: 0; background: var(--fill); color: var(--label); border-radius: var(--r-control);
+  min-width: 32px; height: 30px; padding: 0 var(--s-2); display: flex; align-items: center; justify-content: center; font: var(--t-callout);
+}
+.task-nav:hover { background: var(--fill-strong); }
+.task-month {
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-top: var(--hairline) solid var(--separator); border-left: var(--hairline) solid var(--separator);
+}
+.task-dow { font-size: 12px; font-weight: 600; color: var(--label-2); padding: 4px 6px; border-right: var(--hairline) solid var(--separator); border-bottom: var(--hairline) solid var(--separator); }
+.task-cell {
+  min-height: 96px; padding: 4px; box-sizing: border-box; cursor: pointer;
+  border-right: var(--hairline) solid var(--separator); border-bottom: var(--hairline) solid var(--separator);
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.task-cell:hover { background: var(--fill); }
+.task-cell.other { background: color-mix(in srgb, var(--fill) 50%, transparent); color: var(--label-3, var(--label-2)); }
+.task-cell-n { font-size: 12px; font-weight: 600; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 11px; }
+.task-cell.today .task-cell-n { background: var(--red); color: #fff; }
+.task-cell.picked { box-shadow: inset 0 0 0 2px var(--tint); }
+.task-chips { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.task-chip {
+  border: 0; border-radius: 4px; padding: 1px 6px; text-align: left; font-size: 12px; line-height: 16px;
+  background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--label);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.task-chip[data-state='overdue'] { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); font-weight: 600; }
+.task-chip[data-state='today'] { background: color-mix(in srgb, var(--orange) 20%, transparent); color: var(--orange); font-weight: 600; }
+.task-chip.done { text-decoration: line-through; color: var(--label-2); background: var(--fill); }
+.task-chip.more { background: transparent; color: var(--label-2); }
+
+/* the To-do tab on a page and on phones */
+.page-view[data-kind='tasks'] { padding: var(--s-6); }
+body.phone .page-view[data-kind='tasks'] { padding: 0; }
+body.phone .tasks-title { display: none; } /* the phone header already shows the tab's name */
+body.phone .tasks { border-radius: 0; box-shadow: none; padding: var(--s-4) var(--s-3) 120px; }
+@media (max-width: 600px) {
+  .tasks-head { flex-wrap: wrap; }
+  .tasks-views { width: 100%; }
+  .task-row { min-height: 44px; padding-left: calc(var(--depth, 0) * 16px); }
+  .task-more, .task-due.empty { opacity: 1; }
+  .task-bar { width: 44px; }
+  .task-cell { min-height: 52px; align-items: center; }
+  .task-chips { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 3px; }
+  /* chips become dots; tap the day to list them under the grid */
+  .task-chip { flex: none; width: 6px; height: 6px; min-height: 0; min-width: 0; padding: 0; border-radius: 3px; font-size: 0; background: var(--blue); }
+  .task-chip[data-state='overdue'] { background: var(--red); }
+  .task-chip[data-state='today'] { background: var(--orange); }
+  .task-chip.done { background: var(--label-3, var(--label-2)); }
+  .task-chip.more { display: none; }
+  .task-month-bar + .task-month + .task-day { margin-top: var(--s-4); }
+}

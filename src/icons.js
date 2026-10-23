@@ -45,6 +45,7 @@ const paths = {
   person: 'M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-3a8 8 0 0 1 16 0v3',
   sun: 'M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1 1M18 18l1 1M5 19l1-1M18 6l1-1',
   cloud: 'M6 18a5 5 0 1 1 1-10 6 6 0 0 1 12 2 4 4 0 0 1-1 8H6Z',
+  calendar: 'M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM3 10h18M8 3v4M16 3v4',
   palette: 'M12 21a9 9 0 1 1 9-9.5 4.5 4.5 0 0 1-4.5 4.5h-1.6a1.75 1.75 0 0 0-1.4 2.8l.3.4A1.75 1.75 0 0 1 12.4 21ZM13.5 6.5h.01M17.5 10.5h.01M6.5 12h.01M8.5 7.5h.01',
 }
 const aliases = { '⚙':'settings','⌂':'home','☰':'list','⌕':'search','✎':'pencil','⤢':'expand','✕':'close','×':'close','⋯':'more','▸':'right','⌄':'down','⌃':'up','🖼':'image','+':'plus','−':'minus','🗑':'trash','🗄':'archive','🎨':'palette','📌':'pin','📍':'pin','⌫':'eraser','↶':'undo','↷':'redo','📁':'folder','☐':'todo','☑':'todo','✓':'check','✔':'check','⬇':'download','▶':'play','■':'stop','▦':'grid','▤':'rows','∞':'canvas','⇲':'expand','★':'star','←':'back','→':'arrow','↔':'both','—':'minus','┄':'dashed','⇄':'swap','•':'list','▪':'square','–':'minus','1.':'numbers','a.':'numbers','i.':'numbers','H':'heading','¶':'text' }

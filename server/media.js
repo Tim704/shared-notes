@@ -101,19 +101,27 @@ export function createMedia({ mediaDir, maxBytes }) {
   return { router, files, sweep }
 }
 
-/** Every /media/<file> a body mentions, across all notes (trash included). */
+/** Every /media/<file> the board mentions: note bodies (trash included), document
+ *  pages and pictures in mind map bubbles. */
 export function referencedMedia(ydoc) {
   const out = new Set()
   const re = /\/media\/([a-f0-9]{64}\.(?:png|jpg|webp|gif|avif))/g
+  const scan = (s) => {
+    let m
+    while ((m = re.exec(String(s || '')))) out.add(m[1])
+  }
   ydoc.getMap('notes').forEach((n) => {
     if (!n || typeof n.get !== 'function') return
     for (const k of ['body', 'body2']) {
       const t = n.get(k)
-      if (!t) continue
-      const s = t.toString()
-      let m
-      while ((m = re.exec(s))) out.add(m[1])
+      if (t) scan(t.toString())
     }
+  })
+  ydoc.getMap('pages').forEach((p) => {
+    if (!p || typeof p.get !== 'function') return
+    if (p.get('body')) scan(p.get('body').toString())
+    const nodes = p.get('nodes')
+    if (nodes && typeof nodes.forEach === 'function') nodes.forEach((n) => n && typeof n.get === 'function' && scan(n.get('image')))
   })
   return out
 }

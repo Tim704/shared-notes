@@ -621,23 +621,52 @@ const TAB_KINDS = {
   notes: { label: 'NotePad', menu: 'NotePad', icon: 'note', sub: null, blurb: 'Sticky notes, drawings and images on a board' },
   draw: { label: 'Sketch Pad', menu: 'Sketch Pad', icon: 'pencil', sub: 'Sketch Pad', blurb: 'Free drawing with images, more freedom' },
   doc: { label: 'Document', menu: 'Document', icon: 'text', sub: 'Document', blurb: 'Full text editor with images' },
-  mindmap: { label: 'Mind map', menu: 'Mind map', icon: 'map', sub: 'Mind map', blurb: 'Ideas branching out from one centre' },
+  mindmap: { label: 'Mind map', menu: 'Mind map', icon: 'map', sub: 'Mind map', blurb: 'Brainstorm: ideas around a centre, placed freely and linked' },
   tasks: { label: 'To-do', menu: 'To-do', icon: 'todo', sub: 'To-do', blurb: 'Tasks broken into parts, with due dates and a calendar' },
 }
 const kindInfo = (kind) => TAB_KINDS[kind] || TAB_KINDS.notes
 const isNotesTab = (t) => !!t && !TAB_KINDS[t.kind]?.sub
 
-async function addTab(kind) {
+async function addTab(kind, { open = true, name: suggested } = {}) {
   const label = kindInfo(kind).label
-  const typed = await ui.prompt(`Name this ${label.toLowerCase()} tab:`, label, { title: 'New tab', maxLength: 28 })
-  if (typed == null) return
+  const typed = await ui.prompt(`Name this ${label.toLowerCase()} tab:`, suggested || label, { title: 'New tab', maxLength: 28 })
+  if (typed == null) return null
   const name = typed.trim().slice(0, 28) || label
   const id = genId()
   doc.transact(() => {
     yTabs.push([makeTabMap({ id, name, kind })])
     if (kind === 'doc' || kind === 'mindmap' || kind === 'tasks') getPage(id, name)
   })
-  setActiveTab(id)
+  if (open) setActiveTab(id)
+  return id
+}
+
+// "Send to To-do" from a mind map: a branch arrives as a task with nested parts
+async function sendToTodo(tabId, tree) {
+  const id = tabId || (await addTab('tasks', { open: false, name: tree.text.slice(0, 28) }))
+  if (!id) return
+  const page = getPage(id, tabsList().find((t) => t.id === id)?.name)
+  doc.transact(() => {
+    if (!(page.get('items') instanceof Y.Map)) page.set('items', new Y.Map())
+    const items = page.get('items')
+    let top = 0
+    items.forEach((m) => {
+      if (!m.get('parent')) top = Math.max(top, Number(m.get('order')) || 0)
+    })
+    const put = (node, parent, order) => {
+      const iid = genId()
+      const m = new Y.Map()
+      m.set('text', node.text)
+      m.set('order', order)
+      m.set('created', Date.now())
+      if (parent) m.set('parent', parent)
+      items.set(iid, m)
+      node.children.forEach((c, i) => put(c, iid, i + 1))
+    }
+    put(tree, null, top + 1)
+  })
+  const name = tabsList().find((t) => t.id === id)?.name || 'To-do'
+  ui.toast(`Sent to ${name}`, { action: 'Open', onAction: () => setActiveTab(id) })
 }
 
 // The shared content of a document or mind map tab, created on first use.
@@ -3027,7 +3056,10 @@ function mountPage(tabId, kind) {
   }
   if (kind === 'mindmap') {
     // createMindMap reads note.get('title' | 'body') and note.doc: a page has both
-    const map = createMindMap(pageView, page, { editable: true })
+    const map = createMindMap(pageView, page, {
+      todoTabs: () => tabsList().filter((t) => t.kind === 'tasks' && !t.archived),
+      sendToTodo,
+    })
     pageState = { tabId, kind, map, destroy: () => map.destroy() }
     return
   }
@@ -3867,7 +3899,7 @@ function phoneRefresh() {
   board.classList.toggle('one-col', on && Number(getSettings().phoneCols) === 1)
   const t = activeTab()
   phoneTitle.textContent = t ? t.name : 'notes'
-  fab.hidden = !on || (!!t && !isNotesTab(t) && t.kind !== 'tasks')
+  fab.hidden = !on || (!!t && !isNotesTab(t) && t.kind !== 'tasks' && t.kind !== 'mindmap')
   phoneBar.hidden = !on
   if (!on && picked.size) picked.clear()
   for (const id of Array.from(picked)) if (!cards.has(id)) picked.delete(id)
@@ -4200,6 +4232,7 @@ function newPhoneNote(kind) {
     e.stopPropagation()
     if (long) return
     if (pageState?.list) pageState.list.addTask() // a To-do tab: + adds a task
+    else if (pageState?.map) pageState.map.addChild() // a mind map: + adds an idea
     else newPhoneNote('note')
   })
 })()

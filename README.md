@@ -97,7 +97,12 @@ browser at it.
     date and a progress bar over its smallest parts. List, Week and Month views; the
     tab shows a red count of what is due today or overdue. Mirrored as `todo--<id>.md`.
   - **Sketch Pad**: free drawing with images, more freedom.
-  - **Mind map**: ideas branching out from one centre.
+  - **Mind map**: brainstorm around a centre. Tab adds an idea and Enter the next one;
+    the map lays itself out, but you can drag any bubble anywhere (Tidy puts them back),
+    drop one onto another to move it, Alt-drag to link two ideas, and double-click empty
+    space for a loose idea. Bubbles take a colour, a shape, a note and a picture, and a
+    branch can be sent to a To-do tab as a task with parts. Older mind maps (drawn from
+    an outline) are converted the first time they are opened; the outline is kept.
 - **Sketch Pads**: draw together on a shared canvas with a pen (quick colour swatches +
   adjustable size), an **eraser**, undo and clear, and drop **text labels** anywhere.
 - Real-time editing: when a friend types, draws, or moves a note, you see it happen.

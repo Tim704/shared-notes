@@ -4,6 +4,9 @@ import { linesOf } from '../shared/lines.js'
 import { tabRec, buildMirror, exportMarkdown } from '../shared/serialise.js'
 import { smoothPoint, simplify } from '../src/stroke.js'
 import { taskTree, progress, dueState, dueLabel, dueCount, orderBetween } from '../shared/tasks.js'
+import { mapTree, layoutMap, fromOutline, mapMarkdown, branchToTasks } from '../shared/mindmap.js'
+import { outlineTree } from '../shared/lines.js'
+import { referencedMedia } from '../server/media.js'
 
 // Exercises the v2 data model through the real server: tabs, per-note fields,
 // rich-text formatting attributes, and collaborative drawing strokes all sync.
@@ -360,6 +363,94 @@ check(
   // a parent loop must not lose items
   ydoc.transact(() => { items.get('calc').set('parent', 'q2') })
   check('tasks: a parent loop keeps every item reachable', taskTree(items).length >= 1 && JSON.stringify(taskTree(items)).split('"id"').length - 1 === 6)
+}
+
+// --- Mind map: own bubbles, layout, pins, conversion, mirror ---
+{
+  const ydoc = new Y.Doc()
+  const mid = 'map1'
+  const IMG = '/media/' + 'a'.repeat(64) + '.png'
+  ydoc.transact(() => {
+    const t = new Y.Map()
+    t.set('id', mid)
+    t.set('name', 'Trip')
+    t.set('kind', 'mindmap')
+    ydoc.getArray('tabs').push([t])
+    const page = new Y.Map()
+    const title = new Y.Text()
+    title.insert(0, 'Trip')
+    page.set('title', title)
+    page.set('body', new Y.Text())
+    const nodes = new Y.Map()
+    const node = (id, text, parent, order, extra = {}) => {
+      const m = new Y.Map()
+      m.set('text', text)
+      if (parent) m.set('parent', parent)
+      m.set('order', order)
+      for (const [k, v] of Object.entries(extra)) m.set(k, v)
+      nodes.set(id, m)
+    }
+    node('a', 'Budget', 'root', 1, { note: 'max 500' })
+    node('a1', 'Flights', 'a', 1)
+    node('a2', 'Hotel', 'a', 2, { image: IMG })
+    node('b', 'Packing', 'root', 2, { x: 400, y: -300 })
+    node('b1', 'Shoes', 'b', 1)
+    node('c', 'Ask Sam', null, 1, { x: -500, y: 300 })
+    node('orphan', 'Lost', 'gone', 3)
+    page.set('nodes', nodes)
+    const links = new Y.Map()
+    const l = new Y.Map()
+    l.set('from', 'a1')
+    l.set('to', 'b1')
+    l.set('label', 'same day')
+    links.set('l1', l)
+    page.set('links', links)
+    page.set('v', 2)
+    ydoc.getMap('pages').set(mid, page)
+  })
+  const page = ydoc.getMap('pages').get(mid)
+  const tree = mapTree(page.get('nodes'), 'Trip')
+  check('mindmap: branches hang off the centre in order', tree.root.children.map((n) => n.id).join() === 'a,b,orphan')
+  check('mindmap: a missing parent falls back to the centre, loose ideas stay loose', tree.loose.map((n) => n.id).join() === 'c')
+  // a loop must not lose bubbles
+  ydoc.transact(() => page.get('nodes').get('a').set('parent', 'a1'))
+  const loopTree = mapTree(page.get('nodes'), 'Trip')
+  check('mindmap: a parent loop keeps every bubble', loopTree.byId.size === 8 && loopTree.root.children.some((n) => n.id === 'a'))
+  ydoc.transact(() => page.get('nodes').get('a').set('parent', 'root'))
+  const size = () => ({ w: 100, h: 30 })
+  const L1 = layoutMap(mapTree(page.get('nodes'), 'Trip'), size).map((n) => `${n.id}:${n.x},${n.y}`).join()
+  const L2 = layoutMap(mapTree(page.get('nodes'), 'Trip'), size).map((n) => `${n.id}:${n.x},${n.y}`).join()
+  check('mindmap: layout is deterministic', L1 === L2)
+  const laid = new Map(layoutMap(mapTree(page.get('nodes'), 'Trip'), size).map((n) => [n.id, n]))
+  check('mindmap: a pinned bubble sits where it was put', laid.get('b').x === 400 && laid.get('b').y === -300)
+  check('mindmap: its branch is laid out next to it', laid.get('b1').x > 400 && laid.get('b1').y === -300)
+  check('mindmap: a loose idea keeps its spot', laid.get('c').x === -500 && laid.get('c').y === 300)
+  check('mindmap: unpinned branches fan out right of the centre', laid.get('a').x > 0)
+  ydoc.transact(() => page.get('nodes').get('a').set('folded', true))
+  const folded = layoutMap(mapTree(page.get('nodes'), 'Trip'), size).map((n) => n.id)
+  check('mindmap: a folded branch hides what is under it', !folded.includes('a1') && folded.includes('a'))
+  ydoc.transact(() => page.get('nodes').get('a').delete('folded'))
+  const md = mapMarkdown('Trip', page.get('nodes'), page.get('links'))
+  check('mindmap: Markdown nests bubbles, quotes notes, lists loose ideas and links',
+    /^# Trip$/m.test(md) && /^- Budget\n  > max 500\n  - Flights$/m.test(md) && /## Loose ideas\n\n- Ask Sam/.test(md) && /- Flights → Shoes \(same day\)/.test(md))
+  const tasks = branchToTasks(mapTree(page.get('nodes'), 'Trip').byId.get('a'))
+  check('mindmap: a branch becomes a task with parts', tasks.text === 'Budget' && tasks.children.map((c) => c.text).join() === 'Flights,Hotel')
+  const files = buildMirror(ydoc)
+  const f = Object.keys(files).find((k) => k.endsWith(`mindmap--${mid}.md`))
+  check('mindmap: the mirror writes the bubbles', !!f && /- Packing\n  - Shoes/.test(files[f]))
+  check('mindmap: a picture in a bubble counts as used (not swept)', referencedMedia(ydoc).has('a'.repeat(64) + '.png'))
+  // an old outline converts with every idea
+  const old = linesOf((() => {
+    const d = new Y.Doc()
+    const t = d.getText('x')
+    t.insert(0, 'Holiday\nBeach\n')
+    t.format(6, 1, { lt: 'li' })
+    t.format(5, 1, {})
+    return t
+  })())
+  let n = 0
+  const rows = fromOutline(outlineTree(old), () => 'id' + ++n)
+  check('mindmap: an old outline converts to bubbles', rows.length === 2 && rows[0].parent === 'root' && rows.map((r) => r.text).join() === 'Holiday,Beach')
 }
 
 A.close()

@@ -935,7 +935,7 @@ try {
   const newTab = async (label, name) => {
     await evaluate(`document.querySelector('#tabs .tab-add').click()`)
     await sleep(60)
-    await evaluate(`[...document.querySelectorAll('.menu-item')].find((b) => b.textContent.trim() === ${JSON.stringify(label)}).click()`)
+    await evaluate(`[...document.querySelectorAll('.menu-item')].find((b) => (b.querySelector('.menu-name') || b).textContent.trim() === ${JSON.stringify(label)}).click()`)
     await sleep(80)
     await evaluate(`(() => { const i = document.querySelector('.dlg .dlg-input'); i.value = ${JSON.stringify(name)}; document.querySelector('.dlg .dlg-btn.primary').click() })()`)
     await sleep(250)

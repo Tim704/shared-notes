@@ -2,6 +2,7 @@ import * as Y from 'yjs'
 import { connect, sleep } from './lib.mjs'
 import { linesOf } from '../shared/lines.js'
 import { tabRec, buildMirror, exportMarkdown } from '../shared/serialise.js'
+import { smoothPoint, simplify } from '../src/stroke.js'
 
 // Exercises the v2 data model through the real server: tabs, per-note fields,
 // rich-text formatting attributes, and collaborative drawing strokes all sync.
@@ -292,6 +293,19 @@ check(
   const oldNote = names.find((f) => f.endsWith('--old1.md'))
   check('an old note shown as a mind map still mirrors, without the view key', !!oldNote && !/view: map/.test(files[oldNote]))
   check('old arrows do not break the export', !!files['index.json'] && /Dear diary/.test(exportMarkdown(ydoc)))
+}
+
+// --- stroke smoothing helpers ---
+{
+  let p = { x: 0, y: 0 }
+  for (let i = 0; i < 20; i++) p = smoothPoint(p, { x: 10, y: 10 })
+  check('smoothPoint converges on the pen', Math.abs(p.x - 10) < 0.01 && Math.abs(p.y - 10) < 0.01)
+  const straight = []
+  for (let i = 0; i <= 50; i++) straight.push(i, i * 0.5 + (i % 2) * 0.1)
+  const lean = simplify(straight, 0.5)
+  check('simplify keeps both end points', lean[0] === 0 && lean[lean.length - 2] === 50)
+  check('simplify drops points on a near-straight line', lean.length < 10)
+  check('simplify keeps a corner', simplify([0, 0, 10, 0, 10, 10], 0.5).length === 6)
 }
 
 A.close()

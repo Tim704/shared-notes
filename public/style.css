@@ -309,6 +309,11 @@ body {
   gap: var(--s-2);
   min-height: var(--s-6);
 }
+/* A menu row with a name and a one-line description under it (the "new tab" menu). */
+.menu-item-2line { align-items: flex-start; padding-top: var(--s-2); padding-bottom: var(--s-2); }
+.menu-item-2line > .icon { margin-top: 2px; }
+.menu-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.menu-blurb { font-size: 12px; line-height: 16px; color: var(--label-2); }
 .board {
   display: flex;
   flex-wrap: wrap;
@@ -1998,6 +2003,9 @@ body.has-full {
   max-height: none;
   min-height: 100%;
   line-height: 1.5;
+  /* room under the last line, so it can scroll up off the bottom edge */
+  box-sizing: border-box;
+  padding-bottom: 30vh;
 }
 .card.full .card-fmt {
   display: flex !important;
@@ -3595,3 +3603,83 @@ body.phone .page-view[data-kind='mindmap'] .mm-wrap { min-height: calc(100dvh - 
 .ink-capture.erasing { cursor: cell; }
 .ink-capture[hidden] { display: none; }
 .board.inking .card { opacity: .55; transition: opacity var(--dur) var(--ease); }
+
+/* ---- hover descriptions (src/tooltip.js) ---- */
+.tip {
+  position: fixed;
+  z-index: 10000;
+  max-width: 260px;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-field);
+  background: var(--material-thick);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--elev-3);
+  color: var(--label);
+  pointer-events: none;
+  animation: tip-in .12s ease-out;
+}
+.tip[hidden] { display: none; }
+.tip-name { font-size: 12px; line-height: 16px; font-weight: 600; }
+.tip-desc { font-size: 12px; line-height: 16px; color: var(--label-2); margin-top: 1px; }
+@keyframes tip-in { from { opacity: 0; transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .tip { animation: none; } }
+
+/* ---- tab icon & colour ---- */
+.tab-icon.emoji, .drawer-icon.emoji, .tab-glyph.emoji { font-size: 15px; line-height: 1; }
+.tab.tinted .tab-icon { color: var(--tab-c); opacity: 1; }
+.tab.tinted { box-shadow: inset 0 -2px 0 var(--tab-c); }
+.tab.tinted.on { background: color-mix(in srgb, var(--tab-c) 10%, var(--bg-elevated)); box-shadow: var(--elev-1), inset 0 -2px 0 var(--tab-c); }
+.tab-look { width: 296px; padding: var(--s-2); }
+.tab-look-h { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--label-2); margin: var(--s-2) var(--s-1) var(--s-1); }
+.tab-look-h:first-child { margin-top: 0; }
+.tab-look-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; }
+.tab-look-grid.colors { grid-template-columns: repeat(10, 1fr); gap: 4px; }
+.tab-look-cell {
+  aspect-ratio: 1; border: 0; border-radius: var(--r-control); background: transparent;
+  color: var(--label); display: flex; align-items: center; justify-content: center; font-size: 18px; padding: 0;
+}
+.tab-look-cell:hover { background: var(--fill); }
+.tab-look-cell[aria-pressed="true"] { background: var(--fill-strong); box-shadow: inset 0 0 0 1.5px var(--tint); }
+.tab-look-swatch { aspect-ratio: 1; border-radius: 50%; border: 0; padding: 0; box-shadow: inset 0 0 0 .5px var(--separator); }
+.tab-look-swatch.none { background: linear-gradient(135deg, transparent 45%, var(--red) 45% 55%, transparent 55%), var(--bg-elevated); }
+.tab-look-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 0 4px var(--tint); }
+.tab-look-input {
+  width: 100%; box-sizing: border-box; margin-top: var(--s-1); padding: var(--s-1) var(--s-2);
+  border: 0; border-radius: var(--r-field); background: var(--fill); color: var(--label); font: var(--t-body);
+}
+.tab-look-reset { margin-top: var(--s-2); justify-content: center; }
+@media (max-width: 600px) {
+  .tab-look { width: auto; }
+  .tab-look-cell { min-height: 40px; }
+}
+
+/* ---- image cards: a picture placed straight on a NotePad ---- */
+.card.is-image {
+  padding: 0;
+  background: transparent !important;
+  border: 0;
+  box-shadow: var(--elev-1);
+  overflow: hidden;
+}
+.card.is-image .card-title,
+.card.is-image .card-meta,
+.card.is-image .card-fmt,
+.card.is-image .rb-embed-grip { display: none !important; }
+/* the header floats over the picture and shows on hover: drag it to move */
+.card.is-image .card-top {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 2;
+  margin: 0;
+  padding: 0 var(--s-1);
+  background: linear-gradient(rgba(0,0,0,.35), transparent);
+  color: #fff;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+  cursor: grab;
+}
+.card.is-image:hover .card-top, .card.is-image.sel .card-top { opacity: 1; }
+.card.is-image .card-bodyhost, .card.is-image .card-body { padding: 0; margin: 0; overflow: hidden; }
+.card.is-image .rb-embed { margin: 0; }
+.card.is-image .rb-embed img { display: block; width: 100%; height: auto; border-radius: 0; }

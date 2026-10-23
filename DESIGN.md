@@ -101,6 +101,13 @@ caps/joins. No emoji control icons, SF Symbols, Apple marks or runtime icon pack
 Semantic list markers and user-entered Unicode remain text. All icon-only buttons
 carry accessible names. Editor formatting buttons preserve the selection.
 
+Exception: a tab's own icon may be an emoji the user picks (Tab options → Icon &
+colour), alongside the line icons. Tab colours use the system colour tokens
+(--red … --pink) and tint the tab icon plus a 2px bar under the tab.
+
+Hover descriptions (src/tooltip.js) replace the native title bubble on mouse and
+trackpad devices: name in semibold, one line of description below, after 450 ms.
+
 ## Audit and verification
 
 `visual-review/before-values.txt` records original hard-coded style values and

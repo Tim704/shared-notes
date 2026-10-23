@@ -1,4 +1,4 @@
-import { icon as makeIcon, iconHTML, iconLabel, mountIcons } from './icons.js'
+import { icon as makeIcon, iconHTML, iconLabel, mountIcons, iconNames } from './icons.js'
 import * as Y from 'yjs'
 import * as syncProtocol from 'y-protocols/sync'
 import * as awarenessProtocol from 'y-protocols/awareness'
@@ -19,6 +19,7 @@ import * as backup from './backup.js'
 import { createMindMap } from './mindmap.js'
 import { createViewport } from './viewport.js'
 import { createInk } from './ink.js'
+import { initTooltips } from './tooltip.js'
 import { createRibbon, setPressed } from './ribbon.js'
 import { createGuides, snapMove, snapResize, alignRects, distributeRects, matchSize, tidyRects } from './snap.js'
 import {
@@ -365,9 +366,19 @@ function tabRec(t) {
       kind: t.get('kind') || 'notes',
       archived: !!t.get('archived'),
       view: t.get('view') === 'canvas' ? 'canvas' : 'board',
+      icon: t.get('icon') || null,
+      color: t.get('color') || null,
     }
   }
-  return { id: t.id, name: t.name || '', kind: t.kind || 'notes', archived: !!t.archived, view: t.view === 'canvas' ? 'canvas' : 'board' }
+  return {
+    id: t.id,
+    name: t.name || '',
+    kind: t.kind || 'notes',
+    archived: !!t.archived,
+    view: t.view === 'canvas' ? 'canvas' : 'board',
+    icon: t.icon || null,
+    color: t.color || null,
+  }
 }
 function tabsList() {
   return yTabs.toArray().map(tabRec).filter((t) => t && t.id)
@@ -400,6 +411,8 @@ function makeTabMap(rec) {
   m.set('kind', rec.kind || 'notes')
   if (rec.archived) m.set('archived', true)
   if (rec.view === 'canvas') m.set('view', 'canvas') // reordering a tab keeps its canvas view
+  if (rec.icon) m.set('icon', rec.icon)
+  if (rec.color) m.set('color', rec.color)
   return m
 }
 
@@ -420,6 +433,134 @@ function updateTab(id, patch) {
       yTabs.insert(i, [makeTabMap({ ...tabRec(raw), ...patch })])
     }
   })
+}
+
+// ---- tab icon & colour ----
+// A tab's `icon` is 'i:<name>' (one of the app's line icons) or an emoji;
+// `color` is a key of TAB_COLORS. Both are optional; without them the icon
+// comes from the tab's kind.
+const TAB_COLORS = ['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'indigo', 'purple', 'pink']
+const TAB_EMOJI = '📝 📚 📖 ✏️ 🧠 💡 🎯 ✅ 📅 ⏰ 🗂️ 📌 🏠 💼 🎓 🧪 🧮 📐 💻 🎨 🎵 🎮 ⚽ 🏃 🍳 🛒 ✈️ 🌍 🌱 💰 ❤️ ⭐ 🔥 🚀 🐶 ☕ 🎉 🔒 🛠️ 📷'.split(' ')
+function tabGlyph(t, cls = 'tab-glyph') {
+  const v = t.icon || ''
+  let el
+  if (v && !v.startsWith('i:')) {
+    el = document.createElement('span')
+    el.className = cls + ' emoji'
+    el.textContent = v
+  } else {
+    const name = v.startsWith('i:') ? v.slice(2) : kindInfo(t.kind).icon
+    el = document.createElement('span')
+    el.className = cls
+    el.appendChild(makeIcon(name))
+  }
+  if (t.color && TAB_COLORS.includes(t.color)) el.style.color = `var(--${t.color})`
+  return el
+}
+// first grapheme of whatever was typed or pasted (so 👍🏽 or 🇳🇿 stay whole)
+function firstGrapheme(str) {
+  const v = String(str || '').trim()
+  if (!v) return ''
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(v)) return segment
+  }
+  return Array.from(v)[0]
+}
+
+function openTabLook(t, anchor) {
+  closeMenus()
+  const box = document.createElement('div')
+  box.className = 'menu tab-look'
+  box.addEventListener('click', (e) => e.stopPropagation())
+  const cur = () => tabsList().find((x) => x.id === t.id) || t
+  const head = (text) => {
+    const h = document.createElement('div')
+    h.className = 'tab-look-h'
+    h.textContent = text
+    box.appendChild(h)
+  }
+  const grid = (cls) => {
+    const g = document.createElement('div')
+    g.className = 'tab-look-grid ' + cls
+    box.appendChild(g)
+    return g
+  }
+  const refresh = () => {
+    const c = cur()
+    box.querySelectorAll('[data-icon-v]').forEach((b) => b.setAttribute('aria-pressed', String((c.icon || '') === b.dataset.iconV)))
+    box.querySelectorAll('[data-color-v]').forEach((b) => b.setAttribute('aria-pressed', String((c.color || '') === b.dataset.colorV)))
+  }
+  const setIcon = (v) => {
+    updateTab(t.id, { icon: v || null })
+    refresh()
+  }
+
+  head('Colour')
+  const colors = grid('colors')
+  for (const c of [''].concat(TAB_COLORS)) {
+    const b = document.createElement('button')
+    b.className = 'tab-look-swatch' + (c ? '' : ' none')
+    b.dataset.colorV = c
+    if (c) b.style.background = `var(--${c})`
+    b.title = c ? c[0].toUpperCase() + c.slice(1) : 'No colour'
+    b.setAttribute('aria-label', b.title)
+    b.addEventListener('click', () => {
+      updateTab(t.id, { color: c || null })
+      refresh()
+    })
+    colors.appendChild(b)
+  }
+
+  head('Emoji')
+  const emo = grid('emoji')
+  for (const e of TAB_EMOJI) {
+    const b = document.createElement('button')
+    b.className = 'tab-look-cell emoji'
+    b.dataset.iconV = e
+    b.textContent = e
+    b.setAttribute('aria-label', 'Emoji ' + e)
+    b.addEventListener('click', () => setIcon(e))
+    emo.appendChild(b)
+  }
+  const own = document.createElement('input')
+  own.className = 'tab-look-input'
+  own.placeholder = 'Or type / paste any emoji'
+  own.setAttribute('aria-label', 'Any emoji')
+  own.addEventListener('input', () => {
+    const g = firstGrapheme(own.value)
+    if (g && !/^[\p{L}\p{N}\s]$/u.test(g)) setIcon(g)
+  })
+  box.appendChild(own)
+
+  head('Icon')
+  const ico = grid('icons')
+  const skip = new Set(['bold', 'italic', 'underline', 'strike', 'left', 'center', 'alignRight', 'close', 'down', 'more', 'numbers', 'square', 'redo', 'undo', 'expand', 'external', 'eraser', 'rows', 'swap'])
+  for (const name of iconNames().filter((n) => !skip.has(n))) {
+    const b = document.createElement('button')
+    b.className = 'tab-look-cell'
+    b.dataset.iconV = 'i:' + name
+    b.appendChild(makeIcon(name))
+    b.setAttribute('aria-label', 'Icon ' + name)
+    b.addEventListener('click', () => setIcon('i:' + name))
+    ico.appendChild(b)
+  }
+
+  const reset = document.createElement('button')
+  reset.className = 'menu-item tab-look-reset'
+  reset.textContent = 'Reset to default'
+  reset.addEventListener('click', () => {
+    updateTab(t.id, { icon: null, color: null })
+    refresh()
+  })
+  box.appendChild(reset)
+
+  document.body.appendChild(box)
+  const r = anchor.getBoundingClientRect()
+  box.style.left = Math.max(6, Math.min(r.left, window.innerWidth - box.offsetWidth - 6)) + 'px'
+  box.style.top = r.bottom + 4 + 'px'
+  refresh()
+  const dismiss = ui.popover(box, anchor, { label: 'Tab icon and colour' })
+  openMenus.push({ remove: dismiss })
 }
 
 // One-time migration: make sure a tab exists and legacy notes land in it.
@@ -475,10 +616,10 @@ function migrateBoard() {
 // ---- tab operations ----
 // What each kind of tab is called and drawn as. Unknown kinds show as notes.
 const TAB_KINDS = {
-  notes: { label: 'List', menu: 'Sticky notes', icon: 'note', sub: null },
-  draw: { label: 'Sketch', menu: 'Sketch board', icon: 'pencil', sub: 'Sketch board' },
-  doc: { label: 'Document', menu: 'Document', icon: 'text', sub: 'Document' },
-  mindmap: { label: 'Mind map', menu: 'Mind map', icon: 'map', sub: 'Mind map' },
+  notes: { label: 'NotePad', menu: 'NotePad', icon: 'note', sub: null, blurb: 'Sticky notes, drawings and images on a board' },
+  draw: { label: 'Sketch Pad', menu: 'Sketch Pad', icon: 'pencil', sub: 'Sketch Pad', blurb: 'Free drawing with images, more freedom' },
+  doc: { label: 'Document', menu: 'Document', icon: 'text', sub: 'Document', blurb: 'Full text editor with images' },
+  mindmap: { label: 'Mind map', menu: 'Mind map', icon: 'map', sub: 'Mind map', blurb: 'Ideas branching out from one centre' },
 }
 const kindInfo = (kind) => TAB_KINDS[kind] || TAB_KINDS.notes
 const isNotesTab = (t) => !!t && !TAB_KINDS[t.kind]?.sub
@@ -623,9 +764,9 @@ function renderTabs() {
       if (e.key === 'F2') { e.preventDefault(); renamingTabId = t.id; renderTabs() }
     })
 
-    const icon = document.createElement('span')
-    icon.className = 'tab-icon'
-    icon.appendChild(makeIcon(kindInfo(t.kind).icon))
+    const icon = tabGlyph(t, 'tab-icon')
+    if (t.color) tab.style.setProperty('--tab-c', `var(--${t.color})`)
+    tab.classList.toggle('tinted', !!t.color)
     tab.appendChild(icon)
 
     if (renamingTabId === t.id) {
@@ -772,6 +913,7 @@ function openTabMenu(anchor, t) {
     renamingTabId = t.id
     renderTabs()
   })
+  item('🎨  Icon & colour…', () => setTimeout(() => openTabLook(t, anchor))) // after this click has bubbled
   if (isNotesTab(t)) {
     if (t.view === 'canvas')
       item('▦  Back to the board view', () => {
@@ -818,8 +960,19 @@ function openAddMenu(anchor) {
   menu.style.top = r.bottom + 4 + 'px'
   const mkItem = (kind) => {
     const b = document.createElement('button')
-    b.className = 'menu-item'
-    iconLabel(b, kindInfo(kind).menu, kindInfo(kind).icon)
+    b.className = 'menu-item menu-item-2line'
+    iconLabel(b, '', kindInfo(kind).icon)
+    const text = document.createElement('span')
+    text.className = 'menu-text'
+    const name = document.createElement('span')
+    name.className = 'menu-name'
+    name.textContent = kindInfo(kind).menu
+    const blurb = document.createElement('span')
+    blurb.className = 'menu-blurb'
+    blurb.textContent = kindInfo(kind).blurb
+    text.append(name, blurb)
+    b.appendChild(text)
+    b.removeAttribute('aria-label')
     b.addEventListener('click', () => {
       closeMenus()
       addTab(kind)
@@ -886,6 +1039,99 @@ function createNote(color) {
   })
   return id
 }
+
+// ---- pictures straight on a NotePad ----
+// A picture pasted or dropped onto a NotePad (not into a note) becomes an image
+// card: a note with kind 'image' whose body is just the picture's line. It moves,
+// selects, syncs and goes to the trash like any note; old clients show it as an
+// ordinary note holding the picture.
+const IMG_W_MAX = 360
+async function imageWidth(file) {
+  try {
+    const bmp = await createImageBitmap(file)
+    const w = bmp.width
+    bmp.close && bmp.close()
+    return clamp(w, W_MIN, IMG_W_MAX)
+  } catch {
+    return IMG_W_MAX
+  }
+}
+async function addImageCards(files, at) {
+  const t = activeTab()
+  if (!files.length || !isNotesTab(t)) return
+  const widths = await Promise.all(files.map(imageWidth))
+  const urls = await uploadImages(files)
+  if (!urls.length) return
+  const base = at || nextNotePos()
+  let z = maxZ()
+  const ids = []
+  doc.transact(() => {
+    urls.forEach((url, i) => {
+      const id = genId()
+      const w = widths[i] || IMG_W_MAX
+      const n = new Y.Map()
+      const body = new Y.Text()
+      body.insert(0, url + '\n')
+      n.set('title', new Y.Text())
+      n.set('body', body)
+      n.set('color', '#ffffff')
+      n.set('created', Date.now())
+      n.set('tabId', t.id)
+      n.set('fontSize', FS_DEFAULT)
+      n.set('kind', 'image')
+      n.set('x', Math.round(base.x - (at ? w / 2 : 0) + i * 24))
+      n.set('y', Math.round(base.y - (at ? 40 : 0) + i * 24))
+      n.set('w', w)
+      n.set('h', H_DEFAULT)
+      n.set('z', ++z)
+      n.set('lastEditedAt', Date.now())
+      n.set('lastEditedBy', { id: me.id, name: me.name })
+      yNotes.set(id, n)
+      yOrder.unshift([id])
+      ids.push(id)
+    })
+  })
+  return ids
+}
+// where the pointer last was over the board (for pastes in canvas view)
+let boardPointer = null
+board.addEventListener('pointermove', (e) => {
+  boardPointer = { x: e.clientX, y: e.clientY, at: Date.now() }
+})
+board.addEventListener('pointerleave', () => (boardPointer = null))
+const imageFilesOf = (dt) => {
+  const out = []
+  for (const f of Array.from(dt?.files || [])) if (/^image\//.test(f.type)) out.push(f)
+  if (!out.length && dt?.items) {
+    for (const it of Array.from(dt.items)) {
+      if (it.kind === 'file' && /^image\//.test(it.type)) {
+        const f = it.getAsFile()
+        if (f) out.push(f)
+      }
+    }
+  }
+  return out
+}
+document.addEventListener('paste', (e) => {
+  if (full || overlayKind || isTypingTarget(document.activeElement)) return
+  if (!isNotesTab(activeTab())) return
+  const files = imageFilesOf(e.clipboardData)
+  if (!files.length) return
+  e.preventDefault()
+  const at = canvasMode && boardPointer ? toPlane(boardPointer.x, boardPointer.y) : null
+  addImageCards(files, at)
+})
+board.addEventListener('dragover', (e) => {
+  if (!isNotesTab(activeTab()) || e.target.closest('.card')) return
+  if (Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault()
+})
+board.addEventListener('drop', (e) => {
+  if (!isNotesTab(activeTab()) || e.target.closest('.card')) return
+  const files = imageFilesOf(e.dataTransfer)
+  if (!files.length) return
+  e.preventDefault()
+  addImageCards(files, freeLayout ? toPlane(e.clientX, e.clientY) : null)
+})
 
 // Delete is soft: the note goes to the tab's trash and a toast offers Undo.
 // The server purges trash after 30 days; "Delete forever" is hardDeleteNote.
@@ -1457,11 +1703,42 @@ function renderAlignBar() {
   b(I('M2 5h12M2 11h12M4 3l-2 2 2 2M12 9l2 2-2 2'), 'Same width', () => applyLayout(matchSize(selRects(), 'w')))
   b(I('M5 2v12M11 2v12M3 4l2-2 2 2M9 12l2 2 2-2'), 'Same height', () => applyLayout(matchSize(selRects(), 'h')))
   b(I('M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z'), 'Tidy up into a grid', () => applyLayout(tidyRects(selRects())))
+  const sep2 = document.createElement('span')
+  sep2.className = 'align-sep'
+  alignBar.appendChild(sep2)
+  b('🎨', 'Colour the selected notes', () => {
+    const x = alignBar.querySelector('[data-act="color"]')
+    swatchSheet(x, PAPER.concat(getFavorites()), (c) =>
+      doc.transact(() => boardSel.forEach((nid) => yNotes.get(nid)?.set('color', c)))
+    )
+  })
+  alignBar.lastChild.dataset.act = 'color'
+  b('🗑', 'Delete the selected notes (Delete)', () => deleteSelected())
   b('✕', 'Clear selection (Esc)', () => setSelected([]))
 }
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && boardSel.size) setSelected([])
+  if ((e.key === 'Delete' || e.key === 'Backspace') && boardSel.size > 1 && !isTypingTarget(e.target)) {
+    e.preventDefault()
+    deleteSelected()
+  }
 })
+function isTypingTarget(t) {
+  return !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
+}
+// Move every selected note to the trash in one step, with Undo.
+function deleteSelected() {
+  const ids = Array.from(boardSel).filter((nid) => yNotes.get(nid))
+  if (!ids.length) return
+  const now = Date.now()
+  doc.transact(() => ids.forEach((nid) => yNotes.get(nid).set('deleted', now)))
+  setSelected([])
+  ui.toast(ids.length + (ids.length === 1 ? ' note' : ' notes') + ' moved to trash', {
+    action: 'Undo',
+    ms: 7000,
+    onAction: () => ids.forEach((nid) => restoreNote(nid)),
+  })
+}
 
 // drag a box on empty board (or Shift+drag on the canvas) to select notes
 let marquee = null
@@ -1766,6 +2043,24 @@ function createCard(id) {
   grip.setAttribute('aria-label', grip.title)
   el.append(top, titleEl, bodyHost, meta, grip)
 
+  // Shift/Ctrl/Cmd-click anywhere on a note adds it to / removes it from the
+  // selection. In the note you are typing in, Shift-click keeps its usual job of
+  // extending the text selection.
+  el.addEventListener(
+    'pointerdown',
+    (e) => {
+      if (!freeLayout || phoneMode() || !(e.shiftKey || e.ctrlKey || e.metaKey)) return
+      if (e.button != null && e.button !== 0 && e.pointerType === 'mouse') return
+      if (e.target.closest('.card-tools, .card-pop, .resize-grip')) return
+      const typing = el.contains(document.activeElement) && document.activeElement.isContentEditable
+      if (typing && e.shiftKey && !e.target.closest('.card-top')) return
+      e.preventDefault()
+      e.stopPropagation()
+      toggleSelected(id)
+    },
+    true
+  )
+
   applyNoteStyle(el, note)
   applyNoteLayout(el, note)
 
@@ -1798,6 +2093,7 @@ function createCard(id) {
     if (!yNotes.has(id)) return
     doc.transact(() => {
       note.set('w', Math.round(sz.w))
+      if (note.get('kind') === 'image') return // a picture's height follows its width
       note.set('h', Math.round(sz.h))
       if (note.get('autoGrow') !== false) note.set('autoGrow', false) // resizing pins the height
     }, LAYOUT)
@@ -2101,6 +2397,7 @@ function mountBody(card) {
   const note = card.note
   const kind = note.get('kind') || 'note'
   card.el.classList.toggle('is-todo', kind === 'todo')
+  card.el.classList.toggle('is-image', kind === 'image')
   if (kind === 'todo') {
     // a checklist from before todo lines existed; the Pi converts it moments after it syncs
     ensureItems(note)
@@ -3238,6 +3535,45 @@ yNotes.observeDeep((events) => {
 // Android back gesture closes it, and #note=<id>&full deep-links straight in.
 let full = null
 
+// While typing in a scrolling editor, keep the caret line plus one more line
+// in view, so the text never runs under the bottom edge (or the keyboard).
+function keepCaretInView(host) {
+  const caretRect = () => {
+    const sel = window.getSelection()
+    if (!sel || !sel.rangeCount || !host.contains(sel.focusNode)) return null
+    const range = sel.getRangeAt(0).cloneRange()
+    range.collapse(false)
+    const r = range.getClientRects()[0]
+    if (r && r.height) return r
+    // an empty line has no caret box: use the line element itself
+    const node = sel.focusNode.nodeType === 1 ? sel.focusNode : sel.focusNode.parentElement
+    return node ? node.getBoundingClientRect() : null
+  }
+  let raf = 0
+  const check = () => {
+    raf = 0
+    const r = caretRect()
+    if (!r) return
+    const box = host.getBoundingClientRect()
+    const line = Math.max(18, r.height)
+    const below = r.bottom + line * 1.5 - box.bottom // room for the next line
+    if (below > 0) host.scrollBy({ top: below, behavior: 'smooth' })
+    else if (r.top < box.top) host.scrollBy({ top: r.top - box.top - line / 2, behavior: 'smooth' })
+  }
+  const schedule = () => {
+    if (!raf) raf = requestAnimationFrame(check)
+  }
+  host.addEventListener('input', schedule)
+  host.addEventListener('keyup', schedule)
+  document.addEventListener('selectionchange', schedule)
+  return () => {
+    cancelAnimationFrame(raf)
+    host.removeEventListener('input', schedule)
+    host.removeEventListener('keyup', schedule)
+    document.removeEventListener('selectionchange', schedule)
+  }
+}
+
 function openFullscreen(id, opts = {}) {
   const note = yNotes.get(id)
   if (!note || note.get('deleted')) return false
@@ -3344,6 +3680,7 @@ function openFullscreen(id, opts = {}) {
   card.unbinds.push(bindInput(note.get('title'), titleEl, () => applyFilter()))
   el.addEventListener('input', () => stamp(note))
   mountBody(card)
+  card.unbinds.push(keepCaretInView(bodyHost))
   optBtn.addEventListener('click', (e) => {
     e.stopPropagation()
     togglePopover(card)
@@ -3706,9 +4043,10 @@ function renderDrawer() {
   const row = (icon, label, sub, fn, cls) => {
     const b = document.createElement('button')
     b.className = 'drawer-item' + (cls ? ' ' + cls : '')
-    const i = document.createElement('span')
+    let i = document.createElement('span')
     i.className = 'drawer-icon'
-    i.appendChild(makeIcon(icon))
+    if (typeof icon === 'object') i = tabGlyph(icon, 'drawer-icon')
+    else i.appendChild(makeIcon(icon))
     const l = document.createElement('span')
     l.className = 'drawer-label'
     l.textContent = label
@@ -3731,7 +4069,7 @@ function renderDrawer() {
   }
   sec('Tabs')
   for (const t of tabsList().filter((x) => !x.archived)) {
-    row(kindInfo(t.kind).icon, t.name, isNotesTab(t) ? String(counts.get(t.id) || 0) : '', () => {
+    row(t, t.name, isNotesTab(t) ? String(counts.get(t.id) || 0) : '', () => {
       closeDrawer()
       setActiveTab(t.id)
     }, t.id === activeTabId ? 'on' : '')
@@ -4044,6 +4382,7 @@ function openHome() {
       const name = document.createElement('span')
       name.className = 'home-tab-name'
       iconLabel(name, t.name, isNotesTab(t) ? 'folder' : kindInfo(t.kind).icon)
+      if (t.icon || t.color) name.firstChild.replaceWith(tabGlyph(t.icon ? t : { ...t, icon: isNotesTab(t) ? 'i:folder' : null }, 'icon'))
       top.appendChild(name)
       if (people.length) {
         const pp = document.createElement('span')
@@ -4710,6 +5049,7 @@ setTimeout(() => {
 reconcile()
 
 mountIcons()
+initTooltips()
 tabsEl.setAttribute('role', 'tablist')
 window.addEventListener('notes-theme-change', () => {
   for (const [, card] of cards) {

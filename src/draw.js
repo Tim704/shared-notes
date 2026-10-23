@@ -1,6 +1,7 @@
 import * as Y from 'yjs'
 import { DOCUMENT_INK } from './util.js'
 import { rafThrottle, clamp } from './util.js'
+import { smoothPoint, simplify, tracePath } from './stroke.js'
 
 // ---------------------------------------------------------------------------
 // Collaborative sketch surface. Strokes AND text labels live in one Yjs
@@ -91,10 +92,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
       return
     }
     ctx.beginPath()
-    ctx.moveTo(ox + arr[0] * scale, oy + arr[1] * scale)
-    for (let i = 2; i < arr.length; i += 2) {
-      ctx.lineTo(ox + arr[i] * scale, oy + arr[i + 1] * scale)
-    }
+    tracePath(ctx, arr, (x) => ox + x * scale, (y) => oy + y * scale)
     ctx.stroke()
     ctx.restore()
   }
@@ -301,7 +299,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
       points.push([x, y])
       yStrokes.push([stroke])
     })
-    active = { stroke, points, last: [x, y], buf: [] }
+    active = { stroke, points, last: [x, y], smooth: { x, y }, raw: { x, y }, buf: [] }
   }
 
   function onPointerMove(e) {
@@ -310,7 +308,10 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
     // coalesced events give smoother lines on fast strokes
     const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e]
     for (const ev of events.length ? events : [e]) {
-      const [x, y] = toLogical(ev.clientX, ev.clientY)
+      const [rx, ry] = toLogical(ev.clientX, ev.clientY)
+      active.raw = { x: rx, y: ry }
+      active.smooth = smoothPoint(active.smooth, active.raw)
+      const { x, y } = active.smooth
       const dx = x - active.last[0]
       const dy = y - active.last[1]
       if (dx * dx + dy * dy < MIN_STEP * MIN_STEP) continue
@@ -329,7 +330,19 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
         /* ignore */
       }
     }
+    // the smoothed line trails the pen a little: end it where the pen lifted
+    const { raw, last } = active
+    if (Math.hypot(raw.x - last[0], raw.y - last[1]) > 0.5) active.buf.push(raw.x, raw.y)
     flushBuffer()
+    const { points } = active
+    const pts = points.toArray()
+    const lean = simplify(pts, 0.4)
+    if (lean.length < pts.length) {
+      yStrokes.doc.transact(() => {
+        points.delete(0, points.length)
+        points.push(lean)
+      })
+    }
     active = null
   }
 

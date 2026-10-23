@@ -90,7 +90,12 @@ browser at it.
   the title, the bottom bar, a gap or a screen edge). Checkboxes in the previews
   can be ticked directly. A phone never moves or resizes notes, so it can't disturb the
   desktop board. The app installs to the home screen (manifest + icons).
-- **Sketch boards**: draw together on a shared canvas with a pen (quick colour swatches +
+- **Tab types** (the + at the end of the tab bar):
+  - **NotePad**: sticky notes, drawings and images on a board.
+  - **Document**: a full text editor with images.
+  - **Sketch Pad**: free drawing with images, more freedom.
+  - **Mind map**: ideas branching out from one centre.
+- **Sketch Pads**: draw together on a shared canvas with a pen (quick colour swatches +
   adjustable size), an **eraser**, undo and clear, and drop **text labels** anywhere.
 - Real-time editing: when a friend types, draws, or moves a note, you see it happen.
   Concurrent edits merge cleanly (a CRDT, [Yjs](https://github.com/yjs/yjs)).

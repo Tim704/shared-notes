@@ -12,6 +12,8 @@
 //     setTool, getTool, undo, redo, bounds, schedule, destroy }
 // strokes: Y.Array<Y.Map{ color, width, points: Y.Array<number> /* x,y,x,y… */ }>
 
+import { smoothPoint, simplify, pathData } from './stroke.js'
+
 const NS = 'http://www.w3.org/2000/svg'
 const LOCAL = { ink: 'local' } // creating / erasing a stroke: one undo step each
 const LIVE = { ink: 'live' } // the points of a stroke as it is drawn (not undo steps)
@@ -31,20 +33,6 @@ export function createInk({ Y, toPlane, zoom, onChange }) {
   let active = false
   let tool = { mode: 'pen', color: '#1c1c1e', width: 3 }
   const paths = new Map() // Y.Map -> <path>
-
-  function pathData(pts) {
-    const n = pts.length >> 1
-    if (!n) return ''
-    if (n === 1) return `M${pts[0]},${pts[1]}l0.01,0`
-    let d = `M${pts[0]},${pts[1]}`
-    // quadratic curves through the midpoints: smooth without overshoot
-    for (let i = 1; i < n - 1; i++) {
-      const x = pts[i * 2], y = pts[i * 2 + 1]
-      const mx = (x + pts[i * 2 + 2]) / 2, my = (y + pts[i * 2 + 3]) / 2
-      d += `Q${x},${y} ${mx},${my}`
-    }
-    return d + `L${pts[(n - 1) * 2]},${pts[(n - 1) * 2 + 1]}`
-  }
 
   function render() {
     const seen = new Set()
@@ -82,7 +70,7 @@ export function createInk({ Y, toPlane, zoom, onChange }) {
   }
 
   // ---- drawing ----
-  let cur = null // { map, points: Y.Array, last, pending: [] }
+  let cur = null // { map, points: Y.Array, last, smooth, raw, pending: [] }
   let flushRaf = 0
   function flush() {
     flushRaf = 0
@@ -90,10 +78,23 @@ export function createInk({ Y, toPlane, zoom, onChange }) {
     const pts = cur.pending.splice(0)
     cur.map.doc.transact(() => cur.points.push(pts), LIVE)
   }
+  const r1 = (v) => Math.round(v * 10) / 10
   function finish() {
     if (!cur) return
     if (flushRaf) cancelAnimationFrame(flushRaf)
+    // the smoothed line trails the pen a little: end it where the pen lifted
+    const { raw, last } = cur
+    if (raw && Math.hypot(raw.x - last.x, raw.y - last.y) > 0.5 / zoom()) cur.pending.push(r1(raw.x), r1(raw.y))
     flush()
+    const pts = cur.points.toArray()
+    const lean = simplify(pts, 0.4 / zoom())
+    if (lean.length < pts.length) {
+      const { map, points } = cur
+      map.doc.transact(() => {
+        points.delete(0, points.length)
+        points.push(lean)
+      }, LIVE)
+    }
     cur = null
   }
 
@@ -138,19 +139,26 @@ export function createInk({ Y, toPlane, zoom, onChange }) {
       map.set('color', tool.color)
       map.set('width', tool.width)
       map.set('points', points)
-      points.push([Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10])
+      points.push([r1(p.x), r1(p.y)])
       strokes.push([map])
     }, LOCAL)
-    cur = { map, points, last: p, pending: [] }
+    cur = { map, points, last: p, smooth: p, raw: p, pending: [] }
   })
   capture.addEventListener('pointermove', (e) => {
     if (!capture.hasPointerCapture(e.pointerId)) return
     const p = toPlane(e.clientX, e.clientY)
     if (erasing) return eraseAt(p)
     if (!cur) return
-    if (Math.hypot(p.x - cur.last.x, p.y - cur.last.y) < MIN_STEP / zoom()) return
-    cur.last = p
-    cur.pending.push(Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10)
+    // coalesced events: every sample the pen gave us, not one per frame
+    const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || []
+    for (const ev of evs.length ? evs : [e]) {
+      cur.raw = evs.length ? toPlane(ev.clientX, ev.clientY) : p
+      cur.smooth = smoothPoint(cur.smooth, cur.raw)
+      const q = cur.smooth
+      if (Math.hypot(q.x - cur.last.x, q.y - cur.last.y) < MIN_STEP / zoom()) continue
+      cur.last = q
+      cur.pending.push(r1(q.x), r1(q.y))
+    }
     if (!flushRaf) flushRaf = requestAnimationFrame(flush)
   })
   const end = (e) => {

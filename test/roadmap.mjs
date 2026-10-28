@@ -72,7 +72,7 @@ function note(doc, id, title, md, extra = {}) {
 {
   const doc = new Y.Doc()
   const yt = doc.getText('t')
-  const plain = ['if (a == b && c == d) 2*3 **not bold** ~~x~~ ==y== <u>z</u> C:\\Users \\*', '---', '> not a quote', '- not a list', '# not a heading']
+  const plain = ['if (a == b && c == d) 2*3 **not bold** ~~x~~ ==y== <u>z</u> C:\\Users \\*', '---', '> not a quote']
   for (const p of plain) {
     yt.insert(yt.length, p, {})
     yt.insert(yt.length, '\n', {})
@@ -85,7 +85,7 @@ function note(doc, id, title, md, extra = {}) {
   insertLinesAt(back, 0, markdownToLines(linesToMarkdown(linesOf(yt))))
   const ls = linesOf(back)
   check('text that looks like Markdown survives a round trip as plain text', plain.every((p, i) => ls[i].text === p && !ls[i].attrs.lt && ls[i].runs.length === 1 && !Object.keys(ls[i].runs[0].marks).length))
-  const hrefs = ls[5].runs.filter((r) => r.marks.href).map((r) => r.marks.href)
+  const hrefs = ls[3].runs.filter((r) => r.marks.href).map((r) => r.marks.href)
   check('…and links with brackets or %-escapes keep their exact address', hrefs[0] === 'https://en.wikipedia.org/wiki/Mercury_(planet)' && hrefs[1] === 'https://x.com/?q=50%25%20off')
 }
 

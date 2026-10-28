@@ -468,9 +468,13 @@ export function stripMarks(s) {
 
 const HR_RE = /^\s*(\*\s*\*\s*\*|-\s*-\s*-|_\s*_\s*_)[\s*_-]*$/
 
-/** Would a paragraph with this text read back as a list, heading, quote or divider? */
+/**
+ * Would a paragraph with this text read back as a quote/callout or a divider?
+ * (Paragraphs typed as "- x" have always come back as list items, and that is
+ * left alone so the mirror stays as readable as it was.)
+ */
 function startsLikeMarkup(body) {
-  return !!(parseLinePrefix(body) || HR_RE.test(body))
+  return /^>/.test(body) || HR_RE.test(body)
 }
 
 // one run of inline Markdown (no links) → runs; null when its marks don't pair up

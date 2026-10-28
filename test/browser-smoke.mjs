@@ -797,6 +797,8 @@ try {
     const seg = (v) => document.querySelector('.settings-menu .segmented .segment[data-value="' + v + '"]')
     const card = document.querySelector('#board .card[data-id]')
     const stored = async () => (await (await fetch('/api/notes/' + card.dataset.id)).json()).color
+    seg('light').click() // start from light: the test machine may be in dark mode
+    await new Promise((r) => setTimeout(r, 50))
     const before = { bg: card.style.background, color: await stored() }
     seg('dark').click()
     await new Promise((r) => setTimeout(r, 50))

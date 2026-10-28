@@ -15,6 +15,10 @@ const DEFAULTS = {
   grid: false, // also snap to a grid
   gridSize: 20,
   phoneCols: 2, // phone grid: 1 or 2 columns
+  outline: true, // document tabs: show the outline beside the page
+  reminders: false, // this device gets a daily push of what is due
+  remindHour: 8, // …at this hour, on this device's clock
+  dates: true, // "@friday " becomes a date while typing
 }
 
 let cache = null

@@ -3,11 +3,17 @@ import { icon } from './icons.js'
 import * as ui from './ui.js'
 import { genId } from './util.js'
 import { taskTree, flatten, progress, dueState, dueLabel, ymd, parseYmd, addDays, orderBetween, validDate } from '../shared/tasks.js'
+import { noteTodos } from '../shared/links.js'
+import { setLineAttrs, findLineById } from '../shared/lineops.js'
+import { linesOf } from '../shared/lines.js'
 
 // ---------------------------------------------------------------------------
 // The To-do tab: tasks broken into parts (nested as deep as you like), each with
 // a tick, an optional due date and, when it has parts, a progress bar over its
-// smallest parts. Three views of the same list: List, Week and Month.
+// smallest parts. Four views of the same list: List, Week, Month and Board
+// (to do / doing / done columns). Checkboxes written in notes show up too
+// ("From notes", and on their @date in Week and Month); ticking one here ticks
+// it in its note.
 //
 // Data (see shared/tasks.js): page.get('items') is a flat Y.Map of
 // id -> Y.Map{ text, done, due, parent, order, created }.
@@ -16,12 +22,14 @@ import { taskTree, flatten, progress, dueState, dueLabel, ymd, parseYmd, addDays
 // field under the caret); every other change redraws and puts focus back.
 // Which tasks are folded, the open view and the "Done" section are per device.
 //
-// createTasksView(host, page) → { destroy, addTask }
+// createTasksView(host, page, { tabId, openSource(src), journal: { days(), open(day) } })
+//   → { destroy, addTask }
 // ---------------------------------------------------------------------------
 
 const TYPE = { tasks: 'type' }
 const FOLD_KEY = 'notesTaskFolds'
 const DONE_FOLD = 'notesTasksDoneOpen'
+const FROM_FOLD = 'notesTasksFromNotes'
 const VIEW_KEY = 'notesTasksView'
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
@@ -59,7 +67,7 @@ export function createTasksView(host, page, opts = {}) {
   const folds = new Set(load(FOLD_KEY, []))
   const doneOpen = load(DONE_FOLD, {})
   const views = load(VIEW_KEY, {})
-  let view = ['list', 'week', 'month'].includes(views[tabId]) ? views[tabId] : 'list'
+  let view = ['list', 'week', 'month', 'board'].includes(views[tabId]) ? views[tabId] : 'list'
   let month = today().slice(0, 7) // 'YYYY-MM' shown in the Month view
   let pickedDay = null // phone Month view: the day listed under the grid
   let pendingFocus = null // { id, caret } to focus after the next draw
@@ -85,7 +93,7 @@ export function createTasksView(host, page, opts = {}) {
     }, TYPE)
   })
   titleText?.observe(syncTitle)
-  const seg = ui.segmented('View', [['list', 'List'], ['week', 'Week'], ['month', 'Month']], view, (v) => setView(v))
+  const seg = ui.segmented('View', [['list', 'List'], ['week', 'Week'], ['month', 'Month'], ['board', 'Board']], view, (v) => setView(v))
   seg.classList.add('tasks-views')
   head.append(title, seg)
   const body = el('div', 'tasks-body')
@@ -226,6 +234,104 @@ export function createTasksView(host, page, opts = {}) {
     save(FOLD_KEY, Array.from(folds).slice(-2000))
   }
 
+  function setColumn(id, col) {
+    const m = node(id)
+    if (!m) return
+    doc.transact(() => {
+      if (col === 'done') m.set('done', true)
+      else m.delete('done')
+      if (col === 'doing') m.set('status', 'doing')
+      else m.delete('status')
+    })
+  }
+
+  // ---- checkboxes written in notes ----
+  const fromOpen = load(FROM_FOLD, {})
+  const notesMap = doc.getMap('notes')
+  const pagesMap = doc.getMap('pages')
+  let noteItems = []
+  let noteSig = ''
+  function refreshNoteItems() {
+    noteItems = noteTodos(doc).filter((t) => t.text.trim())
+    const sig = JSON.stringify(noteItems.map((t) => [t.id, t.field, t.bid, t.index, t.text, t.state, t.title]))
+    const changed = sig !== noteSig
+    noteSig = sig
+    return changed
+  }
+  refreshNoteItems()
+  const noteBody = (t) => (t.kind === 'page' ? pagesMap.get(t.id)?.get('body') : notesMap.get(t.id)?.get(t.field || 'body'))
+  function tickNote(t, st) {
+    const yt = noteBody(t)
+    if (!yt) return
+    let i = t.bid ? findLineById(yt, t.bid) : -1
+    if (i < 0) {
+      const L = linesOf(yt)[t.index]
+      if (L && L.attrs.lt === 'todo' && L.text === t.text) i = t.index
+    }
+    if (i < 0) return ui.toast('That checkbox has moved: open its note to tick it.')
+    doc.transact(() => setLineAttrs(yt, i, { done: st === 'x' ? true : null, ts: st === '/' || st === '-' || st === '>' ? st : null }))
+    opts.touch?.(t)
+  }
+  const withoutDate = (str) => str.replace(/(^|\s)@\d{4}-\d{2}-\d{2}(?![\w-])/g, '$1').replace(/\s+/g, ' ').trim()
+  function noteRow(t, { showDate = true } = {}) {
+    const r = el('div', 'task-entry from-note' + (t.done ? ' done' : '') + (t.state === '/' ? ' doing' : ''))
+    const c = el('input', 'task-check')
+    c.type = 'checkbox'
+    c.checked = t.done
+    c.indeterminate = t.state === '/'
+    c.setAttribute('aria-label', (t.done ? 'Untick ' : 'Tick ') + withoutDate(t.text))
+    c.addEventListener('change', () => tickNote(t, c.checked ? 'x' : ' '))
+    const txt = el('button', 'task-entry-text')
+    txt.type = 'button'
+    txt.appendChild(el('span', 'task-entry-name', withoutDate(t.text) || 'Untitled'))
+    txt.appendChild(el('span', 'task-entry-path', '↗ ' + (t.title || (t.kind === 'page' ? 'Document' : 'Untitled note'))))
+    txt.title = 'Open the note'
+    txt.addEventListener('click', () => opts.openSource?.(t))
+    r.append(c, txt)
+    if (showDate && t.due) {
+      const chip = el('span', 'task-due')
+      chip.dataset.state = t.done ? 'done' : dueState(t.due, today())
+      chip.textContent = dueLabel(t.due, today())
+      r.appendChild(chip)
+    }
+    return r
+  }
+  function drawFromNotes() {
+    const open = noteItems.filter((t) => !t.done && t.state !== '-')
+    if (!open.length) return
+    const isOpen = fromOpen[tabId] !== false
+    const h = el('button', 'task-done-h task-from-h')
+    h.type = 'button'
+    h.setAttribute('aria-expanded', String(isOpen))
+    const chev = icon('right')
+    chev.classList.toggle('open', isOpen)
+    h.append(chev, document.createTextNode(`From notes (${open.length})`))
+    h.title = 'Checkboxes written in notes. Give one a date by typing @friday.'
+    h.addEventListener('click', () => {
+      fromOpen[tabId] = !isOpen
+      save(FROM_FOLD, fromOpen)
+      draw()
+    })
+    body.appendChild(h)
+    if (!isOpen) return
+    const t = today()
+    const groups = [
+      ['Overdue', open.filter((x) => x.due && x.due < t).sort((a, b) => (a.due < b.due ? -1 : 1)), true],
+      ['Today', open.filter((x) => x.due === t), false],
+      ['Coming up', open.filter((x) => x.due && x.due > t).sort((a, b) => (a.due < b.due ? -1 : 1)), true],
+      ['No date', open.filter((x) => !x.due), false],
+    ]
+    const wrap = el('div', 'task-week task-from')
+    for (const [label, list, showDate] of groups) {
+      if (!list.length) continue
+      const g = el('section', 'task-day' + (label === 'Overdue' ? ' overdue' : label === 'Today' ? ' today' : ''))
+      g.appendChild(el('h3', 'task-day-h', label))
+      list.forEach((x) => g.appendChild(noteRow(x, { showDate })))
+      wrap.appendChild(g)
+    }
+    body.appendChild(wrap)
+  }
+
   // ---- drawing ----
   function draw() {
     const scroll = body.scrollTop
@@ -239,6 +345,7 @@ export function createTasksView(host, page, opts = {}) {
     const tree = taskTree(items)
     if (view === 'week') drawWeek(tree)
     else if (view === 'month') drawMonth(tree)
+    else if (view === 'board') drawBoard(tree)
     else drawList(tree)
     body.scrollTop = scroll
     if (pendingFocus) {
@@ -313,7 +420,7 @@ export function createTasksView(host, page, opts = {}) {
   }
 
   function row(n, depth, host) {
-    const r = el('div', 'task-row' + (n.done ? ' done' : '') + (n.children.length ? ' has-parts' : ''))
+    const r = el('div', 'task-row' + (n.done ? ' done' : '') + (n.doing ? ' doing' : '') + (n.children.length ? ' has-parts' : ''))
     r.dataset.id = n.id
     r.style.setProperty('--depth', depth)
     const folded = folds.has(n.id)
@@ -341,6 +448,7 @@ export function createTasksView(host, page, opts = {}) {
     })
     text.addEventListener('keydown', (e) => onKey(e, n, text))
     r.append(fold, check(n), text)
+    if (n.doing) r.appendChild(el('span', 'task-doing', 'Doing'))
     if (n.children.length) {
       const p = progress(n)
       const prog = el('span', 'task-prog')
@@ -366,6 +474,7 @@ export function createTasksView(host, page, opts = {}) {
           { label: 'Add a part', icon: 'plus', onClick: () => focusRow(create(n.id, null)) },
           { label: 'Add a task below', icon: 'plus', onClick: () => focusRow(create(node(n.id).get('parent'), n.id)) },
           { label: 'Set due date…', icon: 'calendar', onClick: () => r.querySelector('.task-due').click() },
+          ...(n.done ? [] : [{ label: n.doing ? 'Not in progress' : 'In progress', onClick: () => setColumn(n.id, n.doing ? 'todo' : 'doing') }]),
           ...(n.due ? [{ label: 'Clear due date', onClick: () => setDue(n.id, null) }] : []),
           'sep',
           { label: 'Move up', onClick: () => move(n.id, -1) },
@@ -446,6 +555,7 @@ export function createTasksView(host, page, opts = {}) {
     add.addEventListener('click', () => focusRow(create(null, open.length ? open[open.length - 1].id : null)))
     list.appendChild(add)
     body.appendChild(list)
+    drawFromNotes()
     if (done.length) {
       const isOpen = !!doneOpen[tabId]
       const h = el('button', 'task-done-h')
@@ -514,18 +624,22 @@ export function createTasksView(host, page, opts = {}) {
     const dow = (parseYmd(t).getDay() + 6) % 7 // Monday = 0
     const end = addDays(t, 6 - dow + 7) // the Sunday of next week
     const wrap = el('div', 'task-week')
-    const group = (label, entries, cls, showDate) => {
-      if (!entries.length) return
+    // tasks and dated checkboxes from notes, side by side
+    const entries = all
+      .map((f) => ({ due: f.node.due, done: f.node.done, draw: (showDate) => dueEntry(f, t, { showDate }) }))
+      .concat(noteItems.filter((x) => x.due && x.state !== '-').map((x) => ({ due: x.due, done: x.done, draw: (showDate) => noteRow(x, { showDate }) })))
+    const group = (label, list, cls, showDate) => {
+      if (!list.length) return
       const g = el('section', 'task-day' + (cls ? ' ' + cls : ''))
       g.appendChild(el('h3', 'task-day-h', label))
-      entries.forEach((f) => g.appendChild(dueEntry(f, t, { showDate })))
+      list.forEach((x) => g.appendChild(x.draw(showDate)))
       wrap.appendChild(g)
     }
-    group('Overdue', all.filter((f) => !f.node.done && f.node.due < t).sort((a, b) => (a.node.due < b.node.due ? -1 : 1)), 'overdue', true)
+    group('Overdue', entries.filter((x) => !x.done && x.due < t).sort((a, b) => (a.due < b.due ? -1 : 1)), 'overdue', true)
     for (let d = t; d <= end; d = addDays(d, 1)) {
       const dt = parseYmd(d)
       const label = (d === t ? 'Today · ' : d === addDays(t, 1) ? 'Tomorrow · ' : '') + `${DOW[(dt.getDay() + 6) % 7]} ${dt.getDate()} ${MONTHS[dt.getMonth()].slice(0, 3)}`
-      group(label, all.filter((f) => f.node.due === d), d === t ? 'today' : '')
+      group(label, entries.filter((x) => x.due === d), d === t ? 'today' : '')
     }
     if (!wrap.children.length) {
       const empty = el('div', 'tasks-empty')
@@ -543,6 +657,13 @@ export function createTasksView(host, page, opts = {}) {
       if (!byDay.has(f.node.due)) byDay.set(f.node.due, [])
       byDay.get(f.node.due).push(f)
     }
+    // dated checkboxes from notes ride along as { node, path, src }
+    for (const x of noteItems) {
+      if (!x.due || x.state === '-') continue
+      if (!byDay.has(x.due)) byDay.set(x.due, [])
+      byDay.get(x.due).push({ node: { id: 'note:' + x.id + ':' + x.index, text: withoutDate(x.text), done: x.done, due: x.due, children: [] }, path: [x.title || 'Note'], src: x })
+    }
+    const journal = opts.journal ? opts.journal.days() : new Map()
     const [y, mo] = month.split('-').map(Number)
     const first = new Date(y, mo - 1, 1)
     const start = addDays(ymd(first), -((first.getDay() + 6) % 7))
@@ -585,6 +706,17 @@ export function createTasksView(host, page, opts = {}) {
       if (d === t) cell.classList.add('today')
       if (d === pickedDay) cell.classList.add('picked')
       cell.appendChild(el('span', 'task-cell-n', String(parseYmd(d).getDate())))
+      if (journal.has(d)) {
+        const jd = el('button', 'task-journal')
+        jd.type = 'button'
+        jd.title = 'Journal note for this day'
+        jd.setAttribute('aria-label', jd.title)
+        jd.addEventListener('click', (e) => {
+          e.stopPropagation()
+          opts.journal.open(d)
+        })
+        cell.appendChild(jd)
+      }
       const list = byDay.get(d) || []
       const chips = el('div', 'task-chips')
       list.slice(0, 3).forEach((f) => {
@@ -598,7 +730,8 @@ export function createTasksView(host, page, opts = {}) {
           if (phone()) {
             pickedDay = d
             draw()
-          } else reveal(f.node.id)
+          } else if (f.src) opts.openSource?.(f.src)
+          else reveal(f.node.id)
         })
         chips.appendChild(c)
       })
@@ -607,7 +740,7 @@ export function createTasksView(host, page, opts = {}) {
         more.type = 'button'
         more.addEventListener('click', (e) => {
           e.stopPropagation()
-          ui.menu(more, list.map((f) => ({ label: f.node.text || 'Untitled', on: f.node.done, onClick: () => reveal(f.node.id) })))
+          ui.menu(more, list.map((f) => ({ label: f.node.text || 'Untitled', on: f.node.done, onClick: () => (f.src ? opts.openSource?.(f.src) : reveal(f.node.id)) })))
         })
         chips.appendChild(more)
       }
@@ -632,7 +765,7 @@ export function createTasksView(host, page, opts = {}) {
       const day = el('section', 'task-day')
       const dt = parseYmd(pickedDay)
       day.appendChild(el('h3', 'task-day-h', `${DOW[(dt.getDay() + 6) % 7]} ${dt.getDate()} ${MONTHS[dt.getMonth()]}`))
-      ;(byDay.get(pickedDay) || []).forEach((f) => day.appendChild(dueEntry(f, t)))
+      ;(byDay.get(pickedDay) || []).forEach((f) => day.appendChild(f.src ? noteRow(f.src, { showDate: false }) : dueEntry(f, t)))
       const add = el('button', 'task-add')
       add.type = 'button'
       add.append(icon('plus'), document.createTextNode('Add a task due this day'))
@@ -647,6 +780,116 @@ export function createTasksView(host, page, opts = {}) {
     }
   }
 
+  // ---- Board: to do / doing / done columns of the top-level tasks ----
+  function drawBoard(tree) {
+    const t = today()
+    const colOf = (n) => (n.done ? 'done' : n.doing ? 'doing' : 'todo')
+    const wrap = el('div', 'task-board')
+    for (const [col, label] of [['todo', 'To do'], ['doing', 'Doing'], ['done', 'Done']]) {
+      const cards = tree.filter((n) => colOf(n) === col)
+      const sec = el('section', 'task-col col-' + col)
+      sec.dataset.col = col
+      const head = el('h3', 'task-col-h')
+      head.append(document.createTextNode(label), el('span', 'task-col-n', String(cards.length)))
+      const list = el('div', 'task-col-list')
+      for (const n of cards) {
+        const c = el('div', 'task-card' + (n.done ? ' done' : ''))
+        c.dataset.id = n.id
+        c.draggable = true
+        c.tabIndex = 0
+        c.setAttribute('aria-label', (n.text || 'Untitled') + ', ' + label)
+        const name = el('div', 'task-card-text', n.text || 'Untitled')
+        c.appendChild(name)
+        const meta = el('div', 'task-card-meta')
+        if (n.children.length) {
+          const p = progress(n)
+          const bar = el('span', 'task-bar')
+          const fill = el('span', 'task-fill')
+          fill.style.width = (p.total ? (100 * p.done) / p.total : 0) + '%'
+          bar.appendChild(fill)
+          meta.append(bar, el('span', 'task-count', `${p.done}/${p.total}`))
+        }
+        if (n.due) {
+          const chip = el('span', 'task-due')
+          chip.dataset.state = n.done ? 'done' : dueState(n.due, t)
+          chip.textContent = dueLabel(n.due, t)
+          meta.appendChild(chip)
+        }
+        const more = el('button', 'task-more')
+        more.type = 'button'
+        more.title = 'Move or open'
+        more.setAttribute('aria-label', 'Move ' + (n.text || 'task'))
+        more.appendChild(icon('more'))
+        more.addEventListener('click', (e) => {
+          e.stopPropagation()
+          ui.menu(
+            more,
+            [
+              ...[['todo', 'To do'], ['doing', 'Doing'], ['done', 'Done']].filter(([k]) => k !== col).map(([k, l]) => ({ label: 'Move to ' + l, onClick: () => setColumn(n.id, k) })),
+              'sep',
+              { label: 'Show in the list', onClick: () => reveal(n.id) },
+            ],
+            { align: 'right' }
+          )
+        })
+        meta.appendChild(more)
+        c.appendChild(meta)
+        c.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/x-task', n.id)
+          e.dataTransfer.effectAllowed = 'move'
+          c.classList.add('dragging')
+        })
+        c.addEventListener('dragend', () => c.classList.remove('dragging'))
+        c.addEventListener('dblclick', () => reveal(n.id))
+        c.addEventListener('keydown', (e) => {
+          // keyboard: ← / → moves the card a column
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+          e.preventDefault()
+          const order = ['todo', 'doing', 'done']
+          const next = order[order.indexOf(col) + (e.key === 'ArrowRight' ? 1 : -1)]
+          if (next) {
+            pendingCard = n.id
+            setColumn(n.id, next)
+          }
+        })
+        list.appendChild(c)
+      }
+      const add = el('button', 'task-add')
+      add.type = 'button'
+      add.append(icon('plus'), document.createTextNode('Add a task'))
+      add.addEventListener('click', async () => {
+        const text = await ui.prompt('New task:', '', { title: label, okLabel: 'Add', maxLength: 300 })
+        if (!text || !text.trim()) return
+        const id = create(null, tree.length ? tree[tree.length - 1].id : null, { text: text.trim() })
+        if (col !== 'todo') setColumn(id, col)
+      })
+      list.appendChild(add)
+      sec.addEventListener('dragover', (e) => {
+        if (!Array.from(e.dataTransfer.types).includes('text/x-task')) return
+        e.preventDefault()
+        sec.classList.add('drop')
+      })
+      sec.addEventListener('dragleave', (e) => {
+        if (!sec.contains(e.relatedTarget)) sec.classList.remove('drop')
+      })
+      sec.addEventListener('drop', (e) => {
+        const id = e.dataTransfer.getData('text/x-task')
+        sec.classList.remove('drop')
+        if (!id) return
+        e.preventDefault()
+        setColumn(id, col)
+      })
+      sec.append(head, list)
+      wrap.appendChild(sec)
+    }
+    body.appendChild(wrap)
+    if (pendingCard) {
+      body.querySelector(`.task-card[data-id="${pendingCard}"]`)?.focus()
+      pendingCard = null
+    }
+  }
+  let pendingCard = null
+
   // ---- sync ----
   let raf = 0
   const schedule = () => {
@@ -657,6 +900,16 @@ export function createTasksView(host, page, opts = {}) {
     schedule()
   }
   items.observeDeep(onItems)
+  // checkboxes in notes: redraw only when the list of them actually changes
+  let noteTimer = 0
+  const onNotes = () => {
+    clearTimeout(noteTimer)
+    noteTimer = setTimeout(() => {
+      if (refreshNoteItems()) schedule()
+    }, 300)
+  }
+  notesMap.observeDeep(onNotes)
+  pagesMap.observeDeep(onNotes)
   // the due labels ("Today", "Tomorrow") move on at midnight
   let day = today()
   const tick = setInterval(() => {
@@ -677,6 +930,9 @@ export function createTasksView(host, page, opts = {}) {
     destroy() {
       cancelAnimationFrame(raf)
       clearInterval(tick)
+      clearTimeout(noteTimer)
+      notesMap.unobserveDeep(onNotes)
+      pagesMap.unobserveDeep(onNotes)
       items.unobserveDeep(onItems)
       titleText?.unobserve(syncTitle)
       root.remove()

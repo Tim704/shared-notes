@@ -2,7 +2,7 @@
 // that don't involve a caret: used by the server (migrations, REST API), the
 // mind map and the editor itself. Callers wrap these in a transaction.
 
-import { linesOf, fullLine, pickLine, genLineId, isList, subtreeEnds, MAX_IND } from './lines.js'
+import { linesOf, fullLine, pickLine, pickMarks, genLineId, isList, subtreeEnds, MAX_IND } from './lines.js'
 
 /** Make sure the body ends with '\n' so its last line can carry attributes. */
 export function ensureTerminator(ytext) {
@@ -22,15 +22,22 @@ export function setLineAttrs(ytext, i, patch) {
 }
 
 /**
- * Insert lines [{ text, attrs }] at character position `pos` (which must be a
- * line start). Each inserted line is terminated with its own '\n'.
+ * Insert lines [{ text, attrs, runs? }] at character position `pos` (which must
+ * be a line start). Each inserted line is terminated with its own '\n'. With
+ * `runs` ([{ text, marks }], as markdownToLines gives) the text keeps its marks.
  */
 export function insertLinesAt(ytext, pos, newLines) {
   let p = pos
   for (const nl of newLines) {
     const attrs = { ...(nl.attrs || {}) }
     if ((attrs.lt === 'todo' || attrs.lt === 'li') && !attrs.bid) attrs.bid = genLineId()
-    if (nl.text) {
+    if (nl.runs && nl.runs.length) {
+      for (const r of nl.runs) {
+        if (!r.text) continue
+        ytext.insert(p, r.text.replace(/\n/g, ' '), pickMarks(r.marks))
+        p += r.text.length
+      }
+    } else if (nl.text) {
       ytext.insert(p, nl.text, nl.marks || {})
       p += nl.text.length
     }
@@ -123,9 +130,7 @@ export function moveLines(ytext, from, to, after, indDelta = 0) {
     const parts = c.text.split('\n')
     for (let k = 0; k < parts.length; k++) {
       if (parts[k]) {
-        const marks = {}
-        for (const m of ['b', 'i', 'u', 's']) if (c.attrs[m]) marks[m] = true
-        ytext.insert(p, parts[k], marks)
+        ytext.insert(p, parts[k], pickMarks(c.attrs))
         p += parts[k].length
       }
       if (k < parts.length - 1) {

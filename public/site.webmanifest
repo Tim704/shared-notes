@@ -35,7 +35,26 @@
   ],
   "id": "/",
   "scope": "/",
+  "share_target": {
+    "action": "/share",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
   "shortcuts": [
+    {
+      "name": "Today",
+      "url": "/#today",
+      "icons": [
+        {
+          "src": "/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
     {
       "name": "New note",
       "url": "/#new",

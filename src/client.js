@@ -10,9 +10,14 @@ import { bindRichText } from './richbody.js'
 import { createDrawSurface } from './draw.js'
 import { getSettings, setSetting, onSettingChange } from './settings.js'
 import * as ui from './ui.js'
-import { searchText, snippetOf } from '../shared/serialise.js'
-import { markdownToLines } from '../shared/lines.js'
-import { replaceAllLines } from '../shared/lineops.js'
+import { snippetOf } from '../shared/serialise.js'
+import { markdownToLines, linesOf, embedOf, genLineId, HIGHLIGHTS } from '../shared/lines.js'
+import { replaceAllLines, ensureTerminator, insertLinesAt, appendLines } from '../shared/lineops.js'
+import { normTitle, namesOf, aliasesOf, parseTarget, followRename, rewriteLinks, nameTaken, backlinks, unlinkedMentions, linkMention, tagCounts, renameTag } from '../shared/links.js'
+import { parseQuery, noteFacts, matchFacts } from '../shared/search.js'
+import { openSwitcher, rank as rankItems } from './switcher.js'
+import { initHoverPreview } from './preview.js'
+import { importFiles } from './importer.js'
 import { uploadImages, openLightbox, pickImages } from './media.js'
 import { createFoldStore } from './folds.js'
 import * as backup from './backup.js'
@@ -28,6 +33,7 @@ import {
   genId,
   clamp,
   rafThrottle,
+  debounce,
   relTime,
   initials,
   PAPER,
@@ -351,6 +357,8 @@ provider.onStatus((connected) => {
 
 // ---- active tab (per-user) ----
 let activeTabId = null
+let navQuiet = 0 // > 0 while a popped history entry is being applied: push nothing (see navPush)
+let poppedAt = 0
 try {
   activeTabId = localStorage.getItem('notesActiveTab') || null
 } catch {
@@ -394,8 +402,11 @@ function activeTab() {
   const found = list.find((t) => t.id === activeTabId)
   return found || list.find((t) => !t.archived) || list[0]
 }
-function setActiveTab(id) {
+// opts.push === false: don't add a history entry (internal moves, Back itself)
+function setActiveTab(id, opts = {}) {
+  const changed = id !== activeTabId
   activeTabId = id
+  if (changed && opts.push !== false) navPush({})
   try {
     localStorage.setItem('notesActiveTab', id)
   } catch {
@@ -690,13 +701,15 @@ function renameTab(id, name) {
   const next = (name || '').trim().slice(0, 28)
   if (!next || next === t.name) return
   updateTab(id, { name: next })
+  // [[Old tab name]] links follow the tab (a note with that name would have won, so leave those)
+  if (normTitle(t.name) !== normTitle(next) && !nameTaken(doc, t.name) && !tabsList().some((x) => x.id !== id && normTitle(x.name) === normTitle(t.name))) rewriteLinks(doc, t.name, next)
 }
 
 function setTabArchived(id, archived) {
   updateTab(id, { archived: !!archived })
   if (archived && activeTabId === id) {
     const next = tabsList().find((t) => !t.archived && t.id !== id)
-    if (next) setActiveTab(next.id)
+    if (next) setActiveTab(next.id, { push: false })
   }
   ui.toast(archived ? 'Tab archived. Find it on the home page.' : 'Tab restored.')
 }
@@ -743,7 +756,7 @@ async function deleteTab(id) {
     if (i >= 0) yTabs.delete(i, 1)
   })
   const remaining = tabsList().filter((x) => !x.archived)
-  if (remaining.length) setActiveTab(remaining[Math.max(0, Math.min(i, remaining.length - 1))].id)
+  if (remaining.length) setActiveTab(remaining[Math.max(0, Math.min(i, remaining.length - 1))].id, { push: false })
 }
 
 function moveTab(fromId, toId) {
@@ -988,6 +1001,18 @@ function openTabMenu(anchor, t) {
         ui.toast('Canvas: drag the background to pan, Ctrl/⌘+wheel or pinch to zoom. Shift+drag selects.', { ms: 7000 })
       })
     if (t.view !== 'canvas') item('⇲  Bring every note into view', () => bringAllIntoView())
+    item('＋  New note from template…', () => {
+      if (activeTabId !== t.id) setActiveTab(t.id)
+      chooseTemplate((tpl) => newFromTemplate(tpl, { tabId: t.id }))
+    })
+  }
+  if (t.kind === 'doc') {
+    const page = getPage(t.id, t.name)
+    item(page.get('share') ? '🔗  Shared link…' : '🔗  Share by link…', () => openShareDialog({ page }))
+    item('⎙  Print / save as PDF', () => {
+      if (activeTabId !== t.id) setActiveTab(t.id)
+      setTimeout(printDoc, 60)
+    })
   }
   item(t.archived ? 'Unarchive' : 'Archive', () => setTabArchived(t.id, !t.archived))
   const excluded = backup.isExcluded(t.id)
@@ -1066,15 +1091,19 @@ function stamp(note) {
   })
 }
 
-function createNote(color) {
+function createNote(color, opts = {}) {
   const id = genId()
   const active = activeTab()
-  const pos = nextNotePos()
+  const pos = opts.at || nextNotePos()
   const z = maxZ() + 1
   doc.transact(() => {
     const n = new Y.Map()
-    n.set('title', new Y.Text())
-    n.set('body', new Y.Text())
+    const title = new Y.Text()
+    if (opts.title) title.insert(0, opts.title)
+    n.set('title', title)
+    const body = new Y.Text()
+    if (opts.lines && opts.lines.length) insertLinesAt(body, 0, opts.lines)
+    n.set('body', body)
     n.set('color', color || PAPER[0])
     n.set('created', Date.now())
     n.set('tabId', active ? active.id : null)
@@ -1275,11 +1304,6 @@ function setNoteLayout(note, layout) {
   })
 }
 
-// Searchable text for a note (title + body + second page, or a legacy checklist's items).
-function noteHay(note) {
-  return searchText(note).toLowerCase()
-}
-
 function belongsToActive(note, active) {
   if (isHidden(note)) return false
   if (!active) return true
@@ -1324,23 +1348,63 @@ function setAllCollapsed(on) {
   renderTabs()
 }
 
+// ---- browser history ------------------------------------------------------
+// Tab switches, link jumps and full screen each push an entry, so browser Back
+// (and the phone's back gesture) retraces your steps. Every entry we write is
+// { nav: 1, tab, note?, full? }; popstate puts the app back the way it was.
+const here = () => location.pathname + location.search
+function navState(extra = {}) {
+  return { nav: 1, tab: activeTab()?.id || null, ...extra }
+}
+function navPush(extra, url) {
+  if (navQuiet) return false
+  try {
+    history.pushState(navState(extra), '', url == null ? here() : url)
+    return true
+  } catch {
+    return false
+  }
+}
+function navReplace(extra, url) {
+  try {
+    history.replaceState(navState(extra), '', url == null ? here() : url)
+  } catch {
+    /* ignore */
+  }
+}
+window.addEventListener('popstate', () => {
+  const st = history.state || {}
+  // a typed or clicked #fragment arrives as a popstate without our state: hashchange follows it
+  if (!st.nav) return
+  poppedAt = Date.now()
+  navQuiet++
+  try {
+    if (st.tab && st.tab !== activeTabId && tabsList().some((t) => t.id === st.tab)) setActiveTab(st.tab)
+    if (st.full) {
+      if (!full || full.id !== st.full) {
+        if (!openFullscreen(st.full, { fromHash: true, focus: false, anyTab: true }) && full) closeFullscreenNow()
+      }
+    } else if (full) closeFullscreenNow()
+    if (st.note && !st.full) goToNote(st.note, { keepHash: true, unarchive: false })
+  } finally {
+    navQuiet--
+  }
+})
+
 // ---- navigation to a note (links, home page, toasts) ----
+// opts.push: a new history entry (links, search results); otherwise the
+// address bar just shows #note=<id>.
 function goToNote(id, opts = {}) {
   const n = yNotes.get(id)
   if (!n) return false
   const tid = n.get('tabId')
-  if (tid && activeTabId !== tid) setActiveTab(tid)
+  if (tid && activeTabId !== tid) setActiveTab(tid, { push: false })
   closeHome()
   if (n.get('deleted')) restoreNote(id)
   if (n.get('archived') && opts.unarchive !== false) setNoteArchived(id, false)
   if (collapsed.has(id)) setCollapsed(id, false)
-  if (!opts.keepHash) {
-    try {
-      history.replaceState(null, '', '#note=' + id)
-    } catch {
-      /* ignore */
-    }
-  }
+  if (opts.push) navPush({ note: id }, '#note=' + id)
+  else if (!opts.keepHash) navReplace({ note: id }, '#note=' + id)
   // the card may not exist until reconcile has run
   const tryFlash = (left) => {
     const c = cards.get(id)
@@ -1349,6 +1413,7 @@ function goToNote(id, opts = {}) {
       else c.el.scrollIntoView({ block: 'center', behavior: 'smooth' })
       c.el.classList.add('flash')
       setTimeout(() => c.el.classList.remove('flash'), 1400)
+      if (opts.line) c.body?.editors?.some((r) => r.revealAt(opts.line))
       return
     }
     if (left > 0) setTimeout(() => tryFlash(left - 1), 60)
@@ -1357,54 +1422,558 @@ function goToNote(id, opts = {}) {
   return true
 }
 
-// [[Title]] → the note or tab with that title (notes first, current tab first)
-function resolveLink(label) {
-  const want = label.trim().toLowerCase()
+// The note (or tab) a [[link]] names: by title or alias, any case. Live notes
+// first, the current tab's first; then tabs by name.
+function findNamed(name, { includeHidden = false } = {}) {
+  const want = normTitle(name)
   if (!want) return null
   let best = null
   yNotes.forEach((n, id) => {
-    if (n.get('deleted')) return
-    if (n.get('title').toString().trim().toLowerCase() !== want) return
-    if (!best || (n.get('tabId') === activeTabId && best.tabId !== activeTabId)) best = { noteId: id, tabId: n.get('tabId') }
+    if (n.get('deleted') && !includeHidden) return
+    if (!namesOf(n).some((x) => normTitle(x) === want)) return
+    const score = (n.get('deleted') ? 0 : 2) + (n.get('archived') ? 0 : 1) + (n.get('tabId') === activeTabId ? 4 : 0) + (normTitle(n.get('title').toString()) === want ? 8 : 0)
+    if (!best || score > best.score) best = { noteId: id, tabId: n.get('tabId'), score }
   })
   if (best) return best
-  const t = tabsList().find((x) => x.name.trim().toLowerCase() === want)
+  const t = tabsList().find((x) => normTitle(x.name) === want)
   return t ? { tabId: t.id } : null
+}
+
+// [[Title]], [[Title#Heading]], [[Title^lineId]] → { noteId?, tabId, line? }
+function resolveLink(inner) {
+  const tg = parseTarget(inner)
+  const target = findNamed(tg.title)
+  if (!target) return null
+  const line = tg.block ? { bid: tg.block } : tg.heading ? { heading: tg.heading } : null
+  return { ...target, line, title: tg.title }
 }
 
 function followLink(href) {
   if (!href) return
   if (href[0] === '[') {
-    const target = resolveLink(href.slice(2, -2))
+    const inner = href.slice(2, -2)
+    const target = resolveLink(inner)
     if (!target) {
-      ui.toast('No note or tab called ' + href)
+      const title = parseTarget(inner).title
+      ui.toast('No note called “' + title + '” yet', { action: 'Create it', ms: 8000, onAction: () => createNoteNamed(title, { open: true }) })
       return
     }
     if (target.noteId) {
-      goToNote(target.noteId)
-      if (full) openFullscreen(target.noteId) // following a link from a full-screen note opens the next one full screen
+      if (full) {
+        goToNote(target.noteId, { keepHash: true })
+        openFullscreen(target.noteId, { line: target.line }) // following a link from a full-screen note opens the next one full screen
+      } else goToNote(target.noteId, { push: true, line: target.line })
     } else {
       if (full) closeFullscreen()
       setActiveTab(target.tabId)
+      if (target.line) setTimeout(() => pageState?.rich?.revealAt(target.line), 80)
     }
     return
   }
-  window.open(href, '_blank', 'noopener')
+  // only web and mail addresses open: never javascript: or data: from a shared note
+  if (/^(https?:|mailto:)/i.test(href)) window.open(href, '_blank', 'noopener')
 }
 
-function linkCandidates() {
-  const out = []
+// A new note called `title` in the current NotePad tab (or the first one), with
+// optional lines; opened full screen when asked.
+function createNoteNamed(title, { tabId, lines, open = false, color } = {}) {
+  let t = tabId ? tabsList().find((x) => x.id === tabId) : activeTab()
+  if (!isNotesTab(t) || t.archived) t = tabsList().find((x) => isNotesTab(x) && !x.archived)
+  if (!t) return null
+  if (activeTabId !== t.id) setActiveTab(t.id, { push: false })
+  const id = createNote(color || PAPER[Math.floor(Math.random() * 4)], { title, lines })
+  if (open) setTimeout(() => openFullscreen(id), 30)
+  return id
+}
+
+// what the [[ picker offers for what has been typed after "[["
+function linkCandidates(q = '') {
+  const tg = parseTarget(q)
+  const hasHead = q.includes('#')
+  const hasBlock = q.includes('^')
+  if (hasHead || hasBlock) {
+    const target = findNamed(tg.title)
+    if (!target) return []
+    const bodies = target.noteId
+      ? [yNotes.get(target.noteId).get('body'), yNotes.get(target.noteId).get('body2')].filter(Boolean)
+      : [yPages.get(target.tabId)?.get('body')].filter(Boolean)
+    const title = tg.title
+    const want = (hasBlock ? q.slice(q.indexOf('^') + 1) : q.slice(q.indexOf('#') + 1)).trim().toLowerCase()
+    const out = []
+    for (const yt of bodies) {
+      linesOf(yt).forEach((L, index) => {
+        if (!L.text.trim() || embedOf(L.text)) return
+        if (hasHead) {
+          if (L.attrs.lt !== 'h' || !L.text.toLowerCase().includes(want)) return
+          out.push({ label: title + '#' + L.text.trim(), display: L.text.trim(), hint: 'heading', icon: 'heading' })
+        } else {
+          if (want && !L.text.toLowerCase().includes(want) && L.attrs.bid !== want) return
+          out.push({
+            label: title + '^' + (L.attrs.bid || '…'),
+            display: L.text.trim().slice(0, 60),
+            hint: 'line',
+            icon: 'text',
+            onPick: () => {
+              const bid = ensureBid(yt, index)
+              return bid ? title + '^' + bid : null
+            },
+          })
+        }
+      })
+    }
+    return out.slice(0, 12)
+  }
+  const items = []
   const tabsById = new Map(tabsList().map((t) => [t.id, t]))
   yNotes.forEach((n) => {
     if (isHidden(n)) return
-    const title = n.get('title').toString().trim()
-    if (!title) return
     const t = tabsById.get(n.get('tabId'))
-    out.push({ label: title, hint: t ? t.name : '' })
+    for (const [i, name] of namesOf(n).entries()) items.push({ label: name, hint: i ? 'alias of ' + n.get('title').toString().trim() : t ? t.name : '', icon: 'note' })
   })
-  for (const t of tabsById.values()) if (t.name.trim()) out.push({ label: t.name.trim(), hint: 'tab' })
+  for (const t of tabsById.values()) if (t.name.trim()) items.push({ label: t.name.trim(), hint: 'tab', icon: kindInfo(t.kind).icon, weight: 1 })
+  return rankItems(items, q)
+}
+
+// give line `index` of a body an id (for [[Note^id]]) and return it
+function ensureBid(ytext, index) {
+  const L = linesOf(ytext)[index]
+  if (!L) return null
+  if (L.attrs.bid) return L.attrs.bid
+  const bid = genLineId()
+  doc.transact(() => {
+    ensureTerminator(ytext)
+    const D = linesOf(ytext)[index]
+    ytext.format(D.start + D.len, 1, { bid })
+  })
+  return bid
+}
+
+// ---- renames keep links working ---------------------------------------------
+// A title edit is committed when the field loses focus: if the note had a name
+// before, every [[old name]] on the board (trash and archive too) is rewritten.
+function watchTitle(input, getNote, id) {
+  let before = null
+  input.addEventListener('focus', () => {
+    before = getNote().get('title').toString()
+  })
+  const commit = () => {
+    const note = getNote()
+    if (before == null || !note) return
+    const now = note.get('title').toString()
+    const was = before
+    before = input === document.activeElement ? now : null
+    if (normTitle(was) === normTitle(now) || !was.trim() || !now.trim()) return
+    const n = followRename(doc, id, was, now)
+    if (n) ui.toast(`Updated ${n} link${n === 1 ? '' : 's'} to “${now.trim()}”`)
+  }
+  input.addEventListener('blur', commit)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') commit()
+  })
+}
+
+// ---- "Linked from" and unlinked mentions --------------------------------------
+// The links pointing at a note (by title or alias), each with its line, and the
+// places that name it in plain text, each with a one-click "Link".
+function bodyOf(src) {
+  if (src.kind === 'page') return yPages.get(src.id)?.get('body') || null
+  return yNotes.get(src.id)?.get(src.field || 'body') || null
+}
+function openSource(src) {
+  const line = { index: src.index }
+  if (src.kind === 'page') {
+    if (full) closeFullscreen()
+    setActiveTab(src.id)
+    setTimeout(() => pageState?.rich?.revealAt(line), 80)
+    return
+  }
+  if (full || phoneMode()) {
+    goToNote(src.id, { keepHash: true })
+    openFullscreen(src.id, { line })
+  } else goToNote(src.id, { push: true, line })
+}
+function linksSection(names, selfId, { compact = false } = {}) {
+  const wrap = document.createElement('div')
+  wrap.className = 'links-sec' + (compact ? ' compact' : '')
+  const back = backlinks(doc, names, { excludeId: selfId })
+  const mentions = unlinkedMentions(doc, names, { excludeId: selfId })
+  const head = (label, n) => {
+    const h = document.createElement('div')
+    h.className = 'links-h'
+    h.textContent = label + (n ? ' · ' + n : '')
+    wrap.appendChild(h)
+  }
+  const row = (src, text, extra) => {
+    const r = document.createElement('div')
+    r.className = 'links-row'
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'links-go'
+    const t = document.createElement('span')
+    t.className = 'links-title'
+    t.textContent = src.title || (src.kind === 'page' ? 'Document' : 'Untitled')
+    const l = document.createElement('span')
+    l.className = 'links-line'
+    l.textContent = text.length > 140 ? text.slice(0, 139) + '…' : text
+    b.append(t, l)
+    b.addEventListener('click', () => {
+      closeAllPopovers()
+      openSource(src)
+    })
+    r.appendChild(b)
+    if (extra) r.appendChild(extra)
+    wrap.appendChild(r)
+  }
+  head('Linked from', back.length)
+  if (!back.length) {
+    const e = document.createElement('div')
+    e.className = 'links-empty'
+    e.textContent = names[0] ? 'No other note links here yet. Type [[' + names[0] + ']] in one.' : 'Give this note a title to link to it.'
+    wrap.appendChild(e)
+  }
+  for (const b of back) row(b, b.line)
+  if (mentions.length) {
+    head('Unlinked mentions', mentions.length)
+    for (const m of mentions.slice(0, 30)) {
+      const link = document.createElement('button')
+      link.type = 'button'
+      link.className = 'pop-btn links-link'
+      link.textContent = 'Link'
+      link.title = 'Turn “' + m.name + '” into [[' + names[0] + ']]'
+      link.addEventListener('click', (e) => {
+        e.stopPropagation()
+        const yt = bodyOf(m)
+        if (!yt || yt.toString().slice(m.start, m.start + m.len) !== m.name) return ui.toast('That text has changed; try again.')
+        linkMention(yt, m.start, m.len, names[0])
+        wrap.replaceWith(linksSection(names, selfId, { compact }))
+      })
+      row(m, m.line, link)
+    }
+  }
+  return wrap
+}
+
+// ---- aliases: other names a [[link]] can use ----------------------------------
+function setAliases(note, str) {
+  const seen = new Set([normTitle(note.get('title').toString())])
+  const list = []
+  for (const raw of String(str || '').split(',')) {
+    const a = raw.replace(/[[\]]/g, '').trim().slice(0, 80)
+    if (!a || seen.has(normTitle(a))) continue
+    seen.add(normTitle(a))
+    list.push(a)
+  }
+  const cur = aliasesOf(note)
+  if (cur.join('\n') === list.slice(0, 10).join('\n')) return
+  doc.transact(() => {
+    if (list.length) note.set('aliases', list.slice(0, 10))
+    else note.delete('aliases')
+  })
+}
+
+// ---- quick switcher (Ctrl/Cmd+K) ------------------------------------------------
+function switcherItems() {
+  const items = []
+  const tabsById = new Map(tabsList().map((t) => [t.id, t]))
+  yOrder.toArray().forEach((id) => {
+    const n = yNotes.get(id)
+    if (!n || n.get('deleted')) return
+    const t = tabsById.get(n.get('tabId'))
+    const title = n.get('title').toString().trim()
+    const names = aliasesOf(n)
+    items.push({
+      kind: 'note',
+      id,
+      label: title || snippetOf(n, 50) || 'Untitled',
+      names,
+      hint: (t ? t.name : '') + (n.get('archived') ? ' · archived' : '') + (names.length ? ' · aka ' + names.join(', ') : ''),
+      icon: n.get('kind') === 'image' ? 'image' : 'note',
+      weight: (n.get('archived') ? 2 : 0) + (title ? 0 : 1),
+    })
+  })
+  for (const t of tabsById.values()) items.push({ kind: 'tab', id: t.id, label: t.name || 'Untitled tab', hint: kindInfo(t.kind).label + (t.archived ? ' · archived' : ''), icon: t.kind === 'notes' ? 'folder' : kindInfo(t.kind).icon, weight: 1 })
+  items.push({ kind: 'today', label: 'Today’s journal', names: ['today', 'daily', 'journal', ymd(new Date())], hint: 'daily note', icon: 'calendar', weight: 3 })
+  return items
+}
+function openQuickSwitcher() {
+  closeMenus()
+  closeAllPopovers()
+  openSwitcher({
+    items: switcherItems,
+    onPick: (it, ev) => {
+      if (it.kind === 'tab') {
+        if (full) closeFullscreen()
+        closeHome()
+        setActiveTab(it.id)
+      } else if (it.kind === 'today') openToday()
+      else if (full || ev.shiftKey || phoneMode()) {
+        goToNote(it.id, { keepHash: true })
+        openFullscreen(it.id)
+      } else goToNote(it.id, { push: true })
+    },
+    onCreate: (title) => createNoteNamed(title, { open: true }),
+  })
+}
+document.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'k' || e.defaultPrevented) return
+  e.preventDefault()
+  openQuickSwitcher()
+})
+
+// ---- templates -------------------------------------------------------------------
+// Every note in a NotePad tab called "Templates" is a template. Using one copies
+// its title, colour and text (formatting and all), filling in {{date}},
+// {{time}}, {{title}} and {{me}}. No scripting.
+const isTemplatesTab = (t) => isNotesTab(t) && normTitle(t.name) === 'templates'
+function templateNotes() {
+  const tab = tabsList().find(isTemplatesTab)
+  if (!tab) return []
+  return yOrder
+    .toArray()
+    .map((id) => ({ id, n: yNotes.get(id) }))
+    .filter(({ n }) => n && n.get('tabId') === tab.id && !isHidden(n) && (n.get('kind') || 'note') === 'note')
+}
+const pad2 = (v) => String(v).padStart(2, '0')
+function templateVars(title) {
+  const d = new Date()
+  return { date: ymd(d), time: pad2(d.getHours()) + ':' + pad2(d.getMinutes()), title: title || '', me: me.name || '' }
+}
+const fillVars = (str, vars) => String(str || '').replace(/\{\{\s*(date|time|title|me)\s*\}\}/gi, (m, k) => vars[k.toLowerCase()] ?? m)
+// a template's body as lines to insert, placeholders filled
+function templateLines(n, vars) {
+  const v = { ...templateVars(vars.title), ...vars }
+  return linesOf(n.get('body')).map((L) => {
+    const attrs = { ...L.attrs }
+    delete attrs.bid
+    return { text: fillVars(L.text, v), attrs, runs: L.runs.map((r) => ({ text: fillVars(r.text, v), marks: r.marks })) }
+  })
+}
+async function chooseTemplate(cb) {
+  const list = templateNotes()
+  if (!list.length) {
+    const ok = await ui.confirm('Notes in a NotePad tab called “Templates” become templates. {{date}}, {{time}}, {{title}} and {{me}} are filled in when one is used.', {
+      title: 'No templates yet',
+      okLabel: 'Make a Templates tab',
+    })
+    if (ok) setActiveTab(ensureTemplatesTab())
+    return
+  }
+  openSwitcher({
+    placeholder: 'Pick a template…',
+    items: () => list.map(({ id, n }) => ({ kind: 'template', id, n, label: n.get('title').toString().trim() || 'Untitled template', hint: snippetOf(n, 40), icon: 'note' })),
+    onPick: (it) => cb(it.n),
+  })
+}
+// the Templates tab, made with a sample daily template the first time
+function ensureTemplatesTab() {
+  const have = tabsList().find(isTemplatesTab)
+  if (have) return have.id
+  const id = genId()
+  doc.transact(() => yTabs.push([makeTabMap({ id, name: 'Templates', kind: 'notes' })]))
+  setActiveTab(id, { push: false })
+  createNote(PAPER[1], {
+    title: 'Daily',
+    lines: markdownToLines('# {{date}}\n- [ ] \n\nNotes'),
+  })
+  return id
+}
+function newFromTemplate(n, { title, tabId, open = true } = {}) {
+  // from the Templates tab itself, the copy goes to the first other NotePad
+  if (!tabId && isTemplatesTab(activeTab())) tabId = tabsList().find((t) => isNotesTab(t) && !t.archived && !isTemplatesTab(t))?.id
+  const vars = templateVars(title)
+  const name = title || fillVars(n.get('title').toString(), vars)
+  vars.title = name
+  return createNoteNamed(name, { tabId, lines: templateLines(n, vars), color: n.get('color'), open })
+}
+
+// ---- daily notes ------------------------------------------------------------------
+// "Today" opens the note titled 2026-10-28 in a NotePad tab called "Journal"
+// (made when missing), started from the template called "Daily" if there is one.
+const isJournalTab = (t) => isNotesTab(t) && normTitle(t.name) === 'journal'
+function journalNotes() {
+  const tab = tabsList().find(isJournalTab)
+  const out = new Map() // day -> id
+  if (!tab) return out
+  yNotes.forEach((n, id) => {
+    if (n.get('tabId') !== tab.id || n.get('deleted')) return
+    const t = n.get('title').toString().trim()
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t) && !out.has(t)) out.set(t, id)
+  })
   return out
 }
+function openDay(day) {
+  let tab = tabsList().find(isJournalTab)
+  if (!tab) {
+    const id = genId()
+    doc.transact(() => yTabs.push([makeTabMap({ id, name: 'Journal', kind: 'notes', icon: 'i:calendar' })]))
+    tab = tabsList().find((t) => t.id === id)
+  }
+  if (tab.archived) updateTab(tab.id, { archived: false })
+  const have = journalNotes().get(day)
+  if (have) {
+    const n = yNotes.get(have)
+    if (n.get('archived')) setNoteArchived(have, false)
+    goToNote(have, { keepHash: true })
+    openFullscreen(have)
+    return have
+  }
+  const tpl = templateNotes().find(({ n }) => normTitle(n.get('title').toString()) === 'daily')
+  if (tpl) return newFromTemplate(tpl.n, { title: day, tabId: tab.id })
+  return createNoteNamed(day, { tabId: tab.id, open: true })
+}
+const openToday = () => openDay(ymd(new Date()))
+
+// ---- extract a selection / merge notes -----------------------------------------
+async function extractSelection(card) {
+  const rich = card.activeRich || card.body?.rich
+  const sel = rich && rich.selectionLines ? rich.selectionLines() : null
+  if (!sel || !sel.lines.some((l) => l.text.trim())) return ui.toast('Select the text to move first.')
+  const first = sel.lines.find((l) => l.text.trim())
+  const suggested = first.text.trim().replace(/[[\]]/g, '').slice(0, 80)
+  const typed = await ui.prompt('Title for the new note:', suggested, { title: 'Move to a new note', okLabel: 'Move', maxLength: 120 })
+  if (typed == null) return
+  const name = typed.trim().replace(/[[\]]/g, '') || suggested
+  let lines = sel.lines
+  if (lines.length > 1 && first.text.trim() === name) lines = lines.filter((l) => l !== first)
+  const src = card.note
+  const at = { x: Math.round((Number(src.get('x')) || 0) + (Number(src.get('w')) || W_DEFAULT) + 24), y: Math.round(Number(src.get('y')) || 0) }
+  const id = createNote(src.get('color') || PAPER[0], { title: name, lines, at })
+  rich.replaceSpan(sel.start, sel.end, '[[' + name + ']]')
+  ui.toast('Moved to “' + name + '”', { action: 'Open', onAction: () => (full ? openFullscreen(id) : goToNote(id, { push: true })) })
+  return id
+}
+
+function mergeNoteInto(srcId) {
+  const src = yNotes.get(srcId)
+  if (!src) return
+  const tabsById = new Map(tabsList().map((t) => [t.id, t]))
+  openSwitcher({
+    placeholder: 'Merge “' + (src.get('title').toString().trim() || 'Untitled') + '” into…',
+    items: () =>
+      yOrder
+        .toArray()
+        .filter((id) => id !== srcId && yNotes.get(id) && !isHidden(yNotes.get(id)) && (yNotes.get(id).get('kind') || 'note') !== 'todo')
+        .map((id) => ({ id, label: yNotes.get(id).get('title').toString().trim() || snippetOf(yNotes.get(id), 40) || 'Untitled', hint: tabsById.get(yNotes.get(id).get('tabId'))?.name || '', icon: 'note' })),
+    onPick: (it) => mergeNotes(srcId, it.id),
+  })
+}
+function mergeNotes(srcId, dstId) {
+  const src = yNotes.get(srcId)
+  const dst = yNotes.get(dstId)
+  if (!src || !dst) return
+  const srcTitle = src.get('title').toString().trim()
+  const dstTitle = dst.get('title').toString().trim()
+  const copy = (yt) => (yt ? linesOf(yt).map((L) => ({ text: L.text, attrs: { ...L.attrs }, runs: L.runs })) : [])
+  const add = []
+  if (srcTitle) add.push({ text: srcTitle, attrs: { lt: 'h' } })
+  add.push(...copy(src.get('body')), ...(src.get('layout') === 'book' ? copy(src.get('body2')) : []))
+  const body = dst.get('body')
+  doc.transact(() => {
+    appendLines(body, add.filter((l, i, a) => l.text || l.attrs.lt || i < a.length - 1))
+    src.set('deleted', Date.now())
+    dst.set('lastEditedAt', Date.now())
+    dst.set('lastEditedBy', { id: me.id, name: me.name })
+  })
+  // links to the merged note now lead to the note it went into
+  if (srcTitle && dstTitle) followRename(doc, srcId, srcTitle, dstTitle)
+  if (full && full.id === srcId) closeFullscreenNow()
+  ui.toast('Merged into “' + (dstTitle || 'Untitled') + '”', { action: 'Open', onAction: () => goToNote(dstId, { push: true }) })
+}
+
+// ---- print / PDF --------------------------------------------------------------------
+// Print one note (opened large) or a document tab; the browser can save it as a PDF.
+function printWith(cls) {
+  document.body.classList.add(cls)
+  const done = () => {
+    document.body.classList.remove(cls)
+    window.removeEventListener('afterprint', done)
+  }
+  window.addEventListener('afterprint', done)
+  setTimeout(() => {
+    window.print()
+    setTimeout(done, 500) // browsers without afterprint
+  }, 120)
+}
+function printNote(id) {
+  if (!full || full.id !== id) {
+    goToNote(id, { keepHash: true })
+    openFullscreen(id, { focus: false })
+  }
+  printWith('print-note')
+}
+const printDoc = () => printWith('print-doc')
+
+// ---- share one note (or document) by link -------------------------------------------
+// A random token on the note serves a read-only copy at /s/<token>, past the
+// password for that note only. Stop sharing deletes the token: the link dies.
+function newShareToken() {
+  const b = new Uint8Array(18)
+  crypto.getRandomValues(b)
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+async function openShareDialog({ note, page }) {
+  const map = note || page
+  if (!map) return
+  let token = map.get('share')
+  if (!token) {
+    const ok = await ui.confirm('Anyone with the link can read this ' + (note ? 'note' : 'document') + ' (but not edit it, or see anything else on the board). You can stop sharing at any time.', {
+      title: 'Share by link',
+      okLabel: 'Create link',
+    })
+    if (!ok) return
+    token = newShareToken()
+    doc.transact(() => map.set('share', token))
+  }
+  const url = location.origin + '/s/' + token
+  const v = await ui.dialog({
+    title: 'Shared by link',
+    message: 'Read-only, and always shows the latest version.',
+    input: { value: url },
+    buttons: [
+      { label: 'Stop sharing', value: 'stop', danger: true },
+      { label: 'Close', value: null },
+      { label: 'Copy link', value: true, primary: true },
+    ],
+  })
+  if (v === 'stop') {
+    doc.transact(() => map.delete('share'))
+    ui.toast('Link turned off')
+  } else if (typeof v === 'string') {
+    try {
+      await navigator.clipboard.writeText(url)
+      ui.toast('Link copied')
+    } catch {
+      ui.toast('Copy the link from the box')
+    }
+  }
+}
+
+// ---- hover preview of a [[link]] (desktop) ---------------------------------------
+initHoverPreview({
+  describe(href) {
+    if (!href || href[0] !== '[') return null
+    const target = resolveLink(href.slice(2, -2))
+    if (!target) return { title: parseTarget(href.slice(2, -2)).title, hint: 'No such note yet: click to create it', lines: [], empty: ' ' }
+    const lineInfo = (L) => ({ text: (L.attrs.lt === 'todo' ? (L.attrs.done ? '☑ ' : '☐ ') : L.attrs.lt === 'li' ? '• ' : '') + (embedOf(L.text) ? (embedOf(L.text).kind === 'image' ? '🖼 picture' : '▶ video') : L.text), cls: L.attrs.lt === 'h' ? 'lp-h' : '' })
+    const pick = (yt) => {
+      let ls = linesOf(yt).filter((L) => L.text.trim() || L.attrs.lt === 'todo')
+      if (target.line) {
+        const all = linesOf(yt)
+        const i = all.findIndex((L) => (target.line.bid ? L.attrs.bid === target.line.bid : L.attrs.lt === 'h' && normTitle(L.text) === normTitle(target.line.heading)))
+        if (i >= 0) ls = all.slice(i).filter((L) => L.text.trim())
+      }
+      return ls.slice(0, 12).map(lineInfo)
+    }
+    if (target.noteId) {
+      const n = yNotes.get(target.noteId)
+      const t = tabsList().find((x) => x.id === n.get('tabId'))
+      return { title: n.get('title').toString().trim() || 'Untitled', hint: (t ? t.name : '') + (target.line ? ' · ' + (target.line.heading || 'a line') : ''), lines: pick(n.get('body')), color: renderedPaper(n.get('color') || PAPER[0]), ink: inkFor(renderedPaper(n.get('color') || PAPER[0])) }
+    }
+    const t = tabsList().find((x) => x.id === target.tabId)
+    const page = yPages.get(target.tabId)
+    return { title: t ? t.name : 'Tab', hint: kindInfo(t?.kind).label + ' tab', lines: page && page.get('body') && t?.kind === 'doc' ? pick(page.get('body')) : [], empty: 'Opens the tab.' }
+  },
+})
 
 // ---- card construction ----
 const cards = new Map() // id -> { ... }
@@ -1419,6 +1988,7 @@ function editorOpts(note, extra) {
     onLink: followLink,
     linkCandidates,
     arrows: () => getSettings().arrows,
+    dates: () => getSettings().dates !== false,
     spellcheck: () => getSettings().spellcheck,
     folds,
     reveal: () => !!search.value.trim(), // searching shows what is folded
@@ -1428,6 +1998,34 @@ function editorOpts(note, extra) {
       const rich = extra.getRich && extra.getRich()
       if (urls.length && rich) rich.insertMedia(urls)
     },
+    onTag: (tag) => openHome('tag:' + tag),
+    askLink: async (current) => {
+      const v = await ui.dialog({
+        title: current ? 'Edit link' : 'Add a link',
+        input: { value: current || '', placeholder: 'https://…' },
+        buttons: [{ label: 'Cancel', value: null }, ...(current ? [{ label: 'Remove link', value: '' }] : []), { label: current ? 'Save' : 'Link', value: true, primary: true }],
+      })
+      return typeof v === 'string' ? v : null
+    },
+    unfurl: (url) =>
+      fetch('/api/unfurl?url=' + encodeURIComponent(url))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => (d && d.title) || null)
+        .catch(() => null),
+    slashExtras: () => [
+      {
+        id: 'picture',
+        label: 'Picture',
+        icon: 'image',
+        keys: 'image photo upload',
+        run: async (rich) => {
+          const files = await pickImages()
+          const urls = files.length ? await uploadImages(files) : []
+          if (urls.length) rich.insertMedia(urls)
+        },
+      },
+      { id: 'template', label: 'Template…', icon: 'note', keys: 'snippet insert', run: (rich) => chooseTemplate((tpl) => rich.insertLines(templateLines(tpl, {}))) },
+    ],
     ...extra,
   }
 }
@@ -1976,12 +2574,31 @@ function buildFmtBar(getRich) {
         })),
         'sep',
         { icon: 'H', label: 'Heading', hint: '# then space', on: state.lt === 'h', onClick: () => rich.toggleHeading() },
-        { icon: '¶', label: 'Plain text', onClick: () => (state.lt === 'h' ? rich.toggleHeading() : state.lt === 'todo' ? rich.toggleTodo() : state.lt === 'li' && rich.toggleList(cur)) },
+        { icon: '”', label: 'Quote', hint: '> then space', on: state.lt === 'callout' && state.co === 'quote', onClick: () => rich.setCallout('quote') },
+        ...['note', 'tip', 'warning', 'danger'].map((k) => ({ icon: '!', label: 'Callout: ' + k, on: state.lt === 'callout' && state.co === k, onClick: () => rich.setCallout(k) })),
+        { icon: '—', label: 'Divider', hint: 'type /divider', onClick: () => rich.insertDivider() },
+        { icon: '¶', label: 'Plain text', onClick: () => (state.lt === 'h' ? rich.toggleHeading() : state.lt === 'todo' ? rich.toggleTodo() : state.lt === 'li' ? rich.toggleList(cur) : state.lt === 'callout' && rich.setCallout(state.co)) },
       ],
       { keepFocus: true, cls: 'fmt-menu' }
     )
   })
   btns.todo = mkBtn('fmt-todo', ICONS.todo, 'Checkbox  (Ctrl/Cmd+Shift+9, or type [] and a space)', (rich) => rich.toggleTodo())
+  let marksNow = {}
+  btns.hl = mkBtn('fmt-hl', iconHTML('palette'), 'Highlight  (Ctrl/Cmd+Shift+H)', (rich, b) => {
+    ui.menu(
+      b,
+      [
+        ...HIGHLIGHTS.map((c) => ({ icon: '●', label: c[0].toUpperCase() + c.slice(1), cls: 'hl-pick hl-' + c, on: marksNow.hl === c, onClick: () => rich.toggleMark('hl', c) })),
+        ...(marksNow.hl ? ['sep', { label: 'No highlight', onClick: () => rich.toggleMark('hl', marksNow.hl) }] : []),
+      ],
+      { keepFocus: true, cls: 'fmt-menu' }
+    )
+  })
+  btns.link = mkBtn('fmt-link', iconHTML('external'), 'Link the selected text  (Ctrl/Cmd+K)', (rich) => {
+    rich.editLink().then((did) => {
+      if (!did) ui.toast('Select some text to link first (or type [[ to link a note).')
+    })
+  })
   btns.align = mkBtn('fmt-align', ICONS.left, 'Align: left → centre → right  (Ctrl/Cmd+Shift+L / E / R)', (rich) => {
     const cur = state.al || 'left'
     rich.setAlign(cur === 'left' ? 'center' : cur === 'center' ? 'right' : 'left')
@@ -1993,9 +2610,12 @@ function buildFmtBar(getRich) {
     if (urls.length) rich.insertMedia(urls)
   })
   function update(marks, line) {
+    marksNow = marks || {}
     for (const m of ['b', 'i', 'u', 's']) btns[m].classList.toggle('on', !!(marks && marks[m]))
+    btns.hl.classList.toggle('on', !!marksNow.hl)
+    btns.link.classList.toggle('on', !!marksNow.href)
     state = line || {}
-    btns.list.classList.toggle('on', state.lt === 'li' || state.lt === 'h')
+    btns.list.classList.toggle('on', state.lt === 'li' || state.lt === 'h' || state.lt === 'callout')
     btns.todo.classList.toggle('on', state.lt === 'todo')
     const al = state.al || 'left'
     btns.align.innerHTML = ICONS[al] || ICONS.left
@@ -2316,6 +2936,7 @@ function createCard(id) {
 
   const unbinds = []
   unbinds.push(bindInput(note.get('title'), titleEl, () => applyFilter()))
+  watchTitle(titleEl, () => yNotes.get(id), id)
   el.addEventListener('input', () => stamp(note))
   el.addEventListener('change', () => stamp(note))
 
@@ -2870,13 +3491,46 @@ function buildPopover(card) {
   deleteBtn.addEventListener('click', () => { closeAllPopovers(); deleteNote(card.id) })
   iconLabel(archiveBtn, 'Archive', 'archive')
   iconLabel(histBtn, 'History', 'history')
-  aRow.append(pinBtn, archiveBtn, histBtn, deleteBtn)
+  const actBtn = (label, ico, title, fn) => {
+    const b = document.createElement('button')
+    b.className = 'pop-btn'
+    iconLabel(b, label, ico)
+    b.title = title
+    b.setAttribute('aria-label', title)
+    b.addEventListener('click', () => {
+      closeAllPopovers()
+      fn()
+    })
+    return b
+  }
+  const shareBtn = actBtn('Share link', 'external', 'A read-only link to this note for someone not on the board', () => openShareDialog({ note: card.note }))
+  const extractBtn = actBtn('Selection → new note', 'compose', 'Move the selected text to a new note and leave a [[link]] in its place', () => extractSelection(card))
+  const mergeBtn = actBtn('Merge into…', 'arrow', 'Append this note to another one and move this one to the trash', () => mergeNoteInto(card.id))
+  const printBtn = actBtn('Print / PDF', 'download', 'Print this note or save it as a PDF', () => printNote(card.id))
+  aRow.append(pinBtn, archiveBtn, histBtn, deleteBtn, shareBtn, extractBtn, mergeBtn, printBtn)
   aSec.append(aRow)
 
-  pop.append(cSec, tSec, wSec, lSec, oSec, mSec, aSec)
+  // Other names a [[link]] can use for this note
+  const akaSec = section('Also known as')
+  const akaInput = document.createElement('input')
+  akaInput.className = 'pop-input pop-aka'
+  akaInput.placeholder = 'Other names, separated by commas'
+  akaInput.setAttribute('aria-label', 'Aliases: other names for links to this note')
+  akaInput.addEventListener('change', () => setAliases(card.note, akaInput.value))
+  akaInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') akaInput.blur()
+  })
+  akaSec.append(akaInput)
+
+  // What links here
+  const linkSec = section('Links')
+  const linkHost = document.createElement('div')
+  linkSec.append(linkHost)
+
+  pop.append(cSec, tSec, wSec, lSec, oSec, mSec, akaSec, linkSec, aSec)
   card.el.appendChild(pop)
   card.pop = pop
-  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec, taBtns, pinBtn }
+  card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec, taBtns, pinBtn, akaInput, linkHost, shareBtn }
   colorInput.setAttribute('aria-label', 'Custom paper colour')
   mSel.setAttribute('aria-label', 'Move to tab')
   renderFavs(card)
@@ -2954,6 +3608,9 @@ function refreshPopover(card) {
   const ta = card.note.get('titleAlign') || 'left'
   for (const k of Object.keys(card.popRefs.taBtns)) card.popRefs.taBtns[k].classList.toggle('on', k === ta)
   iconLabel(card.popRefs.pinBtn, card.note.get('pinned') ? 'Unpin' : 'Pin', 'pin')
+  iconLabel(card.popRefs.shareBtn, card.note.get('share') ? 'Shared link' : 'Share link', 'external')
+  if (document.activeElement !== card.popRefs.akaInput) card.popRefs.akaInput.value = aliasesOf(card.note).join(', ')
+  card.popRefs.linkHost.replaceChildren(linksSection(namesOf(card.note), card.id, { compact: true }))
   mSel.replaceChildren()
   for (const t of tabsList()) {
     if (!isNotesTab(t)) continue
@@ -3050,7 +3707,15 @@ function mountPage(tabId, kind) {
   pageView.replaceChildren()
   pageView.dataset.kind = kind
   if (kind === 'tasks') {
-    const list = createTasksView(pageView, page, { tabId })
+    const list = createTasksView(pageView, page, {
+      tabId,
+      openSource,
+      journal: { days: journalNotes, open: openDay },
+      touch: (src) => {
+        const n = src.kind === 'note' ? yNotes.get(src.id) : null
+        if (n) stamp(n)
+      },
+    })
     pageState = { tabId, kind, list, destroy: () => list.destroy() }
     return
   }
@@ -3069,10 +3734,34 @@ function mountPage(tabId, kind) {
   body.className = 'page-body card-body'
   body.setAttribute('data-ph', 'Start writing…')
   sheet.appendChild(body)
+  // what links to this document, under the page
+  const links = document.createElement('div')
+  links.className = 'page-links'
+  // the outline: headings to jump to, with the word count and reading time
+  const outline = document.createElement('aside')
+  outline.className = 'page-outline'
+  outline.setAttribute('aria-label', 'Outline')
+  const outlineBtn = document.createElement('button')
+  outlineBtn.type = 'button'
+  outlineBtn.className = 'icon-btn page-outline-btn'
+  outlineBtn.title = 'Outline and word count'
+  outlineBtn.setAttribute('aria-label', outlineBtn.title)
+  outlineBtn.appendChild(makeIcon('list'))
+  const showOutline = (on) => {
+    pageView.classList.toggle('outline-open', on)
+    outlineBtn.setAttribute('aria-pressed', String(on))
+  }
+  outlineBtn.addEventListener('click', () => {
+    const on = !pageView.classList.contains('outline-open')
+    setSetting('outline', on)
+    showOutline(on)
+  })
+  showOutline(getSettings().outline !== false && !phoneMode())
   // phones have no ribbon: the document brings its own toolbar, docked at the bottom
   const fmt = buildFmtBar(() => pageState?.rich)
   fmt.el.classList.add('page-fmt')
-  pageView.append(sheet, fmt.el)
+  sheet.appendChild(links)
+  pageView.append(outlineBtn, outline, sheet, fmt.el)
   const rich = bindRichText(page.get('body'), body, editorOpts(page, {
     onState: (marks, line) => {
       fmt.update(marks, line)
@@ -3080,8 +3769,58 @@ function mountPage(tabId, kind) {
     },
     getRich: () => rich,
   }))
+  const drawOutline = () => {
+    const ls = linesOf(page.get('body'))
+    let words = 0
+    for (const L of ls) if (!embedOf(L.text)) words += (L.text.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) || []).length
+    outline.replaceChildren()
+    const h = document.createElement('div')
+    h.className = 'outline-h'
+    h.textContent = 'Outline'
+    outline.appendChild(h)
+    const heads = ls.map((L, index) => ({ L, index })).filter(({ L }) => L.attrs.lt === 'h' && L.text.trim())
+    if (!heads.length) {
+      const e = document.createElement('div')
+      e.className = 'outline-empty'
+      e.textContent = 'Headings you add (# and a space) show up here.'
+      outline.appendChild(e)
+    }
+    for (const { L, index } of heads) {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = 'outline-item'
+      b.textContent = L.text.trim()
+      b.addEventListener('click', () => rich.revealAt({ index }, { caret: true }))
+      outline.appendChild(b)
+    }
+    const stats = document.createElement('div')
+    stats.className = 'outline-stats'
+    const mins = Math.max(1, Math.round(words / 230))
+    stats.textContent = words.toLocaleString() + (words === 1 ? ' word' : ' words') + ' · ' + (words ? mins + ' min read' : 'nothing to read yet')
+    outline.appendChild(stats)
+  }
+  const drawLinks = () => links.replaceChildren(linksSection([activeTab()?.name || ''], tabId))
+  const outlineSoon = debounce(drawOutline, 250)
+  const linksSoon = debounce(drawLinks, 700)
+  const onBody = () => outlineSoon()
+  const onBoard = () => linksSoon()
+  page.get('body').observeDeep(onBody)
+  yNotes.observeDeep(onBoard)
+  drawOutline()
+  drawLinks()
   body.addEventListener('focus', () => setRibbonTarget({ page: true }))
-  pageState = { tabId, kind, rich, destroy: () => rich.destroy() }
+  pageState = {
+    tabId,
+    kind,
+    rich,
+    destroy: () => {
+      outlineSoon.cancel()
+      linksSoon.cancel()
+      page.get('body').unobserveDeep(onBody)
+      yNotes.unobserveDeep(onBoard)
+      rich.destroy()
+    },
+  }
   setRibbonTarget({ page: true })
 }
 
@@ -3205,6 +3944,7 @@ const ribPin = ribbon.button(noteGroup, {
   toggle: true,
   onPress: onNote((n) => (n.get('pinned') ? n.delete('pinned') : n.set('pinned', true))),
 })
+ribbon.button(noteGroup, { icon: 'compose', title: 'Move the selected text to a new note (leaves a [[link]])', cls: 'rib-extract', onPress: onNote((n, c) => extractSelection(c)) })
 ribbon.button(noteGroup, { icon: 'archive', title: 'Archive', onPress: onNote((n, c) => { setRibbonTarget(null); setNoteArchived(c.id, true) }) })
 ribbon.button(noteGroup, { icon: 'trash', title: 'Delete note', cls: 'danger', onPress: onNote((n, c) => { setRibbonTarget(null); deleteNote(c.id) }) })
 ribbon.button(noteGroup, {
@@ -3731,6 +4471,14 @@ function openFullscreen(id, opts = {}) {
       card.body.rich.focusEnd()
     }
   })
+  // what links here, at the foot of the note (kept fresh while it is open)
+  const linksHost = document.createElement('div')
+  linksHost.className = 'full-links'
+  const drawLinks = () => {
+    const n = yNotes.get(id)
+    if (n) linksHost.replaceChildren(linksSection(namesOf(n), id))
+  }
+  const linksSoon = debounce(drawLinks, 700)
   // desktop: the toolbar sits under the title like a document's; phone: above the keyboard
   if (phoneMode()) el.append(top, titleEl, bodyHost, fmtBar.el, meta)
   else el.append(top, titleEl, fmtBar.el, bodyHost, meta)
@@ -3740,8 +4488,19 @@ function openFullscreen(id, opts = {}) {
 
   applyFullStyle(card)
   card.unbinds.push(bindInput(note.get('title'), titleEl, () => applyFilter()))
+  watchTitle(titleEl, () => yNotes.get(id), id)
   el.addEventListener('input', () => stamp(note))
   mountBody(card)
+  bodyHost.appendChild(linksHost) // scrolls with the text, under it
+  drawLinks()
+  const onBoard = () => linksSoon()
+  yNotes.observeDeep(onBoard)
+  yPages.observeDeep(onBoard)
+  card.unbinds.push(() => {
+    linksSoon.cancel()
+    yNotes.unobserveDeep(onBoard)
+    yPages.unobserveDeep(onBoard)
+  })
   card.unbinds.push(keepCaretInView(bodyHost))
   optBtn.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -3773,7 +4532,10 @@ function openFullscreen(id, opts = {}) {
       ui.toast('Moved to ' + (t ? t.name : 'another tab'), { action: 'Open', onAction: () => goToNote(id) })
       return
     }
-    if (e.keysChanged.has('kind') || e.keysChanged.has('layout')) mountBody(card)
+    if (e.keysChanged.has('kind') || e.keysChanged.has('layout')) {
+      mountBody(card)
+      bodyHost.appendChild(linksHost)
+    }
     if (e.keysChanged.has('lastEditedAt')) card.setMeta()
     applyFullStyle(card)
     if (card.pop) refreshPopover(card)
@@ -3786,21 +4548,16 @@ function openFullscreen(id, opts = {}) {
   card.unbinds.push(() => note.unobserve(obs), () => yNotes.unobserve(gone))
 
   full = { id, back, card, pushed: false }
-  if (!opts.fromHash) {
-    try {
-      history.pushState({ full: id }, '', '#note=' + id + '&full')
-      full.pushed = true
-    } catch {
-      /* ignore */
-    }
-  }
+  if (!opts.fromHash) full.pushed = navPush({ full: id }, '#note=' + id + '&full')
+  else if (!navQuiet) navReplace({ full: id }, '#note=' + id + '&full')
   renderPresence()
   requestAnimationFrame(() => {
     el.style.transformOrigin = '0 0'
     ui.zoomFrom(el, sourceRect)?.finished.then(() => el.getAnimations().forEach(a => a.cancel())).catch(() => {})
     if (opts.focus === false) return
     if (!note.get('title').toString().trim()) titleEl.focus()
-    else if (card.body && card.body.rich && !phoneMode()) card.body.rich.focusEnd()
+    else if (card.body && card.body.rich && !phoneMode() && !opts.line) card.body.rich.focusEnd()
+    if (opts.line) setTimeout(() => card.body?.editors?.some((r) => r.revealAt(opts.line, { caret: !phoneMode() })), 60)
   })
   return true
 }
@@ -3850,29 +4607,25 @@ function closeFullscreen() {
     history.back() // popstate closes it
     setTimeout(() => {
       ignoreHash = false
-      if (full === f) closeFullscreenNow()
+      if (full !== f) return
+      // Back went nowhere (a browser may skip entries made without a click): close anyway
+      closeFullscreenNow()
+      if (history.state && history.state.full === f.id) navReplace({})
     }, 400)
     return
   }
   closeFullscreenNow()
-  try {
-    history.replaceState(null, '', location.pathname + location.search)
-  } catch {
-    /* ignore */
-  }
+  navReplace({})
 }
 
 let ignoreHash = false
-window.addEventListener('popstate', () => {
-  if (full && !(history.state && history.state.full === full.id)) closeFullscreenNow()
-})
 // capture on window: runs before the handlers that close menus/popovers, so one
 // Escape closes the innermost thing only
 window.addEventListener(
   'keydown',
   (e) => {
     if (e.key !== 'Escape' || !full) return
-    if (document.querySelector('.card-pop.open, .menu, .rb-picker, .lightbox, .dlg-back, .mm-input, .edge-pop') || !overlay.hidden) return
+    if (document.querySelector('.card-pop.open, .menu, .rb-picker, .lightbox, .dlg-back, .mm-input, .edge-pop, .qs-back') || !overlay.hidden) return
     e.preventDefault()
     closeFullscreen()
   },
@@ -4157,6 +4910,18 @@ function renderDrawer() {
     addTab('draw')
   }, 'drawer-add')
   sec('More')
+  row('calendar', 'Today’s journal', null, () => {
+    closeDrawer()
+    openToday()
+  })
+  row('search', 'Go to a note…', null, () => {
+    closeDrawer()
+    openQuickSwitcher()
+  })
+  row('note', 'New from template…', null, () => {
+    closeDrawer()
+    chooseTemplate((tpl) => newFromTemplate(tpl))
+  })
   row('⌂', 'Home, search & archived tabs', null, () => {
     closeDrawer()
     openHome()
@@ -4394,24 +5159,77 @@ function noteSnippet(n, max = 90) {
 
 // Home: every tab as a card (with who is on it), archived tabs below, and a
 // search box that looks across every tab.
-function openHome() {
+function openHome(query = '') {
   openPanel('home', 'All tabs', (body) => {
     const search = document.createElement('input')
     search.className = 'home-search'
     search.type = 'search'
-    search.placeholder = 'Search every tab…'
+    search.placeholder = 'Search every tab…  (try tag:, tab:, is:todo, by:)'
     search.autocomplete = 'off'
+    search.setAttribute('aria-label', 'Search every tab')
+    const quick = document.createElement('div')
+    quick.className = 'home-quick'
+    const qBtn = (label, ico, title, fn) => {
+      const b = document.createElement('button')
+      b.className = 'pop-btn'
+      b.type = 'button'
+      iconLabel(b, label, ico)
+      b.title = title
+      b.addEventListener('click', fn)
+      quick.appendChild(b)
+    }
+    qBtn('Today', 'calendar', 'Open (or start) today’s journal note', () => openToday())
+    qBtn('Go to…', 'search', 'Quick switcher (Ctrl/Cmd+K)', () => {
+      closeOverlay()
+      openQuickSwitcher()
+    })
+    qBtn('From template…', 'note', 'A new note from a template', () => chooseTemplate((tpl) => newFromTemplate(tpl)))
     const results = document.createElement('div')
     results.className = 'home-results'
     const grid = document.createElement('div')
     grid.className = 'home-grid'
+    const tagWrap = document.createElement('div')
+    tagWrap.className = 'home-tags'
     const archWrap = document.createElement('div')
     archWrap.className = 'home-archived'
-    body.append(search, results, grid, archWrap)
+    body.append(search, quick, results, grid, tagWrap, archWrap)
+
+    const renderTags = () => {
+      tagWrap.replaceChildren()
+      const tags = tagCounts(doc)
+      if (!tags.length) return
+      const h = document.createElement('div')
+      h.className = 'home-h'
+      h.textContent = 'Tags'
+      const cloud = document.createElement('div')
+      cloud.className = 'tag-cloud'
+      for (const t of tags) {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'tag-chip' + (t.name.includes('/') ? ' sub' : '')
+        b.textContent = '#' + t.name
+        const c = document.createElement('span')
+        c.className = 'tag-count'
+        c.textContent = t.count
+        b.appendChild(c)
+        b.title = 'Notes tagged #' + t.name + ' (right-click to rename)'
+        b.addEventListener('click', () => {
+          search.value = 'tag:' + t.name
+          doSearch()
+        })
+        b.addEventListener('contextmenu', (e) => {
+          e.preventDefault()
+          ui.menu(b, [{ label: 'Rename or merge #' + t.name + '…', icon: 'pencil', onClick: () => renameTagFlow(t.name) }])
+        })
+        cloud.appendChild(b)
+      }
+      tagWrap.append(h, cloud)
+    }
 
     const render = () => {
       grid.replaceChildren()
       archWrap.replaceChildren()
+      renderTags()
       const counts = new Map()
       const edited = new Map()
       yNotes.forEach((n) => {
@@ -4495,18 +5313,32 @@ function openHome() {
     }
 
     const doSearch = () => {
-      const q = search.value.trim().toLowerCase()
+      const q = search.value.trim()
       results.replaceChildren()
       grid.style.display = q ? 'none' : ''
+      tagWrap.style.display = q ? 'none' : ''
       archWrap.style.display = q ? 'none' : ''
       if (!q) return
       const tabsById = new Map(tabsList().map((t) => [t.id, t]))
+      const terms = parseQuery(q)
       const hits = []
       yOrder.toArray().forEach((id) => {
         const n = yNotes.get(id)
         if (!n || n.get('deleted')) return
-        if (noteHay(n).includes(q)) hits.push({ id, n })
+        if (matchFacts(terms, noteFacts(n, tabsById.get(n.get('tabId'))?.name || ''))) hits.push({ id, n })
       })
+      if (tagOnly(terms)) {
+        const h = document.createElement('div')
+        h.className = 'home-h'
+        h.textContent = terms.map((t) => '#' + t.value).join(' ') + ' · ' + hits.length + (hits.length === 1 ? ' note' : ' notes')
+        const ren = document.createElement('button')
+        ren.className = 'home-h-act'
+        ren.type = 'button'
+        ren.textContent = 'Rename tag'
+        ren.addEventListener('click', () => renameTagFlow(terms[0].value))
+        if (terms.length === 1) h.appendChild(ren)
+        results.appendChild(h)
+      }
       if (!hits.length) {
         const e = document.createElement('div')
         e.className = 'home-empty'
@@ -4528,12 +5360,16 @@ function openHome() {
         snip.className = 'home-hit-snip'
         snip.textContent = noteSnippet(n)
         row.append(title, meta, snip)
-        row.addEventListener('click', () => goToNote(id))
+        row.addEventListener('click', () => goToNote(id, { push: true }))
         results.appendChild(row)
       }
     }
     search.addEventListener('input', doSearch)
     render()
+    if (query) {
+      search.value = query
+      doSearch()
+    }
     requestAnimationFrame(() => search.focus())
     // keep it live while open
     const refresh = () => {
@@ -4553,6 +5389,20 @@ function openHome() {
     })
     obs.observe(overlay, { attributes: true, childList: true })
   })
+}
+
+const tagOnly = (terms) => terms.length > 0 && terms.every((t) => t.op === 'tag' && !t.neg)
+
+// Rename #from everywhere (onto an existing tag: merge them).
+async function renameTagFlow(from) {
+  const typed = await ui.prompt('Rename #' + from + ' to:', from, { title: 'Rename tag', okLabel: 'Rename', maxLength: 60 })
+  if (typed == null) return
+  const to = typed.trim().replace(/^#/, '')
+  if (!to || to === from) return
+  if (!/^[\p{L}\p{N}_-]+(\/[\p{L}\p{N}_-]+)*$/u.test(to) || /^[\d/]+$/.test(to)) return ui.toast('A tag is letters, numbers, - and _, with / between levels.')
+  const n = renameTag(doc, from, to)
+  ui.toast(n ? `Renamed #${from} to #${to} in ${n} place${n === 1 ? '' : 's'}` : 'No notes use #' + from)
+  if (overlayKind === 'home') openHome('tag:' + to)
 }
 
 // Trash + archived notes for one tab.
@@ -4742,6 +5592,7 @@ function stripMd(text) {
 function restoreVersion(noteId, ver) {
   const n = yNotes.get(noteId)
   if (!n) return
+  const was = n.get('title').toString()
   const title = stripMd(ver.title)
   doc.transact(() => {
     const t = n.get('title')
@@ -4757,6 +5608,7 @@ function restoreVersion(noteId, ver) {
     n.set('lastEditedAt', Date.now())
     n.set('lastEditedBy', { id: me.id, name: me.name })
   })
+  followRename(doc, noteId, was, title) // links follow the old name back
   closeOverlay()
   ui.toast('Version restored')
 }
@@ -4812,15 +5664,17 @@ awareness.on('change', renderPresence)
 
 // ---- search filter (scoped to the visible tab) ----
 function applyFilter() {
-  const q = search.value.trim().toLowerCase()
+  const q = search.value.trim()
+  const terms = q ? parseQuery(q) : []
+  const tabName = activeTab()?.name || ''
   for (const [id, card] of cards) {
-    if (!q) {
+    if (!terms.length) {
       card.el.classList.remove('hidden')
       continue
     }
     const n = yNotes.get(id)
     if (!n) continue
-    card.el.classList.toggle('hidden', !noteHay(n).includes(q))
+    card.el.classList.toggle('hidden', !matchFacts(terms, noteFacts(n, tabName)))
   }
   if (canvasMode) viewport.refreshMap()
 }
@@ -4841,6 +5695,8 @@ addBtn.addEventListener('click', () => {
   requestAnimationFrame(() => cards.get(id)?.titleEl.focus())
 })
 
+document.getElementById('goto').addEventListener('click', () => openQuickSwitcher())
+document.getElementById('today').addEventListener('click', () => openToday())
 document.getElementById('rename').addEventListener('click', async () => {
   const typed = await ui.prompt('Display name:', me.name, { title: 'Your name', maxLength: 24 })
   if (typed == null) return
@@ -4857,6 +5713,169 @@ document.getElementById('settings').addEventListener('click', (e) => {
   e.stopPropagation()
   openSettingsMenu(e.currentTarget)
 })
+
+// ---- reminders (Web Push) on this device ----------------------------------------
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
+const b64uBytes = (s) => {
+  const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4))
+  return Uint8Array.from(b, (c) => c.charCodeAt(0))
+}
+async function pushSubscription(create) {
+  const reg = await navigator.serviceWorker.ready
+  let sub = await reg.pushManager.getSubscription()
+  if (!create) return sub
+  const { publicKey } = await (await fetch('/api/push/key')).json()
+  const key = b64uBytes(publicKey)
+  // a subscription made for another key (the Pi's keys were reset) must go first
+  if (sub && sub.options?.applicationServerKey && new Uint8Array(sub.options.applicationServerKey).join() !== key.join()) {
+    await sub.unsubscribe().catch(() => {})
+    sub = null
+  }
+  return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+}
+async function saveReminders(on, hour) {
+  try {
+    if (on) {
+      const perm = await Notification.requestPermission()
+      if (perm !== 'granted') {
+        ui.toast('Notifications are blocked for this site. Allow them in the browser’s site settings, then try again.', { ms: 9000 })
+        return false
+      }
+      const sub = await pushSubscription(true)
+      const r = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub.toJSON(), tz: Intl.DateTimeFormat().resolvedOptions().timeZone, hour, name: me.name }),
+      })
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'the Pi said no')
+      setSetting('reminders', true)
+      setSetting('remindHour', hour)
+      return true
+    }
+    const sub = await pushSubscription(false)
+    if (sub) {
+      await fetch('/api/push/unsubscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {})
+      await sub.unsubscribe().catch(() => {})
+    }
+    setSetting('reminders', false)
+    return true
+  } catch (err) {
+    ui.toast('Reminders: ' + (err && err.message ? err.message : 'could not be changed'), { ms: 8000 })
+    return false
+  }
+}
+function drawReminderSettings(host) {
+  host.replaceChildren()
+  const st = getSettings()
+  if (!pushSupported()) {
+    host.textContent = /iPhone|iPad/.test(navigator.userAgent)
+      ? 'On an iPhone, add Notes to the home screen first (Share → Add to Home Screen) and open it from there; then turn reminders on here.'
+      : 'This browser can’t receive notifications from the Pi.'
+    return
+  }
+  const row = document.createElement('label')
+  row.className = 'menu-check remind-row'
+  const box = document.createElement('input')
+  box.type = 'checkbox'
+  box.className = 'switch remind-on'
+  box.setAttribute('role', 'switch')
+  box.checked = !!st.reminders && Notification.permission === 'granted'
+  const lbl = document.createElement('span')
+  lbl.textContent = 'Daily reminder of what’s due'
+  row.append(box, lbl)
+  const hourRow = document.createElement('div')
+  hourRow.className = 'settings-enum remind-hour'
+  const hl = document.createElement('span')
+  hl.textContent = 'At'
+  const sel = document.createElement('select')
+  sel.className = 'pop-select'
+  sel.setAttribute('aria-label', 'Reminder time')
+  for (let h = 5; h <= 22; h++) {
+    const o = document.createElement('option')
+    o.value = String(h)
+    o.textContent = String(h).padStart(2, '0') + ':00'
+    o.selected = h === Number(st.remindHour)
+    sel.appendChild(o)
+  }
+  const test = document.createElement('button')
+  test.type = 'button'
+  test.className = 'pop-btn remind-test'
+  test.textContent = 'Send a test'
+  hourRow.append(hl, sel, test)
+  const hint = document.createElement('small')
+  hint.className = 'remind-hint'
+  hint.textContent = 'To-do tasks and @dated checkboxes that are due or overdue, once a day, even with the app closed.'
+  host.append(row, hourRow, hint)
+  const sync = () => {
+    sel.disabled = !box.checked
+    test.disabled = !box.checked
+  }
+  sync()
+  box.addEventListener('change', async () => {
+    box.disabled = true
+    const ok = await saveReminders(box.checked, Number(sel.value))
+    if (!ok) box.checked = !box.checked
+    box.disabled = false
+    sync()
+    if (ok && box.checked) ui.toast('Reminders on: every day at ' + sel.options[sel.selectedIndex].text)
+  })
+  sel.addEventListener('change', () => {
+    if (box.checked) saveReminders(true, Number(sel.value))
+  })
+  test.addEventListener('click', async () => {
+    try {
+      const sub = await pushSubscription(false)
+      const r = sub ? await fetch('/api/push/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) }) : null
+      const d = r ? await r.json() : null
+      ui.toast(d && d.ok ? 'Sent: it should arrive in a moment.' : 'The test did not go through' + (d && d.error ? ': ' + d.error : '.'))
+    } catch {
+      ui.toast('The test did not go through.')
+    }
+  })
+}
+
+// ---- import (Markdown folders, Obsidian, this app's mirror, Google Keep) ----------
+async function openImport() {
+  const choice = await ui.dialog({
+    title: 'Import notes',
+    message:
+      'Pick a folder (an Obsidian vault, a Markdown folder, a Notes backup or a Google Keep Takeout folder) or some files. Folders become tabs and files become notes; pictures come along when they are in what you pick.',
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: 'Choose files…', value: 'files' },
+      { label: 'Choose a folder…', value: 'folder', primary: true },
+    ],
+  })
+  if (!choice) return
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  if (choice === 'folder') input.webkitdirectory = true
+  else input.accept = '.md,.markdown,.txt,.json,image/*'
+  input.style.display = 'none'
+  document.body.appendChild(input)
+  input.addEventListener('change', async () => {
+    const files = Array.from(input.files || [])
+    input.remove()
+    if (!files.length) return
+    const busy = ui.toast('Importing ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '…', { ms: 60000 })
+    try {
+      const out = await importFiles(files, { doc, me, upload: uploadImages, genId, makeTabMap })
+      busy()
+      if (!out.notes && !out.docs) return ui.toast('Nothing to import there' + (out.skipped ? ` (${out.skipped} file${out.skipped === 1 ? '' : 's'} not understood)` : '') + '.')
+      const first = out.tabs[0]
+      ui.toast(`Imported ${out.notes} note${out.notes === 1 ? '' : 's'}${out.docs ? ` and ${out.docs} document${out.docs === 1 ? '' : 's'}` : ''} into ${out.tabs.map((t) => t.name).join(', ')}`, {
+        action: first ? 'Open' : undefined,
+        ms: 9000,
+        onAction: () => first && setActiveTab(first.id),
+      })
+    } catch (err) {
+      busy()
+      ui.toast('Import failed: ' + (err && err.message ? err.message : 'unknown error'))
+    }
+  })
+  input.click()
+}
 
 function openSettingsMenu(anchor) {
   closeMenus()
@@ -4917,6 +5936,7 @@ function openSettingsMenu(anchor) {
   head('Editing')
   check('Spell-check underline', 'spellcheck', 'Red squiggles in notes')
   check('Smart arrows', 'arrows', '-> becomes →, -- becomes —')
+  check('Dates from words', 'dates', '@friday, @tomorrow or @in 3 days becomes a date')
   head('Board')
   check('Snap notes to each other', 'snap', 'Edges and centres line up while dragging (hold Alt to place freely)')
   check('Snap to a grid', 'grid', 'Every ' + (st.gridSize || 20) + ' px')
@@ -4930,6 +5950,12 @@ function openSettingsMenu(anchor) {
   ls.textContent = 'Open the home page on launch'
   launch.append(lc, ls)
   menu.appendChild(launch)
+
+  head('Reminders on this device')
+  const remRow = document.createElement('div')
+  remRow.className = 'menu-note reminders'
+  menu.appendChild(remRow)
+  drawReminderSettings(remRow)
 
   head('Backup on this device')
   check('Keep an offline copy', 'offline', 'The board opens even with the Pi off')
@@ -4978,6 +6004,8 @@ function openSettingsMenu(anchor) {
   menu.appendChild(note)
   link('⬇  Download from the Pi (everything, Markdown)', '/api/export.md')
   link('⬇  Download from the Pi (everything, JSON)', '/api/export.json')
+  link('⬇  Download from the Pi (ZIP with every picture)', '/api/export.zip')
+  btn('⬆  Import notes (Markdown, Obsidian, Google Keep)…', () => openImport(), 'import-btn')
 
   head('Account')
   btn('Change your name', () => document.getElementById('rename').click())
@@ -5048,6 +6076,12 @@ setInterval(() => {
 // deep link: #note=<id> opens that note's tab and flashes it; #note=<id>&full
 // opens it full screen
 function followHash(initial) {
+  if (location.hash === '#today') {
+    // the installed app's "Today" shortcut
+    navReplace({})
+    openToday()
+    return
+  }
   if (location.hash === '#new') {
     // the installed app's "New note" shortcut
     try {
@@ -5058,7 +6092,7 @@ function followHash(initial) {
     const t = activeTab()
     if (t && !isNotesTab(t)) {
       const n = tabsList().find((x) => isNotesTab(x) && !x.archived)
-      if (n) setActiveTab(n.id)
+      if (n) setActiveTab(n.id, { push: false })
     }
     const id = createNote(PAPER[Math.floor(Math.random() * 4)])
     setTimeout(() => openFullscreen(id), 50)
@@ -5067,7 +6101,7 @@ function followHash(initial) {
   const tm = /#tab=([A-Za-z0-9_-]+)/.exec(location.hash)
   if (tm) {
     // the Android widget's "open this tab"
-    if (tabsList().some((t) => t.id === tm[1])) setActiveTab(tm[1])
+    if (tabsList().some((t) => t.id === tm[1])) setActiveTab(tm[1], { push: false })
     try {
       history.replaceState(null, '', location.pathname + location.search)
     } catch {
@@ -5102,8 +6136,11 @@ if (localStore) {
   })
 }
 awareness.setLocalStateField('tab', activeTabId)
+// the entry we start on gets our state too, so Back to it is ours to handle
+if (!history.state || !history.state.nav) navReplace({}, location.href)
 window.addEventListener('hashchange', () => {
-  if (ignoreHash) return
+  // Back/Forward between our own entries also changes the hash; popstate has it covered
+  if (ignoreHash || Date.now() - poppedAt < 200) return
   followHash(false)
 })
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {

@@ -45,6 +45,17 @@ export function rafThrottle(fn) {
   }
 }
 
+// Trailing debounce: `fn` runs `ms` after the last call; .cancel() drops a pending run.
+export function debounce(fn, ms) {
+  let t = 0
+  const d = (...args) => {
+    clearTimeout(t)
+    t = setTimeout(() => fn(...args), ms)
+  }
+  d.cancel = () => clearTimeout(t)
+  return d
+}
+
 // ---- colour ---------------------------------------------------------------
 
 // Parse #rgb / #rrggbb into [r,g,b] (0..255). Returns null on anything else.

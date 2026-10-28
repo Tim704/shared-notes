@@ -55,7 +55,7 @@ self.addEventListener('fetch', (e) => {
     )
     return
   }
-  if (url.pathname.startsWith('/api/') || url.pathname === '/ws' || url.pathname === '/login') return
+  if (url.pathname.startsWith('/api/') || url.pathname === '/ws' || url.pathname === '/login' || url.pathname === '/share' || url.pathname.startsWith('/s/')) return
   e.respondWith(
     fetch(req)
       .then((res) => {
@@ -71,5 +71,37 @@ self.addEventListener('fetch', (e) => {
           .then((hit) => hit || caches.match(req, { ignoreSearch: true })) // style.css?v=… offline: any copy will do
           .then((hit) => hit || (req.mode === 'navigate' ? caches.match('/') : undefined))
       )
+  )
+})
+
+// Reminders: the Pi sends one push a day per device (see server/push.js) as
+// { title, body, url }; tapping it opens (or focuses) the board at that place.
+self.addEventListener('push', (e) => {
+  let msg = {}
+  try {
+    msg = e.data ? e.data.json() : {}
+  } catch {
+    msg = { title: 'Shared Notes', body: e.data ? e.data.text() : '' }
+  }
+  e.waitUntil(
+    self.registration.showNotification(msg.title || 'Shared Notes', {
+      body: msg.body || '',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      tag: 'notes-reminder',
+      data: { url: msg.url || '/' },
+    })
+  )
+})
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close()
+  const target = new URL((e.notification.data && e.notification.data.url) || '/', self.location.origin).href
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      const open = list.find((c) => new URL(c.url).origin === self.location.origin)
+      if (open) return open.navigate(target).then((c) => (c || open).focus()).catch(() => open.focus())
+      return self.clients.openWindow(target)
+    })
   )
 })

@@ -5,6 +5,8 @@
 // If-None-Match, so an unchanged tab costs a 304 and no body.
 
 import crypto from 'crypto'
+import fs from 'fs'
+import path from 'path'
 import express from 'express'
 import * as Y from 'yjs'
 import {
@@ -17,10 +19,17 @@ import {
   exportMarkdown,
   exportJson,
   noteIdsOf,
+  buildMirror,
 } from '../shared/serialise.js'
 import { linesOf, markdownToLines } from '../shared/lines.js'
 import { insertLinesAt, appendLines, replaceAllLines, setLineAttrs, findLineById } from '../shared/lineops.js'
+import { followRename } from '../shared/links.js'
+import { parseQuery, noteFacts, matchFacts, plainWords } from '../shared/search.js'
 import { historyAvailable, listVersions, readVersion } from './history.js'
+import { capture } from './capture.js'
+import { unfurl } from './unfurl.js'
+import { createZip } from './zip.js'
+import { referencedMedia } from './media.js'
 
 const NOTE_ID_RE = /^[A-Za-z0-9_-]+$/
 const COMMIT_RE = /^[0-9a-f]{7,40}$/
@@ -53,7 +62,13 @@ function sendCached(req, res, data) {
   res.type('application/json').send(body)
 }
 
-export function createApi({ ydoc }) {
+/** Hand a thrown { status, message } (or an Error) back as JSON. */
+function fail(res, err) {
+  if (err && err.status) return res.status(err.status).json({ error: err.message })
+  throw err
+}
+
+export function createApi({ ydoc, mediaDir, push = null }) {
   const yNotes = ydoc.getMap('notes')
   const yOrder = ydoc.getArray('order')
   const yTabs = ydoc.getArray('tabs')
@@ -228,6 +243,7 @@ export function createApi({ ydoc }) {
         return res.status(400).json({ error: 'bad color' })
       if (n.get('kind') === 'todo' && (body.body != null || body.append != null))
         return res.status(409).json({ error: 'note is being migrated, try again' })
+      const oldTitle = text(n.get('title'))
       ydoc.transact(() => {
         if (body.title != null) {
           const t = n.get('title')
@@ -251,6 +267,8 @@ export function createApi({ ydoc }) {
         }
         touch(n)
       }, 'api')
+      // [[links]] to the old title follow the rename
+      if (body.title != null) followRename(ydoc, id, oldTitle, text(n.get('title')), 'api')
       res.json(noteView(id, n))
     })
   )
@@ -295,14 +313,17 @@ export function createApi({ ydoc }) {
   router.get(
     '/search',
     safe((req, res) => {
-      const q = String(req.query.q || '').trim().toLowerCase()
+      const q = String(req.query.q || '').trim()
       if (!q) return res.json([])
+      const terms = parseQuery(q)
+      const words = plainWords(terms)
       const tabName = new Map(tabs().map((t) => [t.id, t.name]))
       const hits = []
       for (const [id, n] of listNotes(req.query.trash === '1')) {
+        const tabId0 = n.get('tabId') == null ? null : String(n.get('tabId'))
+        if (!matchFacts(terms, noteFacts(n, tabName.get(tabId0) || ''))) continue
         const hay = searchText(n)
-        const idx = hay.toLowerCase().indexOf(q)
-        if (idx === -1) continue
+        const idx = words.length ? Math.max(0, hay.toLowerCase().indexOf(words[0])) : 0
         const start = Math.max(0, idx - 30)
         const snippet = hay.slice(start, start + 60).replace(/\s+/g, ' ').trim()
         const tabId = n.get('tabId') == null ? null : String(n.get('tabId'))
@@ -362,6 +383,95 @@ export function createApi({ ydoc }) {
     })
   )
 
+  // POST /api/capture { text, note?, heading?, tab?, as? } → add lines to a note ("Inbox" by default)
+  router.post(
+    '/capture',
+    safe((req, res) => {
+      const body = req.body && typeof req.body === 'object' ? req.body : {}
+      try {
+        const out = capture(ydoc, { text: body.text, note: body.note, heading: body.heading, tab: body.tab, as: body.as })
+        res.status(out.created ? 201 : 200).json(out)
+      } catch (err) {
+        fail(res, err)
+      }
+    })
+  )
+
+  // GET /api/unfurl?url=… → { title } of a public web page (for a pasted link)
+  router.get(
+    '/unfurl',
+    safe(async (req, res) => {
+      const url = String(req.query.url || '')
+      if (!/^https?:\/\//i.test(url) || url.length > 2000) return res.status(400).json({ error: 'bad url' })
+      try {
+        res.json({ title: await unfurl(url) })
+      } catch (err) {
+        res.status(422).json({ error: err.message })
+      }
+    })
+  )
+
+  // GET /api/export.zip → the Markdown mirror plus every picture it shows
+  router.get(
+    '/export.zip',
+    safe(async (req, res) => {
+      const files = buildMirror(ydoc, { mediaPrefix: '../../media/' }) // notes sit in notes/<tab>/
+      res.setHeader('Content-Type', 'application/zip')
+      res.setHeader('Content-Disposition', `attachment; filename="notes-${datestamp()}.zip"`)
+      res.setHeader('Cache-Control', 'no-store')
+      const root = `notes-${datestamp()}/`
+      const zip = createZip(res)
+      for (const [name, content] of Object.entries(files)) await zip.add(root + 'notes/' + name, content)
+      if (mediaDir) {
+        for (const f of Array.from(referencedMedia(ydoc)).sort()) {
+          const full = path.join(mediaDir, f)
+          let data
+          try {
+            data = await fs.promises.readFile(full)
+          } catch {
+            continue // already swept, or never uploaded here
+          }
+          const st = await fs.promises.stat(full).catch(() => null)
+          await zip.add(root + 'media/' + f, data, st ? st.mtime : new Date())
+        }
+      }
+      await zip.end()
+    })
+  )
+
+  // ---- reminders (Web Push) ----
+  if (push) {
+    router.get('/push/key', (_req, res) => res.json({ publicKey: push.publicKey() }))
+    router.post(
+      '/push/subscribe',
+      safe((req, res) => {
+        const body = req.body && typeof req.body === 'object' ? req.body : {}
+        try {
+          res.json(push.subscribe({ subscription: body.subscription, tz: body.tz, hour: body.hour, name: body.name, origin: originOf(req) }))
+        } catch (err) {
+          fail(res, err)
+        }
+      })
+    )
+    router.post(
+      '/push/unsubscribe',
+      safe((req, res) => {
+        const endpoint = String((req.body && req.body.endpoint) || '')
+        res.json({ removed: push.unsubscribe(endpoint) })
+      })
+    )
+    router.post(
+      '/push/test',
+      safe(async (req, res) => {
+        try {
+          res.json(await push.test(String((req.body && req.body.endpoint) || '')))
+        } catch (err) {
+          fail(res, err)
+        }
+      })
+    )
+  }
+
   router.use((_req, res) => res.status(404).json({ error: 'not found' }))
   // body-parser errors (bad JSON) and anything else that slipped through
   // eslint-disable-next-line no-unused-vars
@@ -372,6 +482,13 @@ export function createApi({ ydoc }) {
   })
 
   return router
+}
+
+/** https://host the request came to (behind Cloudflare too). */
+function originOf(req) {
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0]
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost').split(',')[0]
+  return `${proto}://${host}`
 }
 
 /** https://host/media/ for links in a downloaded export (so pictures resolve). */

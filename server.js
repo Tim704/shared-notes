@@ -7,6 +7,8 @@
 // - Mirrors the board to data/export/ as Markdown (+ git history when git is
 //   installed), serves a small JSON API under /api, purges old trash, and can
 //   optionally sit behind a shared password (NOTES_PASSWORD). See server/*.js.
+// - Read-only share links (/s/<token>), quick capture from the share sheet
+//   (/share), reminders by Web Push and optional webhooks (NOTES_WEBHOOKS).
 
 import express from 'express'
 import http from 'http'
@@ -25,6 +27,10 @@ import { initHistory, scheduleCommit } from './server/history.js'
 import { createApi } from './server/api.js'
 import { createAuth } from './server/auth.js'
 import { createMedia, referencedMedia } from './server/media.js'
+import { createShare } from './server/share.js'
+import { createPush } from './server/push.js'
+import { createWebhooks, parseHooks } from './server/webhooks.js'
+import { capture } from './server/capture.js'
 import { migrateLegacyTodos } from './shared/migrate.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -46,6 +52,9 @@ const MEDIA_DIR = process.env.NOTES_MEDIA_DIR
 const MEDIA_MAX_MB = Number(process.env.NOTES_MEDIA_MAX_MB) > 0 ? Number(process.env.NOTES_MEDIA_MAX_MB) : 8
 const HISTORY_ENABLED = process.env.NOTES_HISTORY !== '0'
 const PASSWORD = process.env.NOTES_PASSWORD || ''
+const WEBHOOKS = parseHooks(process.env.NOTES_WEBHOOKS)
+const WEBHOOK_MS = Number(process.env.NOTES_WEBHOOK_MS) >= 0 && process.env.NOTES_WEBHOOK_MS ? Number(process.env.NOTES_WEBHOOK_MS) : 5000
+const PUSH_ENABLED = process.env.NOTES_PUSH !== '0'
 fs.mkdirSync(DATA_DIR, { recursive: true })
 
 const MESSAGE_SYNC = 0
@@ -211,16 +220,44 @@ awareness.on('update', ({ added, updated, removed }, origin) => {
   conns.forEach((conn) => send(conn, message))
 })
 
+// ---- reminders + webhooks ------------------------------------------------
+const push = PUSH_ENABLED ? createPush({ ydoc, dataDir: DATA_DIR, subject: process.env.NOTES_PUSH_SUBJECT || 'mailto:notes@example.com' }) : null
+if (push) push.start()
+const webhooks = createWebhooks({ ydoc, urls: WEBHOOKS, secret: process.env.NOTES_WEBHOOK_SECRET || '', delayMs: WEBHOOK_MS })
+if (webhooks.enabled) console.log(`Webhooks: posting note changes to ${WEBHOOKS.length} URL(s)`)
+
 // ---- http + websocket ---------------------------------------------------
 const app = express()
 const auth = createAuth(PASSWORD)
 if (auth.enabled) console.log('Password protection is ON (NOTES_PASSWORD is set)')
 app.get('/health', (_req, res) => res.json({ ok: true, peers: conns.size }))
+// read-only share links open without the password (one note each; see server/share.js)
+app.use(createShare({ ydoc, mediaDir: MEDIA_DIR }))
 app.use(auth.router) // /login (no-op when no password is set)
 app.use(auth.middleware) // gate everything below (no-op when no password is set)
 app.use('/api/media', media.router)
 app.use('/media', media.files)
-app.use('/api', createApi({ ydoc }))
+app.use('/api', createApi({ ydoc, mediaDir: MEDIA_DIR, push }))
+// The installed app's share target (site.webmanifest): Android's share sheet
+// opens /share?title=…&text=…&url=…; it lands in the Inbox note, which then opens.
+app.get('/share', (req, res) => {
+  // only a share the user started (the OS sheet, or this site), not a link on another site
+  const site = String(req.headers['sec-fetch-site'] || 'none')
+  if (site !== 'none' && site !== 'same-origin') return res.status(403).type('text').send('Share from the share sheet.')
+  const q = req.query || {}
+  const one = (v) => (Array.isArray(v) ? v[0] : v) || ''
+  const title = String(one(q.title)).trim()
+  let textIn = String(one(q.text)).trim()
+  const url = String(one(q.url)).trim()
+  if (url && !textIn.includes(url)) textIn = (textIn ? textIn + ' ' : '') + url
+  const line = [title && !textIn.startsWith(title) ? title : '', textIn].filter(Boolean).join(': ').slice(0, 4000)
+  try {
+    const out = capture(ydoc, { text: line })
+    res.redirect(303, '/#note=' + out.id + '&full')
+  } catch {
+    res.redirect(303, '/') // nothing to save
+  }
+})
 // index.html names its stylesheets and script with a content hash (?v=…). Cloudflare
 // tells browsers to keep .css/.js for hours, so without this a deploy would not reach
 // a browser, or the installed app, until that ran out.

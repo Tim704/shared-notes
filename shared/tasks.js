@@ -2,7 +2,8 @@
 // mirror / exports (shared/serialise.js) and the tests. Pure JS, no imports.
 //
 // A To-do tab lives in pages[tabId] = Y.Map{ title: Y.Text, items: Y.Map }.
-// `items` is FLAT: id -> Y.Map{ text, done, due:'YYYY-MM-DD', parent, order, created }.
+// `items` is FLAT: id -> Y.Map{ text, done, due:'YYYY-MM-DD', status, parent, order, created }.
+// `status` is 'doing' while a task is in progress (the Board view's middle column).
 // Nesting comes from `parent` (absent = a top-level task) and siblings sort by
 // `order`, so indenting or moving an item is one field write that merges cleanly.
 
@@ -18,6 +19,7 @@ export function taskTree(items) {
       id,
       text: String(get(m, 'text') ?? ''),
       done: get(m, 'done') === true,
+      doing: get(m, 'status') === 'doing' && get(m, 'done') !== true,
       due: validDate(get(m, 'due')) ? get(m, 'due') : null,
       parent: get(m, 'parent') || null,
       order: Number(get(m, 'order')) || 0,
@@ -154,13 +156,13 @@ export function tasksMarkdown(title, items) {
   if (title) out.push(`# ${title}`, '')
   for (const { node, depth } of flatten(taskTree(items))) {
     const due = node.due ? ` (due ${node.due})` : ''
-    out.push(`${'  '.repeat(depth)}- [${node.done ? 'x' : ' '}] ${node.text.replace(/\s*\n\s*/g, ' ')}${due}`)
+    out.push(`${'  '.repeat(depth)}- [${node.done ? 'x' : node.doing ? '/' : ' '}] ${node.text.replace(/\s*\n\s*/g, ' ')}${due}`)
   }
   return out.join('\n') + '\n'
 }
 
 /** Plain-data tree for the JSON export. */
 export function tasksView(items) {
-  const strip = (n) => ({ id: n.id, text: n.text, done: n.done, ...(n.due ? { due: n.due } : {}), children: n.children.map(strip) })
+  const strip = (n) => ({ id: n.id, text: n.text, done: n.done, ...(n.doing ? { status: 'doing' } : {}), ...(n.due ? { due: n.due } : {}), children: n.children.map(strip) })
   return taskTree(items).map(strip)
 }

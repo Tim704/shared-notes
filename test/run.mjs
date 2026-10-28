@@ -51,6 +51,19 @@ for (const suite of ['e2e', 'features', 'api']) {
   port++
 }
 
+// roadmap 2: links, capture, share links, export, reminders and webhooks
+{
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-test-'))
+  const hookPort = port + 1000
+  const env = { NOTES_WEBHOOKS: `http://127.0.0.1:${hookPort}/hook`, NOTES_WEBHOOK_MS: '200', NOTES_WEBHOOK_SECRET: 's3cret-test' }
+  const srv = await startServer(port, dataDir, env)
+  console.log(`\n=== roadmap (port ${port}) ===`)
+  const code = await run('node', ['test/roadmap.mjs'], { PORT: String(port), HOOK_PORT: String(hookPort), ...env })
+  if (code !== 0) failed++
+  await stop(srv)
+  port++
+}
+
 // password protection (a server started with NOTES_PASSWORD)
 {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-test-'))
@@ -81,6 +94,9 @@ if (withBrowser) {
   console.log('\n=== browser smoke ===')
   const code = await run('node', ['test/browser-smoke.mjs'])
   if (code !== 0) failed++
+  console.log('\n=== browser roadmap ===')
+  const code2 = await run('node', ['test/browser-roadmap.mjs'])
+  if (code2 !== 0) failed++
 }
 
 console.log('\n' + (failed === 0 ? 'ALL SUITES PASSED' : failed + ' SUITE(S) FAILED'))

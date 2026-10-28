@@ -1,7 +1,13 @@
 import { icon, iconHTML } from './icons.js'
 import * as Y from 'yjs'
+import * as ui from './ui.js'
+import { dateBeforeCaret, dateLabel } from '../shared/dates.js'
+import { ymd, dueState } from '../shared/tasks.js'
 import {
-  MARKS,
+  BOOL_MARKS,
+  HIGHLIGHTS,
+  CALLOUTS,
+  TODO_STATES,
   deltaToLines,
   computeMarkers,
   markOf,
@@ -17,6 +23,7 @@ import {
   parseLinePrefix,
   genLineId,
 } from '../shared/lines.js'
+import { insertLinesAt } from '../shared/lineops.js'
 
 // ---------------------------------------------------------------------------
 // Rich-text binding: a contentEditable element bound to a Y.Text.
@@ -42,6 +49,8 @@ import {
 //     <div class="rb-embed">  (a line that is only a picture/video URL)
 //     <span class="rb-text">…the characters…</span>
 //   </div>
+// Dividers are `rb-hr` lines and callouts `rb-callout co-<kind>` lines (a run of
+// callout lines of one kind draws as one box: co-first / co-last).
 // Character indexes are computed per line, inside .rb-text only, so markers
 // and previews never count as text.
 // ---------------------------------------------------------------------------
@@ -50,9 +59,29 @@ const TAG = { b: 'strong', i: 'em', u: 'u', s: 's' }
 const INDENT = '  '
 
 // Things that get turned into links while rendering: bare URLs and [[wiki links]]
-// to other notes / tabs. Matching happens per run of text, so a URL that changes
-// formatting half way through is simply not linked.
-const LINK_RE = /(https?:\/\/[^\s<>"']+|\[\[[^\]\n]+\]\])/g
+// to other notes / tabs, #tags and @dates. Matching happens per run of text, so a
+// URL that changes formatting half way through is simply not linked. (No
+// lookbehind: older iPhones can't parse it.)
+const LINK_RE = /(https?:\/\/[^\s<>"']+|\[\[[^\]\n]+\]\])|(^|[\s(,;])(#(?=[\p{L}\p{N}_/-]*[\p{L}_-])[\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*|@\d{4}-\d{2}-\d{2}(?![\w-]))/gu
+
+// The slash menu: typed "/" at the start of a line or after a space.
+// { id, label, hint, keys } — `keys` are extra words the filter matches.
+const SLASH = [
+  { id: 'h', label: 'Heading', icon: 'heading', keys: 'title h1 header' },
+  { id: 'li', label: 'Bullet list', icon: 'list', keys: 'bullets ul dots' },
+  { id: 'ol', label: 'Numbered list', icon: 'numbers', keys: 'numbers ol 1.' },
+  { id: 'todo', label: 'Checkbox', icon: 'todo', keys: 'todo task check' },
+  { id: 'hr', label: 'Divider', icon: 'minus', keys: 'line rule separator hr ---' },
+  { id: 'co:note', label: 'Callout: note', icon: 'note', keys: 'callout info box' },
+  { id: 'co:tip', label: 'Callout: tip', icon: 'star', keys: 'callout hint idea' },
+  { id: 'co:warning', label: 'Callout: warning', icon: 'sun', keys: 'callout caution' },
+  { id: 'co:danger', label: 'Callout: danger', icon: 'close', keys: 'callout important error' },
+  { id: 'co:quote', label: 'Quote', icon: 'text', keys: 'blockquote >' },
+  { id: 'date:0', label: "Today's date", icon: 'calendar', keys: 'date today now' },
+  { id: 'date:1', label: "Tomorrow's date", icon: 'calendar', keys: 'date tomorrow' },
+  { id: 'hl', label: 'Highlight', icon: 'palette', keys: 'marker mark colour color' },
+  { id: 'link', label: 'Link to a note', icon: 'external', keys: '[[ wiki note' },
+]
 
 // Typed sequences that become a nicer glyph (checked against the text just
 // before the caret plus the character being typed). Longest first.
@@ -73,6 +102,8 @@ function shortcutFor(prefix) {
   if (prefix === '—' || prefix === '–') return { lt: 'li', mk: 'dash' }
   if (prefix === '[]' || prefix === '[ ]') return { lt: 'todo' }
   if (prefix === '[x]' || prefix === '[X]') return { lt: 'todo', done: true }
+  if (prefix === '[/]' || prefix === '[-]' || prefix === '[>]') return { lt: 'todo', ts: prefix[1] }
+  if (prefix === '>') return { lt: 'callout', co: 'quote' }
   if (prefix === '#') return { lt: 'h' }
   if (/^\d{1,3}[.)]$/.test(prefix)) return { lt: 'li', mk: 'decimal' }
   if (/^i[.)]$/.test(prefix)) return { lt: 'li', mk: 'roman' }
@@ -90,6 +121,11 @@ export function bindRichText(ytext, el, opts = {}) {
   const reveal = opts.reveal || (() => false) // true while searching: show folded lines
   const onEmbedClick = opts.onEmbedClick || null // (embed) => void (picture lightbox)
   const onFiles = opts.onFiles || null // (File[]) => void (pasted / dropped pictures)
+  const onTag = opts.onTag || null // (tag) => void, for clicks on #tags
+  const askLink = opts.askLink || null // (currentHref) => Promise<url|''|null>, Ctrl/Cmd+K on a selection
+  const unfurl = opts.unfurl || null // (url) => Promise<title|null>, a pasted link's page title
+  const slashExtras = opts.slashExtras || null // () => [{ id, label, icon, keys, run(rich) }]
+  const useDates = () => (typeof opts.dates === 'function' ? opts.dates() : opts.dates !== false)
   const useArrows = () => (typeof opts.arrows === 'function' ? opts.arrows() : opts.arrows !== false)
   const useSpell = () => (typeof opts.spellcheck === 'function' ? opts.spellcheck() : !!opts.spellcheck)
 
@@ -106,6 +142,7 @@ export function bindRichText(ytext, el, opts = {}) {
   el.setAttribute('aria-multiline', 'true')
   el.classList.add('rb')
   let lastArrow = null // { at, orig, glyph } so Backspace right after can undo it
+  let lastDate = null // { at, orig } so Backspace right after an @date can undo it
   let lastShortcut = null // { at, orig } so Backspace right after can undo a list shortcut
 
   let composing = false
@@ -182,8 +219,11 @@ export function bindRichText(ytext, el, opts = {}) {
     }
     const rec = []
     const used = new Set()
+    const coKind = (a) => (a && a.lt === 'callout' ? a.co || 'note' : null)
     for (let i = 0; i < ls.length; i++) {
       const L = ls[i]
+      const co = coKind(L.attrs)
+      const group = co ? [coKind(ls[i - 1]?.attrs) !== co, coKind(ls[i + 1]?.attrs) !== co] : null
       const kids = ends[i] > i + 1
       const folded = kids && !!(folds && L.attrs.bid && folds.has(L.attrs.bid)) && !showAll
       const emb = opts.embeds === false ? null : embedOf(L.text)
@@ -197,6 +237,7 @@ export function bindRichText(ytext, el, opts = {}) {
         folded ? ends[i] - i - 1 : 0,
         emptyDoc ? el.dataset.ph || '' : null,
         !!emb,
+        group,
       ])
       let lineEl = null
       const cands = pool.get(key)
@@ -204,7 +245,7 @@ export function bindRichText(ytext, el, opts = {}) {
         const c = cands.shift()
         if (!used.has(c)) lineEl = c
       }
-      if (!lineEl) lineEl = buildLine(L, markers[i], kids, folded, ends[i] - i - 1, hidden[i], emb, emptyDoc)
+      if (!lineEl) lineEl = buildLine(L, markers[i], kids, folded, ends[i] - i - 1, hidden[i], emb, emptyDoc, group)
       used.add(lineEl)
       lineEl.dataset.i = String(i)
       rec.push({ ...L, el: lineEl, textEl: lineEl.querySelector('.rb-text'), hidden: hidden[i], kids, end: ends[i], key })
@@ -221,13 +262,16 @@ export function bindRichText(ytext, el, opts = {}) {
     el.classList.toggle('rb-empty', emptyDoc)
   }
 
-  function buildLine(L, marker, kids, folded, nKids, hidden, emb, emptyDoc) {
+  function buildLine(L, marker, kids, folded, nKids, hidden, emb, emptyDoc, group) {
     const a = L.attrs
     const line = document.createElement('div')
+    const kind = a.lt === 'li' || a.lt === 'todo' || a.lt === 'h' || a.lt === 'hr' || a.lt === 'callout' ? a.lt : 'p'
     line.className =
       'rb-line rb-' +
-      (a.lt === 'li' ? 'li' : a.lt === 'todo' ? 'todo' : a.lt === 'h' ? 'h' : 'p') +
+      kind +
       (a.done ? ' done' : '') +
+      (a.lt === 'todo' && !a.done && TODO_STATES[a.ts] ? ' ts-' + { '/': 'doing', '-': 'cancelled', '>': 'deferred' }[a.ts] : '') +
+      (a.lt === 'callout' ? ' co-' + (CALLOUTS.includes(a.co) ? a.co : 'note') + (group && group[0] ? ' co-first' : '') + (group && group[1] ? ' co-last' : '') : '') +
       (a.al ? ' al-' + a.al : '') +
       (hidden ? ' rb-hidden' : '') +
       (folded ? ' folded' : '') +
@@ -259,22 +303,43 @@ export function bindRichText(ytext, el, opts = {}) {
       c.setAttribute('role', 'checkbox')
       c.tabIndex = 0
       c.setAttribute('aria-label', L.runs.map(r => r.text).join('') || 'Checklist item')
-      c.setAttribute('aria-checked', a.done ? 'true' : 'false')
-      c.title = a.done ? 'Done' : 'Tick'
+      c.setAttribute('aria-checked', a.done ? 'true' : a.ts === '/' ? 'mixed' : 'false')
+      c.title = (a.done ? 'Done' : TODO_STATES[a.ts] || 'Tick') + ' (Alt+click for more states)'
       line.appendChild(c)
+    } else if (a.lt === 'callout' && group && group[0] && a.co !== 'quote') {
+      const badge = document.createElement('span')
+      badge.className = 'rb-co-icon'
+      badge.contentEditable = 'false'
+      badge.appendChild(icon({ note: 'note', tip: 'star', warning: 'sun', danger: 'close' }[a.co] || 'note'))
+      line.appendChild(badge)
     }
     const body = document.createElement('span')
     body.className = 'rb-text'
     if (emptyDoc && el.dataset.ph) body.setAttribute('data-ph', el.dataset.ph)
     if (emb) line.appendChild(buildEmbed(emb, a))
     for (const r of L.runs) {
-      let node = linkify(r.text)
-      for (const m of MARKS) {
+      let node = r.marks.href ? document.createTextNode(r.text) : linkify(r.text)
+      for (const m of BOOL_MARKS) {
         if (r.marks[m]) {
           const w = document.createElement(TAG[m])
           w.appendChild(node)
           node = w
         }
+      }
+      if (r.marks.hl) {
+        const w = document.createElement('mark')
+        w.className = 'rb-hl hl-' + r.marks.hl
+        w.appendChild(node)
+        node = w
+      }
+      if (r.marks.href) {
+        const w = document.createElement('a')
+        w.className = 'rb-link rb-href'
+        w.dataset.href = r.marks.href
+        w.title = r.marks.href + (editable ? '  (Ctrl/Cmd+click to open)' : '')
+        w.setAttribute('role', 'link')
+        w.appendChild(node)
+        node = w
       }
       body.appendChild(node)
     }
@@ -294,21 +359,39 @@ export function bindRichText(ytext, el, opts = {}) {
     return line
   }
 
-  // Wrap URLs and [[links]] in a run of text. Returns a single node.
+  // Wrap URLs, [[links]], #tags and @dates in a run of text. Returns a single node.
+  // Every wrapper holds exactly the characters it covers, so indexes still add up.
   function linkify(text) {
-    if (!onLink || !/https?:\/\/|\[\[/.test(text)) return document.createTextNode(text)
+    if (!onLink || !/https?:\/\/|\[\[|[#@]/.test(text)) return document.createTextNode(text)
     const frag = document.createDocumentFragment()
     let last = 0
-    text.replace(LINK_RE, (m, _g, idx) => {
-      if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)))
-      const a = document.createElement('a')
-      a.className = 'rb-link' + (m[0] === '[' ? ' rb-wiki' : '')
-      a.dataset.href = m
-      a.setAttribute('role', 'link'); a.tabIndex = 0
-      a.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); onLink(m) } })
-      a.textContent = m
-      frag.appendChild(a)
-      last = idx + m.length
+    const today = ymd(new Date())
+    text.replace(LINK_RE, (m, link, lead, token, idx) => {
+      const at = link ? idx : idx + lead.length
+      const str = link || token
+      if (at > last) frag.appendChild(document.createTextNode(text.slice(last, at)))
+      let w
+      if (link) {
+        w = document.createElement('a')
+        w.className = 'rb-link' + (link[0] === '[' ? ' rb-wiki' : '')
+        w.dataset.href = link
+        w.setAttribute('role', 'link'); w.tabIndex = 0
+        w.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); onLink(link) } })
+      } else if (token[0] === '#') {
+        w = document.createElement('span')
+        w.className = 'rb-tag'
+        w.dataset.tag = token.slice(1)
+        w.title = 'Notes tagged ' + token + (editable ? '  (Ctrl/Cmd+click)' : '')
+      } else {
+        const d = token.slice(1)
+        w = document.createElement('span')
+        w.className = 'rb-date'
+        w.dataset.state = dueState(d, today) || 'later'
+        w.title = dateLabel(d, today)
+      }
+      w.textContent = str
+      frag.appendChild(w)
+      last = at + str.length
       return m
     })
     if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)))
@@ -516,7 +599,8 @@ export function bindRichText(ytext, el, opts = {}) {
   }
 
   // ---- attribute inspection ----
-  function rangeHasMark(start, end, mark) {
+  // every character of [start, end) carries `mark` (with value `value`, when given)
+  function rangeHasMark(start, end, mark, value) {
     if (end <= start) return false
     let pos = 0
     let covered = 0
@@ -535,7 +619,7 @@ export function bindRichText(ytext, el, opts = {}) {
         for (let k = lo; k < hi; k++) {
           if (s[k] === '\n') continue
           need++
-          if (op.attributes && op.attributes[mark]) covered++
+          if (op.attributes && op.attributes[mark] && (value == null || op.attributes[mark] === value)) covered++
           else return false
         }
       }
@@ -549,7 +633,10 @@ export function bindRichText(ytext, el, opts = {}) {
     if (!sel) return pendingMarks || {}
     if (sel.end > sel.start) {
       const out = {}
-      for (const m of MARKS) if (rangeHasMark(sel.start, sel.end, m)) out[m] = true
+      for (const m of BOOL_MARKS) if (rangeHasMark(sel.start, sel.end, m)) out[m] = true
+      for (const c of HIGHLIGHTS) if (rangeHasMark(sel.start, sel.end, 'hl', c)) out.hl = c
+      const lk = linkAt(sel.start)
+      if (lk && lk.end >= sel.end) out.href = lk.href
       return out
     }
     if (pendingMarks && pendingMarksAt === sel.start) return { ...pendingMarks }
@@ -586,10 +673,11 @@ export function bindRichText(ytext, el, opts = {}) {
   // attributes a new line gets when it is split off / continued from this one
   function continuation(attrs) {
     const a = pickLine(attrs)
-    if (a.lt === 'h') return a.al ? { al: a.al } : {}
+    if (a.lt === 'h' || a.lt === 'hr') return a.al ? { al: a.al } : {}
     const out = {}
     if (a.lt) out.lt = a.lt
     if (a.lt === 'li') out.mk = markOf(a)
+    if (a.lt === 'callout') out.co = a.co || 'note'
     if (isList(a) && a.ind) out.ind = a.ind
     if (a.al) out.al = a.al
     if (isList(a)) out.bid = genLineId()
@@ -700,7 +788,7 @@ export function bindRichText(ytext, el, opts = {}) {
     patchLines(r.a, r.b, (cur) =>
       all
         ? { lt: null, mk: null, ind: null }
-        : { lt: 'li', mk: want, done: null, bid: cur.bid || genLineId() }
+        : { lt: 'li', mk: want, done: null, ts: null, co: null, bid: cur.bid || genLineId() }
     )
   }
 
@@ -710,7 +798,9 @@ export function bindRichText(ytext, el, opts = {}) {
     const all = lines.slice(r.a, r.b + 1).every((L) => L.attrs.lt === 'todo')
     keepSelection(r.sel)
     patchLines(r.a, r.b, (cur) =>
-      all ? { lt: null, done: null, ind: null } : { lt: 'todo', mk: null, done: cur.lt === 'todo' ? cur.done : null, bid: cur.bid || genLineId() }
+      all
+        ? { lt: null, done: null, ts: null, ind: null }
+        : { lt: 'todo', mk: null, co: null, done: cur.lt === 'todo' ? cur.done : null, ts: cur.lt === 'todo' ? cur.ts : null, bid: cur.bid || genLineId() }
     )
   }
 
@@ -719,7 +809,37 @@ export function bindRichText(ytext, el, opts = {}) {
     if (!r) return
     const all = lines.slice(r.a, r.b + 1).every((L) => L.attrs.lt === 'h')
     keepSelection(r.sel)
-    patchLines(r.a, r.b, () => (all ? { lt: null } : { lt: 'h', mk: null, ind: null, done: null }))
+    patchLines(r.a, r.b, () => (all ? { lt: null } : { lt: 'h', mk: null, ind: null, done: null, ts: null, co: null }))
+  }
+
+  function setCallout(kind) {
+    const r = selectedLineRange()
+    if (!r) return
+    const want = CALLOUTS.includes(kind) ? kind : 'note'
+    const all = lines.slice(r.a, r.b + 1).every((L) => L.attrs.lt === 'callout' && (L.attrs.co || 'note') === want)
+    keepSelection(r.sel)
+    patchLines(r.a, r.b, () => (all ? { lt: null, co: null } : { lt: 'callout', co: want, mk: null, ind: null, done: null, ts: null }))
+  }
+
+  // a divider after the line the caret is on (or in place of an empty one), then a fresh line
+  function insertDivider() {
+    const r = selectedLineRange()
+    if (!r) return
+    const L = lines[r.b]
+    tx(() => {
+      ensureTerm()
+      const D = docLines()[r.b]
+      if (!D.len && !D.attrs.lt) {
+        ytext.format(D.start + D.len, 1, fullLine({ lt: 'hr' }))
+        ytext.insert(D.start + 1, '\n', fullLine({}))
+        pendingCaret = D.start + 1
+      } else {
+        const p = D.start + D.len + 1
+        insertLinesAt(ytext, p, [{ text: '', attrs: { lt: 'hr' } }, { text: '', attrs: {} }])
+        pendingCaret = p + 1
+      }
+    })
+    return L
   }
 
   function setAlign(al) {
@@ -734,7 +854,32 @@ export function bindRichText(ytext, el, opts = {}) {
     if (!L || L.attrs.lt !== 'todo') return
     const sel = document.activeElement === el ? getSel() : null
     if (sel) keepSelection(sel)
-    patchLines(i, i, (cur) => ({ done: cur.done ? null : true }))
+    patchLines(i, i, (cur) => ({ done: cur.done ? null : true, ts: null }))
+  }
+
+  // ' ' to do, 'x' done, '/' in progress, '-' cancelled, '>' deferred
+  function setTodoState(i, st) {
+    const L = lines[i]
+    if (!L || L.attrs.lt !== 'todo') return
+    const sel = document.activeElement === el ? getSel() : null
+    if (sel) keepSelection(sel)
+    patchLines(i, i, () => ({ done: st === 'x' ? true : null, ts: TODO_STATES[st] ? st : null }))
+  }
+
+  function todoMenu(anchor, i) {
+    const L = lines[i]
+    if (!L) return
+    const cur = L.attrs.done ? 'x' : L.attrs.ts || ' '
+    ui.menu(
+      anchor,
+      [[' ', 'To do'], ['/', 'In progress'], ['x', 'Done'], ['-', 'Cancelled'], ['>', 'Deferred']].map(([st, label]) => ({
+        label,
+        hint: '[' + st + ']',
+        on: cur === st,
+        onClick: () => setTodoState(i, st),
+      })),
+      { keepFocus: true, cls: 'todo-state-menu' }
+    )
   }
 
   // Tab / Shift+Tab: list lines change level; plain text gets two spaces
@@ -922,14 +1067,21 @@ export function bindRichText(ytext, el, opts = {}) {
     if (end === start && isList(L.attrs) && L.len === 0) {
       pendingCaret = start
       patchLines(i0, i0, (cur) => {
-        if (!cur.ind) return { lt: null, mk: null, done: null, ind: null }
+        if (!cur.ind) return { lt: null, mk: null, done: null, ts: null, co: null, ind: null }
         const patch = { ind: cur.ind - 1 || null }
         if (cur.lt === 'li' && NUMERIC.has(cur.mk) && cur.mk === numericForLevel(cur.ind)) patch.mk = numericForLevel(cur.ind - 1)
         return patch
       })
       return
     }
+    // an empty callout line: Enter leaves the callout
+    if (end === start && L.attrs.lt === 'callout' && L.len === 0) {
+      pendingCaret = start
+      patchLines(i0, i0, () => ({ lt: null, co: null }))
+      return
+    }
     const marks = pendingMarks && pendingMarksAt === start ? { ...pendingMarks } : charMarks(start - 1)
+    delete marks.href // a new line never continues a link
     // at the end of a line: open a new line after it (after its folded children
     // too), so the line - and its id, tick and fold - stays put
     if (end === start && start === L.start + L.len) {
@@ -1002,6 +1154,7 @@ export function bindRichText(ytext, el, opts = {}) {
 
     if (t === 'insertParagraph' || t === 'insertLineBreak') {
       e.preventDefault()
+      if (sel.end === sel.start && convertDate(sel.start, '')) sel = getSel() || sel
       enter(sel)
       return
     }
@@ -1021,8 +1174,21 @@ export function bindRichText(ytext, el, opts = {}) {
             : L && start === L.start
               ? charMarks(start)
               : charMarks(start - 1)
+      if (end <= start) delete marks.href // typing after a link doesn't extend it
       if (data === '' && end <= start) return
       if (t === 'insertFromPaste' || t === 'insertFromDrop') {
+        const url = data.trim()
+        if (/^https?:\/\/\S+$/.test(url) && t === 'insertFromPaste') {
+          // a link pasted onto selected text links that text
+          if (end > start && text.slice(start, end).indexOf('\n') < 0) {
+            setLinkRange(start, end, url)
+            return
+          }
+          if (end === start) {
+            pasteUrl(start, url, marks)
+            return
+          }
+        }
         pasteText(sel, data, marks)
         return
       }
@@ -1050,6 +1216,8 @@ export function bindRichText(ytext, el, opts = {}) {
           return
         }
       }
+      // "@friday " becomes "@2026-10-30 " (Backspace straight after undoes it)
+      if (data === ' ' && end === start && t === 'insertText' && convertDate(start, ' ')) return
       // smart arrows: "->" becomes "→" etc. (single typed character only)
       if (useArrows() && data.length === 1 && end === start && t === 'insertText') {
         const before = text.slice(Math.max(0, start - 3), start)
@@ -1067,6 +1235,7 @@ export function bindRichText(ytext, el, opts = {}) {
       }
       lastArrow = null
       lastShortcut = null
+      lastDate = null
       replaceRange(start, end, data, marks)
       return
     }
@@ -1081,6 +1250,14 @@ export function bindRichText(ytext, el, opts = {}) {
       }
       const iL = lineIndexAt(start)
       const L = lines[iL]
+      // Backspace straight after an @date puts the typed words back.
+      if (t === 'deleteContentBackward' && lastDate && lastDate.at === start) {
+        const ld = lastDate
+        lastDate = null
+        replaceRange(ld.from, start, ld.orig, charMarks(ld.from))
+        return
+      }
+      lastDate = null
       // Backspace straight after a smart arrow puts the typed characters back.
       if (t === 'deleteContentBackward' && lastArrow && lastArrow.at === start && text[start - 1] === lastArrow.glyph) {
         const la = lastArrow
@@ -1100,7 +1277,7 @@ export function bindRichText(ytext, el, opts = {}) {
             ensureTerm()
             const ls = docLines()
             const D = ls[iL]
-            ytext.format(D.start + D.len, 1, { lt: null, mk: null, done: null, ind: null })
+            ytext.format(D.start + D.len, 1, { lt: null, mk: null, done: null, ts: null, co: null, ind: null })
             ytext.insert(D.start, orig, {})
           })
           return
@@ -1109,7 +1286,7 @@ export function bindRichText(ytext, el, opts = {}) {
         // at the start of a list item / checkbox / heading: drop the type first
         if (L.attrs.lt) {
           pendingCaret = start
-          patchLines(iL, iL, () => ({ lt: null, mk: null, done: null, ind: null }))
+          patchLines(iL, iL, () => ({ lt: null, mk: null, done: null, ts: null, co: null, ind: null }))
           return
         }
         if (iL > 0 && lines[iL - 1].hidden) {
@@ -1203,6 +1380,102 @@ export function bindRichText(ytext, el, opts = {}) {
     })
   }
 
+  // "@in 3 days" just before the caret (at `pos`) becomes "@2026-10-31"; `tail` is
+  // what was being typed (a space, or '' for Enter). Returns true if it did.
+  function convertDate(pos, tail) {
+    if (!useDates()) return false
+    const L = lines[lineIndexAt(pos)]
+    if (!L) return false
+    const before = ytext.toString().slice(L.start, pos)
+    const hit = dateBeforeCaret(before, ymd(new Date()))
+    if (!hit) return false
+    const from = L.start + hit.from
+    const orig = before.slice(hit.from) + tail
+    const marks = charMarks(from)
+    delete marks.href
+    replaceRange(from, pos, '@' + hit.date + tail, marks)
+    lastDate = { from, at: from + 1 + hit.date.length + tail.length, orig }
+    lastArrow = null
+    lastShortcut = null
+    return true
+  }
+
+  // labelled links: the characters of [start, end) (never the line breaks) get href
+  function setLinkRange(start, end, url) {
+    pendingRange = [start, end]
+    const s = ytext.toString()
+    tx(() => {
+      let a = start
+      while (a < end) {
+        let b = s.indexOf('\n', a)
+        if (b < 0 || b > end) b = end
+        if (b > a) ytext.format(a, b - a, { href: url || null })
+        a = b + 1
+      }
+    })
+  }
+
+  // the link around the caret / selection: [start, end) of the run carrying it
+  function linkAt(index) {
+    const s = ytext.toString()
+    const href = charAttrs(index).href || charAttrs(index - 1).href
+    if (!href) return null
+    let a = charAttrs(index).href === href ? index : index - 1
+    let b = a
+    while (a > 0 && s[a - 1] !== '\n' && charAttrs(a - 1).href === href) a--
+    while (b < s.length && s[b] !== '\n' && charAttrs(b).href === href) b++
+    return { start: a, end: b, href }
+  }
+
+  // Ctrl/Cmd+K on a selection (or inside a link): ask for the address
+  async function editLink() {
+    if (!askLink) return false
+    const sel = getSel()
+    if (!sel) return false
+    const cur = linkAt(sel.start)
+    let range = sel.end > sel.start ? sel : cur
+    if (!range) return false
+    const url = await askLink(cur ? cur.href : '')
+    if (url == null) return true
+    el.focus()
+    let clean = url.trim()
+    if (clean && !/^(https?:\/\/|mailto:)/i.test(clean)) {
+      if (/^[a-z][\w+.-]*:/i.test(clean) && !/^[\w.-]+:\d/.test(clean)) {
+        ui.toast('Only web (https://) and e-mail (mailto:) links can be added.')
+        return true
+      }
+      clean = 'https://' + clean
+    }
+    setLinkRange(range.start, range.end, clean || null)
+    return true
+  }
+
+  // A single pasted address: inserted as is, then (unless it is a picture or a
+  // video on a line of its own) given its page's title once the Pi has fetched it.
+  function pasteUrl(pos, url, marks) {
+    replaceRange(pos, pos, url, marks)
+    if (!unfurl) return
+    const L = lines[lineIndexAt(pos)]
+    if (L && L.text === url && embedOf(url)) return
+    unfurl(url)
+      .then((title) => {
+        const name = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 200)
+        if (!name) return
+        // only if the address is still exactly where we put it
+        if (ytext.toString().slice(pos, pos + url.length) !== url) return
+        const focused = document.activeElement === el
+        const sel = focused ? getSel() : null
+        const shift = name.length - url.length
+        const m = { ...charMarks(pos), href: url }
+        tx(() => {
+          ytext.delete(pos, url.length)
+          ytext.insert(pos, name, m)
+        })
+        if (sel) setSelection(sel.start > pos ? sel.start + shift : sel.start, sel.end > pos ? sel.end + shift : sel.end)
+      })
+      .catch(() => {})
+  }
+
   // Copy / cut as text with list prefixes, so structure survives a paste.
   function selectionPlain(sel) {
     const s = ytext.toString().slice(sel.start, sel.end)
@@ -1218,11 +1491,13 @@ export function bindRichText(ytext, el, opts = {}) {
       if (from === L.start) {
         const at = L.attrs
         const pad = '  '.repeat(isList(at) ? at.ind || 0 : 0)
-        if (at.lt === 'todo') line = pad + (at.done ? '- [x] ' : '- [ ] ') + line
+        if (at.lt === 'todo') line = pad + '- [' + (at.done ? 'x' : TODO_STATES[at.ts] ? at.ts : ' ') + '] ' + line
         else if (at.lt === 'li') {
           const mk = at.mk || 'disc'
           line = pad + (NUMERIC.has(mk) ? (L.el.querySelector('.rb-mark') || {}).textContent + ' ' : mk === 'arrow' ? '→ ' : '- ') + line
         } else if (at.lt === 'h') line = '# ' + line
+        else if (at.lt === 'hr') line = '***'
+        else if (at.lt === 'callout') line = (at.co && at.co !== 'quote' ? '> [!' + at.co + '] ' : '> ') + line
       }
       out.push(line)
       pos = L.start + L.len + 1
@@ -1336,9 +1611,23 @@ export function bindRichText(ytext, el, opts = {}) {
       indent(e.shiftKey ? -1 : 1)
       return
     }
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      e.preventDefault()
+      moveBlock(e.key === 'ArrowUp' ? -1 : 1)
+      return
+    }
     const mod = e.ctrlKey || e.metaKey
     if (!mod) return
     const k = e.key.toLowerCase()
+    if (k === 'k' && !e.shiftKey && !e.altKey && askLink) {
+      const sel = getSel()
+      if (sel && (sel.end > sel.start || linkAt(sel.start))) {
+        e.preventDefault()
+        editLink()
+        return
+      }
+    }
+    if (e.shiftKey && !e.altKey && k === 'h') return prevent(e, () => toggleMark('hl', 'yellow'))
     if (e.shiftKey && !e.altKey) {
       if (k === 'l') return prevent(e, () => setAlign('left'))
       if (k === 'e') return prevent(e, () => setAlign('center'))
@@ -1377,12 +1666,83 @@ export function bindRichText(ytext, el, opts = {}) {
     fn()
   }
 
-  function toggleMark(mark) {
-    if (!MARKS.includes(mark)) return
+  // ---- Alt+Shift+↑/↓: move the line (with what it owns) past its neighbour ----
+  function ownerOf(ls, ends, i) {
+    for (let k = i - 1; k >= 0; k--) if (ends[k] > i) return k
+    return -1
+  }
+  function moveBlock(dir) {
+    const r = selectedLineRange()
+    if (!r) return
+    const ls = docLines()
+    const ends = subtreeEnds(ls)
+    const a = r.a
+    let b = r.a
+    for (let i = r.a; i <= r.b; i++) b = Math.max(b, ends[i] - 1)
+    const owner = ownerOf(ls, ends, a)
+    const sel = r.sel
+    const off = sel.start - ls[a].start
+    const offEnd = sel.end - ls[a].start
+    let after // the line our block should follow (-1 = top)
+    if (dir < 0) {
+      if (a === 0) return
+      // the sibling above (with its own children), else just the line above
+      let j = a - 1
+      for (let k = a - 1; k >= 0 && k > owner; k--) if (ends[k] === a && ownerOf(ls, ends, k) === owner) j = k
+      after = j - 1
+    } else {
+      const n = b + 1
+      if (n >= ls.length || (n === ls.length - 1 && !ls[n].text && !ls[n].attrs.lt && !ls[n].term)) return
+      after = ownerOf(ls, ends, n) === owner && ends[n] - 1 > n ? ends[n] - 1 : n
+    }
+    lastArrow = null
+    lastShortcut = null
+    tx(() => {
+      ensureTerm()
+      moveLinesLocal(a, b + 1, after)
+      const now = docLines()
+      const newA = dir < 0 ? after + 1 : after - (b - a)
+      const at = now[newA]
+      if (at) {
+        if (sel.end > sel.start) pendingRange = [at.start + off, at.start + offEnd]
+        else pendingCaret = at.start + off
+      }
+    })
+  }
+  // move lines [from, to) to follow line `after`, keeping every attribute
+  function moveLinesLocal(from, to, after) {
+    const ls = docLines()
+    const delta = ytext.toDelta()
+    const a = ls[from].start
+    const last = ls[to - 1]
+    const z = last.start + last.len + 1
+    const chunk = []
+    let pos = 0
+    for (const op of delta) {
+      const len = typeof op.insert === 'string' ? op.insert.length : 1
+      const lo = Math.max(pos, a)
+      const hi = Math.min(pos + len, z)
+      if (hi > lo && typeof op.insert === 'string') chunk.push({ text: op.insert.slice(lo - pos, hi - pos), attrs: op.attributes || {} })
+      pos += len
+    }
+    const target = after < 0 ? 0 : ls[after].start + ls[after].len + 1
+    const insertAt = target > a ? target - (z - a) : target
+    ytext.delete(a, z - a)
+    let p = insertAt
+    for (const c of chunk) {
+      ytext.insert(p, c.text, { ...c.attrs })
+      p += c.text.length
+    }
+  }
+
+  // b / i / u / s, or 'hl' with a colour (the same colour again takes it off)
+  function toggleMark(mark, value) {
+    if (!BOOL_MARKS.includes(mark) && mark !== 'hl') return
+    const want = mark === 'hl' ? (HIGHLIGHTS.includes(value) ? value : 'yellow') : true
     const sel = getSel()
     if (!sel) return
     if (sel.end > sel.start) {
-      const has = rangeHasMark(sel.start, sel.end, mark)
+      const has = rangeHasMark(sel.start, sel.end, mark, mark === 'hl' ? want : undefined)
       pendingRange = [sel.start, sel.end]
       // format only the characters, never the line breaks (they hold line attributes)
       const s = ytext.toString()
@@ -1391,22 +1751,26 @@ export function bindRichText(ytext, el, opts = {}) {
         while (a < sel.end) {
           let b = s.indexOf('\n', a)
           if (b < 0 || b > sel.end) b = sel.end
-          if (b > a) ytext.format(a, b - a, { [mark]: has ? null : true })
+          if (b > a) ytext.format(a, b - a, { [mark]: has ? null : want })
           a = b + 1
         }
       })
     } else {
       const base = pendingMarks && pendingMarksAt === sel.start ? { ...pendingMarks } : charMarks(sel.start - 1)
-      if (base[mark]) delete base[mark]
-      else base[mark] = true
+      delete base.href
+      if (base[mark] === want) delete base[mark]
+      else base[mark] = want
       pendingMarks = base
       pendingMarksAt = sel.start
       emitState()
     }
   }
 
-  // ---- [[link]] picker ----------------------------------------------------
-  let picker = null // { el, items, index, from } while open
+  // ---- pickers: [[link]] and the / menu -------------------------------------
+  // One floating list under the caret. mode 'link': "[[partial" before the caret,
+  // candidates from the app (notes, tabs, "Note#heading", "Note^line"); mode
+  // 'slash': "/word" at the start of a line or after a space.
+  let picker = null // { el, items, index, from, mode } while open
 
   function closePicker() {
     if (!picker) return
@@ -1414,27 +1778,40 @@ export function bindRichText(ytext, el, opts = {}) {
     picker = null
   }
 
-  // Look for "[[partial" just before the caret and show matching titles.
+  function slashItems(q) {
+    const all = SLASH.concat(slashExtras ? slashExtras() : [])
+    const want = q.toLowerCase()
+    return all.filter((c) => !want || c.label.toLowerCase().includes(want) || (c.keys || '').toLowerCase().includes(want))
+  }
+
   function updatePicker() {
-    if (!linkCandidates || document.activeElement !== el) return closePicker()
+    if (document.activeElement !== el || !editable) return closePicker()
     const sel = getSel()
     if (!sel || sel.end !== sel.start) return closePicker()
     const text = ytext.toString()
-    const before = text.slice(Math.max(0, sel.start - 80), sel.start)
-    const m = /\[\[([^\]\n]*)$/.exec(before)
-    if (!m) return closePicker()
-    const q = m[1].toLowerCase()
-    const items = linkCandidates()
-      .filter((c) => c.label && c.label.toLowerCase().includes(q))
-      .slice(0, 8)
-    if (!items.length) return closePicker()
+    const L = lines[lineIndexAt(sel.start)]
+    const before = text.slice(Math.max(L ? L.start : 0, sel.start - 80), sel.start)
+    let mode = null
+    let m = linkCandidates ? /\[\[([^\]\n]*)$/.exec(before) : null
+    let items = []
+    if (m) {
+      mode = 'link'
+      items = linkCandidates(m[1]).slice(0, 8)
+    } else if (opts.slash !== false && (m = /(^|\s)\/([\w-]{0,20})$/.exec(before))) {
+      mode = 'slash'
+      items = slashItems(m[2]).slice(0, 10)
+      m = [m[0].slice(m[1].length)] // the "/word" itself
+    }
+    if (!mode || !items.length) return closePicker()
     clearTimeout(blurTimer)
+    if (picker && picker.mode !== mode) closePicker()
     if (!picker) {
       const box = document.createElement('div')
-      box.className = 'rb-picker'
+      box.className = 'rb-picker' + (mode === 'slash' ? ' rb-slash' : '')
+      box.setAttribute('role', 'listbox')
       box.addEventListener('mousedown', (e) => e.preventDefault()) // keep the caret
       document.body.appendChild(box)
-      picker = { el: box, items: [], index: 0, from: 0 }
+      picker = { el: box, items: [], index: 0, from: 0, mode }
     }
     picker.items = items
     picker.index = Math.min(picker.index, items.length - 1)
@@ -1443,8 +1820,16 @@ export function bindRichText(ytext, el, opts = {}) {
     items.forEach((c, i) => {
       const row = document.createElement('div')
       row.className = 'rb-pick' + (i === picker.index ? ' on' : '')
+      row.setAttribute('role', 'option')
+      if (c.icon) {
+        const ic = document.createElement('span')
+        ic.className = 'rb-pick-icon'
+        ic.appendChild(icon(c.icon))
+        row.appendChild(ic)
+      }
       const l = document.createElement('span')
-      l.textContent = c.label
+      l.className = 'rb-pick-label'
+      l.textContent = c.display || c.label
       row.appendChild(l)
       if (c.hint) {
         const hnt = document.createElement('span')
@@ -1468,14 +1853,47 @@ export function bindRichText(ytext, el, opts = {}) {
     picker.el.style.left = Math.max(4, left) + window.scrollX + 'px'
   }
 
-  function choosePick(i) {
+  async function choosePick(i) {
     if (!picker) return
     const c = picker.items[i]
     const sel = getSel()
     if (!c || !sel) return closePicker()
     const from = picker.from
+    const mode = picker.mode
     closePicker()
-    replaceRange(from, sel.end, '[[' + c.label + ']]', charMarks(from - 1))
+    if (mode === 'link') {
+      // a candidate may need work first (giving a line an id to link to)
+      const label = c.onPick ? await c.onPick() : c.label
+      if (!label) return
+      replaceRange(from, sel.end, '[[' + label + ']]', charMarks(from - 1))
+      return
+    }
+    // slash: remove "/word", then run the command on that line
+    replaceRange(from, sel.end, '', charMarks(from - 1))
+    runSlash(c)
+  }
+
+  function runSlash(c) {
+    const id = c.id
+    if (c.run) return c.run(api)
+    if (id === 'h') return toggleHeading()
+    if (id === 'li') return toggleList('disc')
+    if (id === 'ol') return toggleList('decimal')
+    if (id === 'todo') return toggleTodo()
+    if (id === 'hr') return insertDivider()
+    if (id.startsWith('co:')) return setCallout(id.slice(3))
+    if (id === 'hl') return toggleMark('hl', 'yellow')
+    if (id === 'link') {
+      const sel = getSel()
+      if (sel) replaceRange(sel.start, sel.end, '[[', charMarks(sel.start - 1))
+      return
+    }
+    if (id.startsWith('date:')) {
+      const d = new Date()
+      d.setDate(d.getDate() + Number(id.slice(5)))
+      const sel = getSel()
+      if (sel) replaceRange(sel.start, sel.end, '@' + ymd(d) + ' ', charMarks(sel.start - 1))
+    }
   }
 
   function pickerKey(e) {
@@ -1484,6 +1902,7 @@ export function bindRichText(ytext, el, opts = {}) {
       const n = picker.items.length
       picker.index = (picker.index + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
       Array.from(picker.el.children).forEach((row, i) => row.classList.toggle('on', i === picker.index))
+      picker.el.children[picker.index]?.scrollIntoView({ block: 'nearest' })
       return true
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
@@ -1493,6 +1912,7 @@ export function bindRichText(ytext, el, opts = {}) {
     }
     if (e.key === 'Escape') {
       e.preventDefault()
+      e.stopPropagation()
       closePicker()
       return true
     }
@@ -1520,8 +1940,16 @@ export function bindRichText(ytext, el, opts = {}) {
       const lineEl = ctl.closest('.rb-line')
       const i = lineEl ? Number(lineEl.dataset.i) : -1
       if (i < 0 || !lines[i]) return
-      if (ctl.classList.contains('rb-check')) toggleDone(i)
-      else toggleFold(i)
+      if (ctl.classList.contains('rb-check')) {
+        if (e.altKey && editable) todoMenu(ctl, i)
+        else toggleDone(i)
+      } else toggleFold(i)
+      return
+    }
+    const tag = tgt.closest('.rb-tag')
+    if (tag && el.contains(tag) && onTag && !(hadFocusAtPointerDown && editable && !(e.ctrlKey || e.metaKey))) {
+      e.preventDefault()
+      onTag(tag.dataset.tag)
       return
     }
     if (!onLink) return
@@ -1602,15 +2030,119 @@ export function bindRichText(ytext, el, opts = {}) {
   el.addEventListener('focus', onFocus)
   document.addEventListener('selectionchange', onSelectionChange)
 
-  return {
+  // ---- for the app: jump to a line, take or replace the selection, insert lines ----
+  // Find a line by { bid } / { heading } / { index }; unfold what hides it.
+  function findLine(where) {
+    if (!where) return -1
+    if (where.index != null) return Math.min(lines.length - 1, Math.max(0, where.index))
+    if (where.bid) return lines.findIndex((L) => L.attrs.bid === where.bid)
+    if (where.heading) {
+      const want = String(where.heading).trim().toLowerCase()
+      return lines.findIndex((L) => L.attrs.lt === 'h' && L.text.trim().toLowerCase() === want)
+    }
+    return -1
+  }
+  function revealAt(where, { caret = false, flash = true } = {}) {
+    const i = findLine(where)
+    if (i < 0) return false
+    revealLine(i)
+    const L = lines[i]
+    if (!L || !L.el) return false
+    L.el.scrollIntoView({ block: 'center' })
+    if (flash) {
+      L.el.classList.remove('rb-flash')
+      void L.el.offsetWidth
+      L.el.classList.add('rb-flash')
+      setTimeout(() => L.el && L.el.classList.remove('rb-flash'), 1600)
+    }
+    if (caret) {
+      el.focus({ preventScroll: true })
+      setCaret(L.start + L.len)
+    }
+    return true
+  }
+  // give line `where` an id (to link to it) and return the id
+  function ensureLineId(index) {
+    const ls = docLines()
+    const L = ls[index]
+    if (!L) return null
+    if (L.attrs.bid) return L.attrs.bid
+    const bid = genLineId()
+    ytext.doc.transact(() => {
+      ensureTerm()
+      const D = docLines()[index]
+      ytext.format(D.start + D.len, 1, { bid })
+    }, META)
+    return bid
+  }
+  // the selection as lines [{ text, attrs, runs }] (whole lines keep their type)
+  function selectionLines() {
+    const sel = getSel() || lastSel
+    if (!sel || sel.end <= sel.start) return null
+    const delta = ytext.toDelta()
+    const s = ytext.toString()
+    // a selection that ends at a line's end takes that line's type with it
+    const end = s[sel.end] === '\n' ? sel.end + 1 : sel.end
+    const slice = []
+    let pos = 0
+    for (const op of delta) {
+      const len = typeof op.insert === 'string' ? op.insert.length : 1
+      const lo = Math.max(pos, sel.start)
+      const hi = Math.min(pos + len, end)
+      if (hi > lo && typeof op.insert === 'string') slice.push({ insert: op.insert.slice(lo - pos, hi - pos), attributes: op.attributes })
+      pos += len
+    }
+    const ls = deltaToLines(slice).filter((L, i, all) => L.text || L.attrs.lt || i < all.length - 1)
+    return { start: sel.start, end: sel.end, lines: ls.map((L) => ({ text: L.text, attrs: pickLine(L.attrs), runs: L.runs })) }
+  }
+  function replaceSpan(start, end, str) {
+    const m = charMarks(start)
+    delete m.href
+    replaceRange(start, end, str, m)
+  }
+  // put lines after the caret's line (into it, when it is empty)
+  function insertLines(newLines) {
+    if (!newLines || !newLines.length) return
+    const sel = (document.activeElement === el && getSel()) || lastSel
+    tx(() => {
+      ensureTerm()
+      const ls = docLines()
+      const i = sel ? lineIndexAt(Math.min(sel.start, ytext.length)) : ls.length - 1
+      const L = ls[Math.max(0, Math.min(i, ls.length - 1))]
+      let p
+      if (!L.len && !L.attrs.lt) {
+        ytext.delete(L.start, 1)
+        p = L.start
+      } else p = L.start + L.len + 1
+      const endP = insertLinesAt(ytext, p, newLines.map((nl) => ({ ...nl, attrs: { ...(nl.attrs || {}), bid: null } })))
+      pendingCaret = Math.max(0, endP - 1)
+    })
+  }
+  function insertAtCaret(str) {
+    const sel = (document.activeElement === el && getSel()) || lastSel
+    const at = sel ? sel.start : ytext.length
+    replaceSpan(at, sel ? sel.end : at, str)
+  }
+
+  const api = {
     toggleMark,
     indent,
     toggleList,
     toggleTodo,
     toggleHeading,
+    setCallout,
+    insertDivider,
     setAlign,
     toggleFoldAtCaret,
     insertMedia,
+    editLink,
+    revealAt,
+    ensureLineId,
+    selectionLines,
+    replaceSpan,
+    insertLines,
+    insertAtCaret,
+    lines: () => lines.map((L) => ({ text: L.text, attrs: L.attrs, start: L.start, len: L.len })),
     getActiveMarks: activeMarks,
     lineState,
     refresh: () => render(),
@@ -1650,4 +2182,5 @@ export function bindRichText(ytext, el, opts = {}) {
       undo.destroy()
     },
   }
+  return api
 }

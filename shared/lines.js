@@ -2,34 +2,46 @@
 // server (mirror, REST API, migrations) and the tests. Pure JS, no imports.
 //
 // A note body is still ONE Y.Text. Inline formatting lives on characters as
-// attributes (b/i/u/s), exactly as before. Block structure lives on the '\n'
+// attributes (b/i/u/s, hl, href), exactly as before. Block structure lives on the '\n'
 // that ENDS each line, the same way Quill stores line formats:
 //
-//   lt    line type: 'li' (list item) | 'todo' (checkbox) | 'h' (heading); absent = paragraph
+//   lt    line type: 'li' (list item) | 'todo' (checkbox) | 'h' (heading) |
+//         'hr' (divider) | 'callout'; absent = paragraph
 //   mk    list marker: disc | square | arrow | dash | decimal | alpha | roman (li only)
 //   ind   indent level 1..5 (li / todo); absent = 0
 //   done  true when a todo is ticked
+//   ts    a todo's other states: '/' in progress, '-' cancelled, '>' deferred
+//   co    callout kind: note | tip | warning | danger | quote (callout only)
 //   al    'center' | 'right'; absent = left
 //   bid   a stable id for the line (todo/li lines get one when created; any line
-//         gets one the first time it is folded). Used for per-device folding and
-//         by the REST API to tick a todo.
+//         gets one the first time it is folded or linked to). Used for per-device
+//         folding, [[Note^id]] links and by the REST API to tick a todo.
 //   ew    embed width in percent (10..100) for a line that is just a media URL
+//
+// Inline marks: b/i/u/s are true; hl is a highlight colour (see HIGHLIGHTS);
+// href is the address of a labelled link.
 //
 // The last line of a body normally ends with '\n' too. Bodies written before
 // this model (or by old clients) may not; such a last line simply has no line
 // attributes until something needs them, at which point the editor appends the
 // missing '\n' (see richbody's ensureTerminator).
 
-export const MARKS = ['b', 'i', 'u', 's']
-export const LINE_KEYS = ['lt', 'mk', 'ind', 'done', 'al', 'bid', 'ew']
+export const MARKS = ['b', 'i', 'u', 's', 'hl', 'href']
+export const BOOL_MARKS = ['b', 'i', 'u', 's']
+export const HIGHLIGHTS = ['yellow', 'green', 'blue', 'pink', 'purple']
+export const LINE_KEYS = ['lt', 'mk', 'ind', 'done', 'ts', 'co', 'al', 'bid', 'ew']
 export const MARKERS = ['disc', 'square', 'arrow', 'dash', 'decimal', 'alpha', 'roman']
 export const NUMERIC = new Set(['decimal', 'alpha', 'roman'])
+export const CALLOUTS = ['note', 'tip', 'warning', 'danger', 'quote']
+export const TODO_STATES = { '/': 'In progress', '-': 'Cancelled', '>': 'Deferred' }
 export const MAX_IND = 5
 
 export function pickMarks(attrs) {
   const out = {}
   if (!attrs) return out
-  for (const k of MARKS) if (attrs[k]) out[k] = true
+  for (const k of BOOL_MARKS) if (attrs[k]) out[k] = true
+  if (attrs.hl) out.hl = HIGHLIGHTS.includes(attrs.hl) ? attrs.hl : 'yellow'
+  if (typeof attrs.href === 'string' && attrs.href) out.href = attrs.href
   return out
 }
 
@@ -93,8 +105,8 @@ export function deltaToLines(delta) {
   return lines
 }
 
-function sameMarks(a, b) {
-  for (const k of MARKS) if (!!a[k] !== !!b[k]) return false
+export function sameMarks(a, b) {
+  for (const k of MARKS) if ((a[k] || null) !== (b[k] || null)) return false
   return true
 }
 
@@ -307,18 +319,30 @@ function runsToMarkdown(runs) {
       out += r.text
       continue
     }
-    const open = (m.b ? '**' : '') + (m.i ? '*' : '') + (m.u ? '<u>' : '') + (m.s ? '~~' : '')
-    const close = (m.s ? '~~' : '') + (m.u ? '</u>' : '') + (m.i ? '*' : '') + (m.b ? '**' : '')
-    out += open + r.text + close
+    const hl = m.hl ? (m.hl === 'yellow' ? ['==', '=='] : [`<mark data-color="${m.hl}">`, '</mark>']) : ['', '']
+    const open = hl[0] + (m.b ? '**' : '') + (m.i ? '*' : '') + (m.u ? '<u>' : '') + (m.s ? '~~' : '')
+    const close = (m.s ? '~~' : '') + (m.u ? '</u>' : '') + (m.i ? '*' : '') + (m.b ? '**' : '') + hl[1]
+    const inner = open + r.text + close
+    out += m.href ? `[${inner}](${m.href.replace(/[()\s]/g, encodeURIComponent)})` : inner
   }
   return out
 }
 
+/** Is line i the first of a run of callout lines of the same kind? */
+const calloutStarts = (lines, i) => {
+  const a = lines[i].attrs || {}
+  const p = i > 0 ? lines[i - 1].attrs || {} : {}
+  return !(p.lt === 'callout' && (p.co || 'note') === (a.co || 'note'))
+}
+
+const todoBox = (a) => `[${a.done ? 'x' : a.ts && TODO_STATES[a.ts] ? a.ts : ' '}] `
+
 /**
  * Lines → Markdown. Lists become `- `, `1. `, `a. `, `→ ` …, todos `- [ ] `,
- * headings `### `, nesting two spaces per level, media lines `![](…)` (with
- * `/media/` swapped for `mediaPrefix`, so the link works from wherever the file
- * is written). Alignment has no Markdown form and is dropped.
+ * headings `### `, dividers `***`, callouts `> [!tip] ` (then `> ` for the
+ * lines that continue it), nesting two spaces per level, media lines `![](…)`
+ * (with `/media/` swapped for `mediaPrefix`, so the link works from wherever
+ * the file is written). Alignment has no Markdown form and is dropped.
  */
 export function linesToMarkdown(lines, opts = {}) {
   const markers = computeMarkers(lines)
@@ -330,13 +354,17 @@ export function linesToMarkdown(lines, opts = {}) {
     const pad = '  '.repeat(isList(a) ? a.ind || 0 : 0)
     const emb = embedOf(L.text)
     let body = emb ? embedMarkdown(emb, mediaPrefix) : runsToMarkdown(L.runs)
-    if (a.lt === 'todo') out.push(pad + `- [${a.done ? 'x' : ' '}] ` + body)
+    if (a.lt === 'todo') out.push(pad + '- ' + todoBox(a) + body)
     else if (a.lt === 'li') {
       const mk = a.mk || 'disc'
       const lead = NUMERIC.has(mk) ? markers[i] + ' ' : mk === 'arrow' ? '→ ' : '- '
       out.push(pad + lead + body)
     } else if (a.lt === 'h') out.push('### ' + body)
-    else out.push(body)
+    else if (a.lt === 'hr') out.push('***')
+    else if (a.lt === 'callout') {
+      const kind = CALLOUTS.includes(a.co) ? a.co : 'note'
+      out.push(calloutStarts(lines, i) && kind !== 'quote' ? `> [!${kind}] ${body}` : '> ' + body)
+    } else out.push(body)
   }
   // an unterminated empty last line is not content
   while (out.length > 1 && out[out.length - 1] === '' && !lines[lines.length - 1].term) out.pop()
@@ -360,8 +388,10 @@ export function linesToPlain(lines) {
     .map((L, i) => {
       const a = L.attrs || {}
       const pad = '  '.repeat(isList(a) ? a.ind || 0 : 0)
-      if (a.lt === 'todo') return pad + (a.done ? '- [x] ' : '- [ ] ') + L.text
+      if (a.lt === 'todo') return pad + '- ' + todoBox(a) + L.text
       if (a.lt === 'li') return pad + (NUMERIC.has(a.mk) ? markers[i] + ' ' : a.mk === 'arrow' ? '→ ' : '- ') + L.text
+      if (a.lt === 'hr') return '***'
+      if (a.lt === 'callout') return '> ' + L.text
       return L.text
     })
     .join('\n')
@@ -372,13 +402,23 @@ export function linesToPlain(lines) {
  * history restore and the REST API). Returns { attrs, rest } or null.
  */
 export function parseLinePrefix(line) {
-  const m = /^(\s*)(- \[( |x|X)\] |[-*+•] |→ |-> |(\d{1,3})[.)] |([a-z])[.)] |([ivxlc]{1,6})[.)] |#{1,6} )(.*)$/.exec(line)
+  const q = /^>\s?(?:\[!(\w+)\][+-]?\s?)?(.*)$/.exec(line)
+  if (q) {
+    const kind = q[1] ? q[1].toLowerCase() : null
+    return { attrs: { lt: 'callout', co: kind ? (CALLOUTS.includes(kind) ? kind : 'note') : 'quote' }, rest: q[2], calloutHead: !!kind }
+  }
+  const m = /^(\s*)(- \[( |x|X|\/|-|>)\] |[-*+•] |→ |-> |(\d{1,3})[.)] |([a-z])[.)] |([ivxlc]{1,6})[.)] |#{1,6} )(.*)$/.exec(line)
   if (!m) return null
   const ind = Math.min(MAX_IND, Math.floor(m[1].replace(/\t/g, '  ').length / 2))
   const head = m[2]
   const rest = m[7]
   const withInd = (o) => (ind ? { ...o, ind } : o)
-  if (head.startsWith('- [')) return { attrs: withInd(m[3] === ' ' ? { lt: 'todo' } : { lt: 'todo', done: true }), rest }
+  if (head.startsWith('- [')) {
+    const box = m[3]
+    if (box === 'x' || box === 'X') return { attrs: withInd({ lt: 'todo', done: true }), rest }
+    if (TODO_STATES[box]) return { attrs: withInd({ lt: 'todo', ts: box }), rest }
+    return { attrs: withInd({ lt: 'todo' }), rest }
+  }
   if (head[0] === '#') return { attrs: { lt: 'h' }, rest }
   if (head === '→ ' || head === '-> ') return { attrs: withInd({ lt: 'li', mk: 'arrow' }), rest }
   if (m[4]) return { attrs: withInd({ lt: 'li', mk: 'decimal' }), rest }
@@ -387,34 +427,114 @@ export function parseLinePrefix(line) {
   return { attrs: withInd({ lt: 'li', mk: 'disc' }), rest }
 }
 
-/** Strip the simple Markdown marks this app writes (**, *, ~~, <u>). */
+/** Strip the simple Markdown marks this app writes (**, *, ~~, <u>, ==, <mark>, [text](url)). */
 export function stripMarks(s) {
   return String(s || '')
+    .replace(/\[([^\]\[]+)\]\((https?:\/\/[^)\s]+)\)/g, '$1')
     .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g, '$1$2')
     .replace(/~~(.+?)~~/g, '$1')
+    .replace(/==(.+?)==/g, '$1')
     .replace(/<\/?u>/g, '')
+    .replace(/<mark[^>]*>|<\/mark>/g, '')
+}
+
+const INLINE_TOKEN = /(\*\*|~~|==|<u>|<\/u>|<mark(?: data-color="(\w+)")?>|<\/mark>|\*)/
+
+/**
+ * Inline Markdown → runs [{ text, marks }]: the marks this app writes, plus
+ * [label](https://…) links. Anything unbalanced is kept as plain text.
+ */
+export function parseInline(md) {
+  const src = String(md || '')
+  const runs = []
+  const push = (text, marks) => {
+    if (!text) return
+    const last = runs[runs.length - 1]
+    if (last && sameMarks(last.marks, marks)) last.text += text
+    else runs.push({ text, marks })
+  }
+  // links first: [label](url) → the label's runs carry href
+  const LINK = /\[([^\]\[]+)\]\((https?:\/\/[^)\s]+)\)/g
+  let last = 0
+  let m
+  const parts = []
+  while ((m = LINK.exec(src))) {
+    if (m.index > last) parts.push({ text: src.slice(last, m.index) })
+    let href = m[2]
+    try {
+      href = decodeURI(href)
+    } catch {
+      /* keep as written */
+    }
+    parts.push({ text: m[1], href })
+    last = m.index + m[0].length
+  }
+  if (last < src.length) parts.push({ text: src.slice(last) })
+  for (const part of parts) {
+    const toks = part.text.split(INLINE_TOKEN)
+    // split() with capture groups interleaves: text, token, color, text, token, color, …
+    const st = { b: false, i: false, u: false, s: false, hl: null }
+    const out = []
+    for (let k = 0; k < toks.length; k += 3) {
+      const text = toks[k]
+      const marks = {}
+      for (const key of BOOL_MARKS) if (st[key]) marks[key] = true
+      if (st.hl) marks.hl = st.hl
+      if (part.href) marks.href = part.href
+      if (text) out.push({ text, marks })
+      const tok = toks[k + 1]
+      if (tok == null) break
+      if (tok === '**') st.b = !st.b
+      else if (tok === '*') st.i = !st.i
+      else if (tok === '~~') st.s = !st.s
+      else if (tok === '==') st.hl = st.hl ? null : 'yellow'
+      else if (tok === '<u>') st.u = true
+      else if (tok === '</u>') st.u = false
+      else if (tok === '</mark>') st.hl = null
+      else if (tok.startsWith('<mark')) st.hl = HIGHLIGHTS.includes(toks[k + 2]) ? toks[k + 2] : 'yellow'
+    }
+    if (st.b || st.i || st.s || st.u || st.hl) {
+      // unbalanced: fall back to the text without its marks
+      push(stripMarks(part.text), part.href ? { href: part.href } : {})
+    } else for (const r of out) push(r.text, r.marks)
+  }
+  return runs
 }
 
 /**
- * Markdown-ish text → [{ text, attrs }] lines, recognising the prefixes that
- * linesToMarkdown writes. `![](…/media/x)` turns back into `/media/x`.
+ * Markdown-ish text → [{ text, attrs, runs? }] lines, recognising the prefixes
+ * that linesToMarkdown writes. `![](…/media/x)` turns back into `/media/x`.
+ * `runs` is set when the line carries inline marks or labelled links.
  */
 export function markdownToLines(md) {
   const src = String(md || '').replace(/\r\n/g, '\n')
   if (!src) return []
+  let prev = null
   return src.split('\n').map((raw) => {
+    if (/^\s*(\*\s*\*\s*\*|-\s*-\s*-|_\s*_\s*_)[\s*_-]*$/.test(raw)) {
+      prev = { lt: 'hr' }
+      return { text: '', attrs: { lt: 'hr' } }
+    }
     const p = parseLinePrefix(raw)
     let text = p ? p.rest : raw
-    let attrs = p ? p.attrs : {}
+    let attrs = p ? { ...p.attrs } : {}
+    // "> more" straight after a callout continues it
+    if (attrs.lt === 'callout' && !p.calloutHead && prev && prev.lt === 'callout') attrs.co = prev.co
+    prev = attrs
     const img = /^!\[[^\]]*\]\(([^)\s]+)\)$/.exec(text.trim())
     if (img) {
       const i = img[1].indexOf('media/')
       text = i >= 0 && !/^https?:/.test(img[1]) ? '/' + img[1].slice(i) : img[1]
+      return { text, attrs }
     }
     const link = /^\[(?:▶ YouTube|Instagram)\]\(([^)\s]+)\)$/.exec(text.trim())
-    if (link) text = link[1]
-    return { text: stripMarks(text), attrs }
+    if (link) return { text: link[1], attrs }
+    const runs = parseInline(text)
+    const plain = runs.map((r) => r.text).join('')
+    const out = { text: plain, attrs }
+    if (runs.some((r) => Object.keys(r.marks).length)) out.runs = runs
+    return out
   })
 }
 

@@ -61,6 +61,7 @@ const isoOrNull = (ms) => {
 }
 
 const getter = (o) => (o && typeof o.get === 'function' ? (k) => o.get(k) : (k) => o && o[k])
+const aliasList = (v) => (Array.isArray(v) ? v.map((a) => String(a || '').trim()).filter(Boolean) : [])
 
 // ---- bodies ----------------------------------------------------------------
 
@@ -171,6 +172,7 @@ export function noteToMarkdown(note, tab, opts) {
     ['lastEditedBy', editorName ? String(editorName).replace(/\n/g, ' ') : null],
     ['archived', get('archived') === true ? 'true' : null],
     ['pinned', get('pinned') === true ? 'true' : null],
+    ['aliases', aliasList(get('aliases')).length ? aliasList(get('aliases')).join(', ').replace(/\n/g, ' ') : null],
     ['titleAlign', get('titleAlign') || null],
     ['x', Math.round(Number(get('x')) || 0)],
     ['y', Math.round(Number(get('y')) || 0)],
@@ -422,6 +424,8 @@ export function noteView(id, n) {
     h: n.get('h') ?? null,
     archived: n.get('archived') === true,
     pinned: n.get('pinned') === true,
+    aliases: aliasList(n.get('aliases')),
+    shared: typeof n.get('share') === 'string',
     layout: n.get('layout') === 'book' ? 'book' : 'single',
     body2: linesToPlain(linesOf(n.get('body2'))),
     deleted: inTrash(n) ? n.get('deleted') : null,

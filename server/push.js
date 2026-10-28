@@ -198,14 +198,13 @@ export function createPush({ ydoc, dataDir, subject = 'mailto:notes@localhost', 
 
   const find = (endpoint) => state.subs.find((s) => s.endpoint === endpoint)
 
-  function subscribe({ subscription, tz, hour, name, origin }) {
+  function subscribe({ subscription, tz, hour, name }) {
     if (!validSubscription(subscription)) throw { status: 400, message: 'not a push subscription this server can use' }
-    // VAPID wants a contact: the board's own https address, learnt from the first device
-    if (!state.subject && /^https:\/\/[^/]+$/.test(String(origin || '')) && !/localhost|127\.0\.0\.1/.test(origin)) state.subject = origin
     const h = Math.max(0, Math.min(23, Math.round(Number(hour)) || 0))
     const zone = typeof tz === 'string' && tz.length < 64 ? tz : null
     const now = localNow(zone)
     let s = find(subscription.endpoint)
+    if (!s && state.subs.length >= 50) throw { status: 429, message: 'too many devices have reminders on' }
     if (!s) {
       s = { id: crypto.randomBytes(6).toString('hex'), endpoint: subscription.endpoint, created: Date.now() }
       state.subs.push(s)
@@ -232,7 +231,7 @@ export function createPush({ ydoc, dataDir, subject = 'mailto:notes@localhost', 
     const res = await send(
       s.endpoint,
       {
-        Authorization: vapidAuth(s.endpoint, state.vapid, state.subject || subject),
+        Authorization: vapidAuth(s.endpoint, state.vapid, subject),
         'Content-Encoding': 'aes128gcm',
         'Content-Type': 'application/octet-stream',
         TTL: '43200',

@@ -5,8 +5,8 @@ Shared Notes is a self-hosted board of live, shared notes for Tim and friends. I
 meets a corkboard, with Google Docs-style live typing: everyone sees each other's edits land
 letter by letter. There are no accounts, no cloud and no database server.
 
-This list describes the app as of commit `8d239e3` (27 Oct 2026). `README.md` has the
-setup details, and `ROADMAP_2.md` the planned work.
+This list describes the app after Roadmap 2 (28 Oct 2026): phases 1 to 4 of
+`ROADMAP_2.md` are built. `README.md` has the setup details.
 
 ---
 
@@ -81,8 +81,22 @@ space around the notes:
 - **Checkboxes mixed in with normal text,** such as a shopping list under a paragraph, or
   sub-tasks under a task.
 - **Headings,** and **alignment** (left, centre, right) per line.
-- **Typing shortcuts:** start a line with `- `, `* `, `1. `, `a. `, `i. `, `-> `, `[] ` or
-  `# ` to start that kind of line.
+- **Typing shortcuts:** start a line with `- `, `* `, `1. `, `a. `, `i. `, `-> `, `[] `,
+  `> ` or `# ` to start that kind of line.
+- **The slash menu:** type `/` at the start of a line (or after a space) for headings,
+  lists, a checkbox, a divider, callouts, a quote, a highlight, today's or tomorrow's date,
+  a picture or a template. Keep typing to filter.
+- **Highlights** in five colours (Ctrl/⌘+Shift+H for yellow), mirrored as `==text==`.
+- **Callouts** (note, tip, warning, danger) and quotes: consecutive lines draw as one box,
+  mirrored in Obsidian's `> [!tip]` syntax. **Dividers** (`***`).
+- **Checkbox states:** besides ticked, a checkbox can be *in progress* `[/]`, *cancelled*
+  `[-]` or *deferred* `[>]`: type the shortcut, or Alt+click the box.
+- **Dates from words:** typing `@friday`, `@tomorrow`, `@in 3 days`, `@next friday` or
+  `@3 nov` and a space turns it into a date (`@2026-10-30`), coloured when it is due or
+  overdue. Backspace straight after puts the words back. A date on a checkbox line is its
+  due date (see To-do tabs).
+- **Move lines:** Alt+Shift+↑/↓ moves the line you are on, with the points under it, past
+  its neighbour.
   - Tab and Shift+Tab nest and un-nest a list item.
   - Enter on an empty item leaves the list.
   - Backspace straight after a shortcut undoes it.
@@ -108,9 +122,39 @@ space around the notes:
 
 ### Links between notes
 
-- **Web links:** web addresses in a note can be clicked.
+- **Web links:** web addresses in a note can be clicked. Select some text and press
+  Ctrl/⌘+K (or paste an address onto it) to make it a **labelled link**, mirrored as
+  `[text](url)`. A pasted address gets its page's title, fetched by the Pi.
 - **Note links:** typing `[[` opens a picker for linking to another note or tab by its
-  title. Clicking the link jumps there, in full screen if you started from full screen.
+  title (or an alias). Clicking the link jumps there, in full screen if you started from
+  full screen. `[[Note#Heading]]` and `[[Note^line]]` link to a heading or a single line;
+  the picker offers them after `#` or `^`, and following one scrolls to the line and
+  flashes it.
+- **Links follow renames:** renaming a note (or a tab) rewrites every link to it, trash and
+  archive included, so links never silently break.
+- **Linked from:** a note opened large lists the notes that link to it, each with its line,
+  and the places that mention its title in plain text, each with a one-click *Link*. The
+  ribbon's *More* shows the same, and documents show it under the page.
+- **Hover preview:** resting the pointer on a link shows the note it leads to (desktop).
+- **A link to nothing** offers to create that note.
+- **Aliases:** a note can have other names (ribbon → More → *Also known as*) that links,
+  backlinks and the switcher all honour.
+- **Tags:** `#tag` and `#tag/sub` show as chips. Clicking one lists every note with it, on
+  Home; Home also lists all tags with counts, and a tag can be renamed (or merged into
+  another) everywhere at once.
+
+### Moving text around
+
+- **Selection → new note:** select some text and the ribbon's new-note button (or *More*)
+  moves it to a note placed beside this one, leaving a `[[link]]` in its place.
+- **Merge into…:** appends a note to another one, under its title, and moves it to the
+  trash; links to it follow.
+- **Templates:** every note in a NotePad tab called *Templates* is a template. *New from
+  template* (Home, the tab menu, the phone drawer, or `/template` inside a note) copies one
+  in, filling `{{date}}`, `{{time}}`, `{{title}}` and `{{me}}`.
+- **Daily notes:** *Today* (the calendar button, Home, the phone drawer or the installed
+  app's shortcut) opens the note named for today in a *Journal* tab, started from the
+  template called *Daily* if there is one.
 
 ### Options for each note
 
@@ -126,6 +170,11 @@ space around the notes:
 The expand button on a note, or double-clicking its header, opens the note large, with its
 own editor. The back button or Esc closes it. A link ending in `#note=<id>&full` opens a
 note straight in full screen.
+
+- **Back and forward:** tab switches, link jumps and full screen each add a step to the
+  browser's history, so Back (and the phone's back gesture) retraces them.
+- **Print / PDF:** *More* → *Print / PDF* prints the note alone; documents print from the
+  tab menu. The browser can save either as a PDF.
 
 ## 5. The ribbon
 
@@ -149,7 +198,14 @@ instead.
 
 ## 7. Finding things
 
+- **The quick switcher:** Ctrl/⌘+K (or the search button in the top bar) jumps to any note
+  or tab by a few letters; letters that start words rank first. With no match, Enter makes
+  a note with that title. Shift+Enter opens the note large.
 - **Searching a tab:** the search box filters the current tab.
+- **Search operators,** here and on Home: `tag:work`, `tab:shopping`, `is:todo` (has an
+  unticked checkbox), `is:done`, `is:pinned`, `has:image`, `has:link`, `by:sam` (last
+  edited by), `"exact phrase"` and `-word` to leave out. A word of five letters or more
+  also finds a word one typo away.
 - **The Home page** (the house at the left of the tab bar):
   - lists every tab and shows who is on each one;
   - searches across all tabs at once;
@@ -160,7 +216,16 @@ instead.
 
 - **Tasks:** broken into parts as deep as you like, each with a tick, a due date and a
   progress bar that counts its smallest parts.
-- **Three views:** List, Week and Month.
+- **Four views:** List, Week, Month and **Board**: To do, Doing and Done columns to drag
+  tasks between (or move them from a card's ⋯, or with ← and →).
+- **From notes:** checkboxes written in any note or document show up too, grouped by their
+  @date (overdue, today, coming up, no date), and on their day in Week and Month. Ticking
+  one there ticks it in its note.
+- **Journal days:** the Month view marks days that have a journal note.
+- **Reminders:** a device can get one notification a day, at the hour it picks, listing
+  the tasks and dated checkboxes that are due or overdue, even with the app closed
+  (Settings → *Reminders on this device*; on an iPhone the app must be added to the home
+  screen first).
 - **Due-today badge:** the tab shows a red count of what is due today or overdue.
 - **From a mind map:** a mind map branch can be sent to a To-do tab as a task with parts.
 
@@ -216,7 +281,23 @@ Phones get their own layout, in the style of Google Keep:
   mind maps as their own files.
 - **Picture cleanup:** pictures that no note uses are removed after 30 days.
 
-## 12. Offline use and backups
+## 12. Sharing, capture and import
+
+- **Share one note by link:** *More* → *Share link* (or a document's tab menu) makes a
+  read-only page at `/s/<token>` for someone who is not on the board. It shows only that
+  note, works past the password, always shows the latest version, and *Stop sharing*
+  turns the link off.
+- **Quick capture:** `POST /api/capture` adds lines to an *Inbox* note (or another note,
+  under a heading if you like) from an iOS Shortcut or any script. On Android, the
+  installed app is in the share sheet and saves straight to the Inbox.
+- **Import:** Settings → *Import notes* reads a folder (an Obsidian vault, any Markdown
+  folder, a backup of this board, or a Google Keep Takeout) or loose files. Folders
+  become tabs and files become notes, with their pictures.
+- **ZIP download:** the Pi's whole mirror plus every picture, in one file.
+- **Webhooks:** with `NOTES_WEBHOOKS` set, the Pi posts each note change (created,
+  updated, trashed, restored, deleted) to those addresses, optionally signed.
+
+## 13. Offline use and backups
 
 - **Offline copy:** each browser keeps the whole board, and the app itself is cached. So
   the board opens and can be edited with the Pi off, and the changes merge when it comes
@@ -228,7 +309,7 @@ Phones get their own layout, in the style of Google Keep:
 - **Leaving tabs out:** any tab can be left out of this device's backups. The Pi always
   keeps everything.
 
-## 13. Look and feel
+## 14. Look and feel
 
 - **Style:** an Apple-style design: the system font, see-through toolbars and grouped
   settings.
@@ -239,7 +320,7 @@ Phones get their own layout, in the style of Google Keep:
 - **Offline-friendly:** fonts and icons ship with the app, so nothing is fetched from the
   internet.
 
-## 14. Access, API and apps
+## 15. Access, API and apps
 
 - **Optional password** (`NOTES_PASSWORD`): each browser logs in once and gets a
   long-lived cookie, which the live connection, the API and the pictures all require.
@@ -247,16 +328,17 @@ Phones get their own layout, in the style of Google Keep:
 - **A REST API** for scripts, widgets and automations:
   - list tabs and read their notes;
   - create notes, edit them, add lines to them and tick checkboxes by line;
-  - search everything;
+  - search everything (with the operators above);
+  - capture lines into a note;
   - read a note's history;
-  - export the board and upload pictures.
+  - export the board (Markdown, JSON or a ZIP with pictures) and upload pictures.
 
   Polled requests answer `304` when nothing has changed.
 - **Android app and home-screen widgets** (in `../shared-notes-android`): the board in an
   app, a tab widget with checkboxes you can tick, a single-note widget and a quick-add
   button. *The app is written but has not been compiled yet.*
 
-## 15. Running it
+## 16. Running it
 
 - **Stack:** Node with Express, ws and Yjs on the server. The browser code is plain
   JavaScript, bundled by esbuild. There is no database: the board is one file,
@@ -268,5 +350,7 @@ Phones get their own layout, in the style of Google Keep:
 - **Tests:**
   - `npm test` runs the end-to-end, feature, API, password and persistence suites, each
     against a fresh server;
-  - `npm run test:browser` adds a headless-Chrome smoke test of the editor and the main
-    screens.
+  - a roadmap suite covers links, tags, dates, search, capture, share links, the ZIP,
+    reminders (encryption included) and webhooks;
+  - `npm run test:browser` adds headless-Chrome tests of the editor, the main screens and
+    every Roadmap 2 feature.

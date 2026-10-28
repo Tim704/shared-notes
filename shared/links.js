@@ -63,13 +63,16 @@ const hiddenNote = (n) => typeof n.get('deleted') === 'number' || n.get('archive
  * Trash and archived notes are included only with { includeHidden: true }.
  */
 export function bodiesOf(ydoc, opts = {}) {
+  const skipTabs = opts.skipTemplates ? new Set(tabsOf(ydoc).filter((t) => normTitle(t.name) === 'templates').map((t) => t.id)) : null
   const out = []
   ydoc.getMap('notes').forEach((n, id) => {
     if (!isMap(n) || n.get('kind') === 'todo') return
+    if (skipTabs && skipTabs.has(String(n.get('tabId')))) return
     const hidden = hiddenNote(n)
     if (hidden && !opts.includeHidden) return
     const base = { kind: 'note', id, tabId: n.get('tabId') == null ? null : String(n.get('tabId')), title: text(n.get('title')).trim(), hidden }
-    for (const field of ['body', 'body2']) {
+    // a second page only counts while the note is a book (it lingers after switching back)
+    for (const field of n.get('layout') === 'book' ? ['body', 'body2'] : ['body']) {
       const yt = n.get(field)
       if (yt && typeof yt.toDelta === 'function' && yt.length) out.push({ ...base, field, ytext: yt })
     }
@@ -116,17 +119,28 @@ export function rewriteLinks(ydoc, from, to, origin = 'links') {
   let count = 0
   ydoc.transact(() => {
     for (const b of bodiesOf(ydoc, { includeHidden: true })) {
-      const hits = wikiLinks(b.ytext.toString()).filter((l) => normTitle(l.title) === want)
+      const hits = wikiLinks(b.ytext.toString()).filter((l) => linkNames(ydoc, l, want))
       // back to front, so earlier offsets stay valid
       for (let k = hits.length - 1; k >= 0; k--) {
         const l = hits[k]
         const at = l.start + 2 + (l.inner.length - l.inner.trimStart().length)
-        replaceKeepingMarks(b.ytext, at, l.title.length, next)
+        const whole = normTitle(l.inner) === want
+        replaceKeepingMarks(b.ytext, at, whole ? l.inner.trim().length : l.title.length, next)
         count++
       }
     }
   }, origin)
   return count
+}
+
+/**
+ * Does this link point at the name `want` (normalised)? "[[C# notes]]" names the
+ * note "C# notes" when there is one, and "C" (heading "notes") only when there isn't.
+ */
+function linkNames(ydoc, l, want) {
+  if (normTitle(l.inner) === want) return true
+  if (normTitle(l.title) !== want || normTitle(l.inner) === normTitle(l.title)) return false
+  return !nameTaken(ydoc, l.inner)
 }
 
 /** Is `name` still the title (or alias) of a live note other than `exceptId`? */
@@ -164,7 +178,7 @@ export function backlinks(ydoc, names, opts = {}) {
     const lines = linesOf(b.ytext)
     lines.forEach((L, index) => {
       if (L.text.indexOf('[[') < 0) return
-      if (wikiLinks(L.text).some((l) => want.has(normTitle(l.title)))) out.push({ kind: b.kind, id: b.id, tabId: b.tabId, title: b.title, field: b.field, line: L.text, index })
+      if (wikiLinks(L.text).some((l) => [...want].some((w) => linkNames(ydoc, l, w)))) out.push({ kind: b.kind, id: b.id, tabId: b.tabId, title: b.title, field: b.field, line: L.text, index })
     })
   }
   return out
@@ -310,7 +324,8 @@ export function dueOf(str) {
  */
 export function noteTodos(ydoc) {
   const out = []
-  for (const b of bodiesOf(ydoc)) {
+  // a template's checkboxes are not things to do
+  for (const b of bodiesOf(ydoc, { skipTemplates: true })) {
     linesOf(b.ytext).forEach((L, index) => {
       if (L.attrs.lt !== 'todo') return
       out.push({

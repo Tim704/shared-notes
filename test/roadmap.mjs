@@ -68,6 +68,27 @@ function note(doc, id, title, md, extra = {}) {
   check('an unbalanced * stays plain text', parseInline('5 * 3 = 15').length === 1 && parseInline('5 * 3 = 15')[0].text === '5 * 3 = 15')
 }
 
+// ---- Markdown that only looks like markup stays plain; links keep odd addresses ----
+{
+  const doc = new Y.Doc()
+  const yt = doc.getText('t')
+  const plain = ['if (a == b && c == d) 2*3 **not bold** ~~x~~ ==y== <u>z</u> C:\\Users \\*', '---', '> not a quote', '- not a list', '# not a heading']
+  for (const p of plain) {
+    yt.insert(yt.length, p, {})
+    yt.insert(yt.length, '\n', {})
+  }
+  yt.insert(yt.length, 'Mercury', { href: 'https://en.wikipedia.org/wiki/Mercury_(planet)' })
+  yt.insert(yt.length, ' ', {})
+  yt.insert(yt.length, 'deal', { href: 'https://x.com/?q=50%25%20off' })
+  yt.insert(yt.length, '\n', {})
+  const back = new Y.Doc().getText('t')
+  insertLinesAt(back, 0, markdownToLines(linesToMarkdown(linesOf(yt))))
+  const ls = linesOf(back)
+  check('text that looks like Markdown survives a round trip as plain text', plain.every((p, i) => ls[i].text === p && !ls[i].attrs.lt && ls[i].runs.length === 1 && !Object.keys(ls[i].runs[0].marks).length))
+  const hrefs = ls[5].runs.filter((r) => r.marks.href).map((r) => r.marks.href)
+  check('…and links with brackets or %-escapes keep their exact address', hrefs[0] === 'https://en.wikipedia.org/wiki/Mercury_(planet)' && hrefs[1] === 'https://x.com/?q=50%25%20off')
+}
+
 // ---- links: backlinks, mentions, renames, aliases --------------------------------
 {
   const doc = board()
@@ -94,6 +115,11 @@ function note(doc, id, title, md, extra = {}) {
   check('"Link" turns a mention into [[Title]]', doc.getMap('notes').get('b').get('body').toString().includes('[[Groceries]] list'))
   check('parseTarget splits #heading and ^line', JSON.stringify(parseTarget('A b#Soup')) === JSON.stringify({ title: 'A b', heading: 'Soup', block: null }) && parseTarget('X^l1').block === 'l1')
   check('rewriteLinks leaves other titles alone', rewriteLinks(doc, 'Nope', 'Other') === 0)
+  note(doc, 'h1', 'C# notes', 'x')
+  note(doc, 'h2', 'C', 'y')
+  note(doc, 'h3', 'Links', 'see [[C# notes]] and [[C#Intro]]')
+  followRename(doc, 'h2', 'C', 'Cee')
+  check('a title holding # is a title, not a heading link', doc.getMap('notes').get('h3').get('body').toString() === 'see [[C# notes]] and [[Cee#Intro]]\n')
 }
 
 // ---- tags --------------------------------------------------------------------------
@@ -116,6 +142,7 @@ function note(doc, id, title, md, extra = {}) {
   check('is:done means every checkbox ticked', matchNote('is:done', b) && !matchNote('is:done', a))
   check('"phrases", -negation and tab:', matchNote('"oat milk" -bread tab:ide', a, 'Ideas') && !matchNote('"milk oat"', a) && !matchNote('-milk', a))
   check('one typo is forgiven in longer words', matchNote('shoping', a) && !matchNote('shxxping', a))
+  check('…but not when leaving words out (-shoping keeps Shopping)', matchNote('-shoping', a))
   check('unknown operators are just text', parseQuery('foo:bar')[0].op === null)
 }
 
@@ -203,6 +230,11 @@ function note(doc, id, title, md, extra = {}) {
   }
   check('capture needs some text', threw && threw.status === 400)
   check('private and loopback addresses are refused for link titles', !isPublicAddress('127.0.0.1') && !isPublicAddress('192.168.1.5') && !isPublicAddress('100.112.108.54') && !isPublicAddress('::1') && !isPublicAddress('fd00::1') && isPublicAddress('93.184.216.34'))
+  check('IPv4 hidden in IPv6 (mapped, compatible, 6to4) is refused too', !isPublicAddress('::ffff:7f00:1') && !isPublicAddress('::ffff:c0a8:101') && !isPublicAddress('::7f00:1') && !isPublicAddress('2002:c0a8:101::1') && !isPublicAddress('fec0::1') && isPublicAddress('2606:4700::6810:84e5'))
+  const t0 = Date.now()
+  titleFromHtml('<meta '.repeat(90000))
+  titleFromHtml('<title'.repeat(90000))
+  check('a hostile page cannot make the title search slow', Date.now() - t0 < 200)
   check('a page title from og:title or <title>', titleFromHtml('<head><meta property="og:title" content="A &amp; B"><title>x</title>') === 'A & B' && titleFromHtml('<title>\n Hello &#8212; world </title>') === 'Hello — world')
   const chunks = []
   const sink = { write: (b) => (chunks.push(Buffer.from(b)), true), once() {}, end() {} }

@@ -3903,7 +3903,12 @@ mark.rb-hl.hl-purple { background: #e0ccff; }
 .rb-picker.rb-slash { max-height: 320px; overflow-y: auto; min-width: 220px; }
 
 /* ---- linked from / unlinked mentions */
-.full-links { margin-top: var(--s-6); padding-top: var(--s-3); border-top: var(--hairline) dashed var(--note-line, var(--separator)); }
+/* full screen: the text fills the space it has, "Linked from" follows it (and scrolls with it) */
+.card.full .card-bodyhost { display: flex; flex-direction: column; }
+.card.full .card-body { min-height: 0; flex: 1 0 auto; padding-bottom: var(--s-8); }
+.card.full.book .card-bodyhost { flex-direction: row; flex-wrap: wrap; align-content: flex-start; }
+body.phone .card.full.book .card-bodyhost { flex-direction: column; flex-wrap: nowrap; }
+.full-links { flex: 1 0 100%; margin-top: var(--s-2); padding: var(--s-3) 0 12vh; border-top: var(--hairline) dashed var(--note-line, var(--separator)); }
 .page-links { margin-top: var(--s-8); padding-top: var(--s-3); border-top: var(--hairline) dashed var(--separator); }
 .links-sec { font: var(--t-callout); color: var(--note-ink, var(--label)); }
 .links-h { font: var(--t-subhead); font-weight: 600; color: var(--note-ink-dim, var(--label-2)); margin: var(--s-2) 0 var(--s-1); text-transform: none; }

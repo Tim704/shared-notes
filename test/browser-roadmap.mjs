@@ -303,6 +303,30 @@ try {
   await evaluate(`history.forward()`)
   await sleep(300)
   check('browser Back and Forward retrace tab switches', afterBack === firstTab && (await tabNames()) === 'Journal')
+  // leaving full screen by jumping to a tab: Back returns to the tab, not to the closed note
+  await evaluate(`document.getElementById('today').click()`)
+  await sleep(500)
+  await key('k', 'KeyK', 75, 2)
+  await sleep(150)
+  await type(firstTab)
+  await enter()
+  await sleep(400)
+  const jumped = await evaluate(`({ full: !!document.querySelector('.full-back'), tab: document.querySelector('#tabs .tab.on .tab-name')?.textContent })`)
+  await evaluate(`history.back()`)
+  await sleep(400)
+  const backed = await evaluate(`({ full: !!document.querySelector('.full-back'), tab: document.querySelector('#tabs .tab.on .tab-name')?.textContent })`)
+  check('going to a tab from a note opened large closes it; Back returns to the tab, not the note', !jumped.full && jumped.tab === firstTab && !backed.full && backed.tab === 'Journal')
+  // following links between notes opened large: closing ends on the board
+  await evaluate(`[...document.querySelectorAll('#tabs .tab')].find((t) => t.querySelector('.tab-name')?.textContent === ${JSON.stringify(firstTab)}).click()`)
+  await sleep(300)
+  await evaluate(`${S(G, '.expand')}.click()`)
+  await sleep(500)
+  await evaluate(`(() => { const a = [...document.querySelectorAll('.full-back a.rb-wiki')].find((x) => x.textContent === '[[Kitchen book]]'); a.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true })) })()`)
+  await sleep(500)
+  const chained = await evaluate(`document.querySelector('.full-back .card.full')?.dataset.id`)
+  await key('Escape', 'Escape', 27)
+  await sleep(600)
+  check('a link from a note opened large opens the next one; Esc then closes to the board', chained === R && !(await evaluate(`!!document.querySelector('.full-back')`)))
 
   // no templates yet: offer to make the tab
   const tplMade = await evaluate(`(async () => {

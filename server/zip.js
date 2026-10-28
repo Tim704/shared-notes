@@ -31,12 +31,25 @@ function dosTime(d) {
 export function createZip(out) {
   const entries = []
   let offset = 0
+  // a download that is cancelled half way must not leave us waiting for 'drain' for ever
+  const gone = () => out.destroyed || out.writableEnded || (out.socket && out.socket.destroyed)
   const write = (buf) =>
     new Promise((resolve, reject) => {
+      if (gone()) return reject(new Error('download cancelled'))
       offset += buf.length
       if (out.write(buf)) return resolve()
-      out.once('drain', resolve)
-      out.once('error', reject)
+      const done = (err) => {
+        out.off?.('drain', ok)
+        out.off?.('close', closed)
+        out.off?.('error', done)
+        if (err) reject(err)
+        else resolve()
+      }
+      const ok = () => done()
+      const closed = () => done(new Error('download cancelled'))
+      out.once('drain', ok)
+      out.once('close', closed)
+      out.once('error', done)
     })
 
   async function add(name, data, mtime = new Date()) {

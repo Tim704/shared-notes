@@ -114,7 +114,21 @@ browser at it.
   kept for 30 days. Notes and whole tabs can also be **archived**.
 - **Collapse** any note to its title (the chevron in its header, or "Collapse all" in the tab bar).
 - **Links**: URLs in a note are clickable, and typing `[[` opens a picker to link to
-  another note or tab by title.
+  another note or tab by title (or alias), or to a heading (`[[Note#Heading]]`) or a single
+  line (`[[Note^id]]`) in it. Links follow renames, a note opened large lists what links to
+  it (and unlinked mentions, with a one-click *Link*), links show a preview on hover, and
+  a link to nothing offers to create the note. Ctrl/⌘+K on selected text (or pasting an
+  address onto it) makes a labelled link; a pasted address gets its page title.
+- **Roadmap 2** (see `FEATURES.md` for the full list): the Ctrl/⌘+K quick switcher, Back
+  and Forward through tabs, links and full screen, the `/` slash menu, `@friday`-style
+  dates, Alt+Shift+↑/↓ to move lines, highlights, callouts, dividers, checkbox states
+  (`[/]` `[-]` `[>]`), `#tags` with a tag list and renaming, search operators (`tag:`,
+  `tab:`, `is:todo`, `has:image`, `by:`, `"phrases"`, `-word`), templates, daily notes in a
+  *Journal* tab, *Selection → new note* and *Merge into…*, a document outline with word
+  count, checkboxes from every note in the To-do tab, a Board (Kanban) view, daily
+  reminders by Web Push, aliases, read-only share links, quick capture (API, Android share
+  sheet, iOS Shortcut), import (Markdown, Obsidian, Google Keep), a ZIP download with
+  pictures, print / PDF and webhooks.
 - **Book notes**: two pages side by side (ribbon → More → Layout → Book).
 - **Smart arrows**: `->` becomes →, `<-` ←, `=>` ⇒, `--` —. Backspace straight after
   restores what you typed.
@@ -148,7 +162,17 @@ browser at it.
 | Tick the checkbox you're on | Ctrl/Cmd + Enter |
 | Fold / unfold | Ctrl/Cmd + . |
 | Undo / Redo | Ctrl/Cmd + Z / Ctrl/Cmd + Shift + Z |
-| Link to a note or tab | type `[[` then pick |
+| Link to a note or tab | type `[[` then pick (`#` after the title for a heading, `^` for a line) |
+| Slash menu (headings, lists, divider, callouts, dates, picture, template) | type `/` |
+| A date | type `@friday`, `@tomorrow`, `@in 3 days`, `@3 nov`… and a space |
+| Link the selected text | Ctrl/Cmd + K |
+| Highlight | Ctrl/Cmd + Shift + H |
+| Move the line (and what is under it) | Alt + Shift + ↑ / ↓ |
+| More checkbox states | type `[/] `, `[-] `, `[>] `, or Alt+click the box |
+| Quote / callout | type `> ` (callouts from the `/` menu) |
+
+Anywhere: Ctrl/Cmd + K opens the quick switcher (go to a note or tab; Enter on no match
+creates the note).
 
 The ribbon under the tabs has the same: B / I / U / S, a list menu, checkbox, alignment
 and picture buttons, plus the note's colour, text size, width, *Grow*, pin, archive, delete
@@ -293,6 +317,11 @@ Environment variables (all optional):
 | `NOTES_COMMIT_MS` | `60000` | How often (at most) the mirror is committed to git. |
 | `NOTES_TRASH_DAYS` | `30` | Deleted notes are purged after this many days (and pictures no note uses, after the same time). |
 | `NOTES_PASSWORD` | unset | When set, everyone must enter this password once per browser. |
+| `NOTES_PUSH` | on | Set to `0` to turn off reminders (Web Push). Keys and subscriptions live in `<data>/push.json`. |
+| `NOTES_PUSH_SUBJECT` | `mailto:notes@localhost.invalid` | Contact sent to push services (`mailto:` or `https:`), e.g. your board's `https://` address. Apple's push service wants a real one. |
+| `NOTES_WEBHOOKS` | unset | Comma-separated URLs that get a POST when a note changes. |
+| `NOTES_WEBHOOK_SECRET` | unset | When set, each webhook carries `X-Notes-Signature: sha256=<HMAC of the body>`. |
+| `NOTES_WEBHOOK_MS` | `5000` | Changes to one note are gathered this long into one webhook call. |
 
 Example, run on port 8080 with a password:
 
@@ -368,6 +397,10 @@ expose it beyond that (a Cloudflare Tunnel, a port forward), do at least one of 
 
 Without either, anyone who can reach the URL can read and edit everything.
 
+**Share links** (`/s/<token>`) open without the password on purpose: each shows one note
+(or document) read-only, rendered on the Pi, and only the pictures that note shows. The
+token is random; *Stop sharing* deletes it and the link stops working.
+
 ## REST API
 
 Handy for scripts, widgets and automations. JSON in and out; add `?trash=1` to include
@@ -383,12 +416,28 @@ deleted notes. GETs that a widget polls send an `ETag` and answer `304` to a mat
 | `GET /api/notes/:id` | One note, with its tab id. |
 | `PATCH /api/notes/:id` | Edit: `{ title, body (replace), append (add lines), color, pinned, archived }`. |
 | `PATCH /api/notes/:id/check` | Tick or untick a checkbox: `{ "lineId": "…", "done": true }` (or `"index"`, or an old checklist's `"itemId"`). |
-| `GET /api/search?q=milk` | Search every tab. |
+| `GET /api/search?q=milk` | Search every tab (operators work: `tag:`, `tab:`, `is:todo`, `has:image`, `by:`, `"…"`, `-word`). |
 | `GET /api/history/:noteId` | Earlier versions of a note (needs git). |
 | `GET /api/history/:noteId/:commit` | One earlier version's title and body. |
 | `GET /api/export.md`, `GET /api/export.json` | Download the whole board. |
+| `GET /api/export.zip` | The Markdown mirror (`notes/<tab>/…`) plus every picture (`media/`), in one ZIP. |
+| `POST /api/capture` | Quick capture: `{ "text", "note"?, "heading"?, "tab"?, "as"? }` adds the lines to the note called `note` (default `Inbox`, made in the first NotePad or `tab` if missing), at the end or under `heading`. `as: "todo"` / `"li"` makes plain lines checkboxes / bullets. |
+| `GET /api/unfurl?url=…` | `{ title }` of a public web page (used for pasted links; private addresses are refused). |
+| `GET /api/push/key`, `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `POST /api/push/test` | Reminders (used by Settings). |
+| `GET /share?title=&text=&url=` | The installed app's share target: saves to the Inbox and opens it. |
+| `GET /s/<token>` | A read-only shared note or document (no password needed). |
 | `POST /api/media` | Upload a picture (raw bytes, `Content-Type: image/png`, `jpeg`, `webp`, `gif` or `avif`) → `{ url: "/media/<sha256>.<ext>" }`. |
 | `GET /media/<file>` | A stored picture (cached for a year; it never changes). |
+
+### Quick capture from a phone
+
+- **iPhone:** make a Shortcut with *Get Contents of URL*: method POST, URL
+  `https://<your board>/api/capture`, request body JSON with a `text` field set to the
+  Shortcut Input (and `note` / `heading` if you like), plus a header
+  `Authorization: Bearer <password>` if the board has one. Add it to the share sheet or
+  the home screen.
+- **Android:** install the app to the home screen; it then appears in the share sheet and
+  saves whatever you share to the Inbox note.
 
 ## Android app and widgets
 
@@ -455,13 +504,28 @@ shared-notes/
   server/mirror.js     Writes the Markdown / SVG mirror to data/export/
   server/history.js    git commits of the mirror + per-note version lookup
   server/auth.js       Optional shared-password login (NOTES_PASSWORD)
+  server/share.js      Read-only share links (/s/<token>), rendered on the server
+  server/capture.js    Quick capture into a note (/api/capture, /share)
+  server/push.js       Daily reminders by Web Push (VAPID + aes128gcm, no dependency)
+  server/unfurl.js     Page titles for pasted links (guarded against private addresses)
+  server/webhooks.js   POSTs note changes to NOTES_WEBHOOKS
+  server/zip.js        Store-only ZIP writer for /api/export.zip
   shared/lines.js      The line model: lists, todos, headings, markers, outline, embeds, Markdown
   shared/lineops.js    Structural edits on a body (insert/move/delete lines, tick a todo)
   shared/serialise.js  Board → Markdown files / exports / API views (server and browser)
   shared/migrate.js    Old whole-note checklists → todo lines (run by the server)
+  shared/links.js      [[Links]], backlinks, mentions, renames, #tags, checkboxes with @dates
+  shared/dates.js      "@friday" / "@in 3 days" → dates
+  shared/search.js     Search operators (tag:, tab:, is:, has:, by:, phrases, -word)
+  shared/tasks.js      The To-do tab's data (tree, progress, dates, Markdown)
   build.js             esbuild bundling step (src/client.js -> public/bundle.js)
   src/client.js        Browser app: tabs, cards, layout, full screen, phone UI, panels, sync wiring
-  src/richbody.js      contentEditable <-> Y.Text editor: lines, lists, todos, folding, embeds, links
+  src/richbody.js      contentEditable <-> Y.Text editor: lines, lists, todos, folding, embeds, links,
+                       the [[ and / pickers, dates, labelled links, highlights, moving lines
+  src/switcher.js      The Ctrl/Cmd+K quick switcher
+  src/preview.js       Hover previews of [[links]]
+  src/importer.js      Import of Markdown folders, Obsidian vaults and Google Keep
+  src/tasks.js         The To-do tab (List, Week, Month, Board; checkboxes from notes)
   src/mindmap.js       Mind map of an outline (the mind map tab type)
   src/ribbon.js        The Word-style toolbar under the tabs
   src/ink.js           Free-hand ink between the notes of a tab
@@ -485,8 +549,8 @@ shared-notes/
 ## Tests
 
 ```bash
-npm test               # e2e, features, api, auth and persistence suites, each on a fresh server
-npm run test:browser   # the same, plus the headless-Chrome smoke test
+npm test               # e2e, features, api, roadmap, auth and persistence suites, each on a fresh server
+npm run test:browser   # the same, plus the headless-Chrome smoke and roadmap tests
 ```
 
 Every suite starts its own server on a throwaway data directory, so your real board is

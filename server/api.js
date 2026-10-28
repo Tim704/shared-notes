@@ -421,9 +421,9 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       res.setHeader('Cache-Control', 'no-store')
       const root = `notes-${datestamp()}/`
       const zip = createZip(res)
-      for (const [name, content] of Object.entries(files)) await zip.add(root + 'notes/' + name, content)
-      if (mediaDir) {
-        for (const f of Array.from(referencedMedia(ydoc)).sort()) {
+      const writeAll = async () => {
+        for (const [name, content] of Object.entries(files)) await zip.add(root + 'notes/' + name, content)
+        for (const f of mediaDir ? Array.from(referencedMedia(ydoc)).sort() : []) {
           const full = path.join(mediaDir, f)
           let data
           try {
@@ -434,8 +434,14 @@ export function createApi({ ydoc, mediaDir, push = null }) {
           const st = await fs.promises.stat(full).catch(() => null)
           await zip.add(root + 'media/' + f, data, st ? st.mtime : new Date())
         }
+        await zip.end()
       }
-      await zip.end()
+      try {
+        await writeAll()
+      } catch (err) {
+        if (!/cancelled/.test(err.message)) throw err
+        res.destroy() // the browser went away: drop what we hold
+      }
     })
   )
 
@@ -447,7 +453,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       safe((req, res) => {
         const body = req.body && typeof req.body === 'object' ? req.body : {}
         try {
-          res.json(push.subscribe({ subscription: body.subscription, tz: body.tz, hour: body.hour, name: body.name, origin: originOf(req) }))
+          res.json(push.subscribe({ subscription: body.subscription, tz: body.tz, hour: body.hour, name: body.name }))
         } catch (err) {
           fail(res, err)
         }
@@ -482,13 +488,6 @@ export function createApi({ ydoc, mediaDir, push = null }) {
   })
 
   return router
-}
-
-/** https://host the request came to (behind Cloudflare too). */
-function originOf(req) {
-  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0]
-  const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost').split(',')[0]
-  return `${proto}://${host}`
 }
 
 /** https://host/media/ for links in a downloaded export (so pictures resolve). */

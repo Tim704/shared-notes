@@ -1,5 +1,12 @@
 # Roadmap 2: Obsidian-style features
 
+> **Status (28 Oct 2026): phases 1–4 are built**, including the "extra S" items (checkbox
+> states `[/]` `[-]` `[>]`, typo-tolerant search, renaming and merging tags, the Google Keep
+> import). The open questions were settled as recommended: renames also rewrite links in
+> archived and trashed notes; the Android share target and the iOS Shortcut are both
+> there; reminders work on iPhone once the app is on the home screen. Phase 5 (pick and
+> choose) is not started. See `FEATURES.md` for what each item became.
+
 Written against commit `8d239e3` (mind map rework). It ranks a list of Obsidian core and
 plugin features by how useful each would be **here** and what it would cost **in this
 codebase**. `ROADMAP.md` is the earlier roadmap and is almost fully built.

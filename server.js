@@ -221,7 +221,7 @@ awareness.on('update', ({ added, updated, removed }, origin) => {
 })
 
 // ---- reminders + webhooks ------------------------------------------------
-const push = PUSH_ENABLED ? createPush({ ydoc, dataDir: DATA_DIR, subject: process.env.NOTES_PUSH_SUBJECT || 'mailto:notes@example.com' }) : null
+const push = PUSH_ENABLED ? createPush({ ydoc, dataDir: DATA_DIR, subject: process.env.NOTES_PUSH_SUBJECT || 'mailto:notes@localhost.invalid' }) : null
 if (push) push.start()
 const webhooks = createWebhooks({ ydoc, urls: WEBHOOKS, secret: process.env.NOTES_WEBHOOK_SECRET || '', delayMs: WEBHOOK_MS })
 if (webhooks.enabled) console.log(`Webhooks: posting note changes to ${WEBHOOKS.length} URL(s)`)
@@ -230,7 +230,17 @@ if (webhooks.enabled) console.log(`Webhooks: posting note changes to ${WEBHOOKS.
 const app = express()
 const auth = createAuth(PASSWORD)
 if (auth.enabled) console.log('Password protection is ON (NOTES_PASSWORD is set)')
-app.get('/health', (_req, res) => res.json({ ok: true, peers: conns.size }))
+// `version` is the app bundle's hash: an open page that sees it change offers to reload
+app.get('/health', (_req, res) => {
+  let version = null
+  try {
+    version = assetVersion('bundle.js')
+  } catch {
+    /* no bundle built */
+  }
+  res.set('Cache-Control', 'no-store')
+  res.json({ ok: true, peers: conns.size, version })
+})
 // read-only share links open without the password (one note each; see server/share.js)
 app.use(createShare({ ydoc, mediaDir: MEDIA_DIR }))
 app.use(auth.router) // /login (no-op when no password is set)
@@ -242,8 +252,16 @@ app.use('/api', createApi({ ydoc, mediaDir: MEDIA_DIR, push }))
 // opens /share?title=…&text=…&url=…; it lands in the Inbox note, which then opens.
 app.get('/share', (req, res) => {
   // only a share the user started (the OS sheet, or this site), not a link on another site
-  const site = String(req.headers['sec-fetch-site'] || 'none')
-  if (site !== 'none' && site !== 'same-origin') return res.status(403).type('text').send('Share from the share sheet.')
+  const site = req.headers['sec-fetch-site']
+  let ref = ''
+  try {
+    ref = req.headers.referer ? new URL(req.headers.referer).host : ''
+  } catch {
+    ref = 'bad'
+  }
+  // browsers without Sec-Fetch-Site: a link from another site still names it in Referer
+  const ok = site ? site === 'none' || site === 'same-origin' : !ref || ref === req.headers.host
+  if (!ok) return res.status(403).type('text').send('Share from the share sheet.')
   const q = req.query || {}
   const one = (v) => (Array.isArray(v) ? v[0] : v) || ''
   const title = String(one(q.title)).trim()

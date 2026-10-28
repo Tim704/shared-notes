@@ -311,6 +311,28 @@ export function embedOf(text) {
 
 // ---- markdown --------------------------------------------------------------
 
+// Characters a backslash escapes in the Markdown we write (and read back).
+const ESCAPABLE = '\\*~=<[]>#-_`'
+const isSpace = (c) => c == null || /\s/.test(c)
+
+// Escape what would otherwise read back as formatting: \ before punctuation, and
+// *, **, ~~, == or <u>/<mark> when they touch a non-space (only then can they open or
+// close a mark; "5 * 3" and "a == b" stay as they are).
+function escapeInline(text) {
+  return text.replace(/\\(?=[\\*~=<[\]>#\-_`])|\*\*|\*|~~|==|<\/?u>|<\/?mark/g, (m, at) => {
+    if (m === '\\') return '\\\\'
+    if (m[0] === '<') return '\\' + m
+    const before = text[at - 1]
+    const after = text[at + m.length]
+    if (isSpace(before) && isSpace(after)) return m
+    return m.replace(/./g, '\\$&')
+  })
+}
+
+// a web address inside (…): brackets and spaces percent-encoded, nothing else touched
+const hrefOut = (u) => u.replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\s/g, '%20')
+const hrefIn = (u) => u.replace(/%28/gi, '(').replace(/%29/gi, ')') // (a %20 stays: the same address)
+
 function runsToMarkdown(runs) {
   let out = ''
   for (const r of runs) {
@@ -319,11 +341,15 @@ function runsToMarkdown(runs) {
       out += r.text
       continue
     }
+    // marks hug the words: spaces at either end stay outside them
+    const lead = /^\s*/.exec(r.text)[0]
+    const trail = /\s*$/.exec(r.text)[0]
+    const core = escapeInline(r.text.slice(lead.length, r.text.length - trail.length))
     const hl = m.hl ? (m.hl === 'yellow' ? ['==', '=='] : [`<mark data-color="${m.hl}">`, '</mark>']) : ['', '']
     const open = hl[0] + (m.b ? '**' : '') + (m.i ? '*' : '') + (m.u ? '<u>' : '') + (m.s ? '~~' : '')
     const close = (m.s ? '~~' : '') + (m.u ? '</u>' : '') + (m.i ? '*' : '') + (m.b ? '**' : '') + hl[1]
-    const inner = open + r.text + close
-    out += m.href ? `[${inner}](${m.href.replace(/[()\s]/g, encodeURIComponent)})` : inner
+    const inner = open + core + close
+    out += lead + (m.href ? `[${inner}](${hrefOut(m.href)})` : inner) + trail
   }
   return out
 }
@@ -354,6 +380,7 @@ export function linesToMarkdown(lines, opts = {}) {
     const pad = '  '.repeat(isList(a) ? a.ind || 0 : 0)
     const emb = embedOf(L.text)
     let body = emb ? embedMarkdown(emb, mediaPrefix) : runsToMarkdown(L.runs)
+    if (!emb && (a.lt === 'li' || a.lt === 'todo') && /^\[[ xX\/>-]\] /.test(body)) body = '\\' + body // "- [ ] " text inside a list item
     if (a.lt === 'todo') out.push(pad + '- ' + todoBox(a) + body)
     else if (a.lt === 'li') {
       const mk = a.mk || 'disc'
@@ -364,7 +391,7 @@ export function linesToMarkdown(lines, opts = {}) {
     else if (a.lt === 'callout') {
       const kind = CALLOUTS.includes(a.co) ? a.co : 'note'
       out.push(calloutStarts(lines, i) && kind !== 'quote' ? `> [!${kind}] ${body}` : '> ' + body)
-    } else out.push(body)
+    } else out.push(!emb && startsLikeMarkup(body) ? '\\' + body : body)
   }
   // an unterminated empty last line is not content
   while (out.length > 1 && out[out.length - 1] === '' && !lines[lines.length - 1].term) out.pop()
@@ -439,11 +466,78 @@ export function stripMarks(s) {
     .replace(/<mark[^>]*>|<\/mark>/g, '')
 }
 
-const INLINE_TOKEN = /(\*\*|~~|==|<u>|<\/u>|<mark(?: data-color="(\w+)")?>|<\/mark>|\*)/
+const HR_RE = /^\s*(\*\s*\*\s*\*|-\s*-\s*-|_\s*_\s*_)[\s*_-]*$/
+
+/** Would a paragraph with this text read back as a list, heading, quote or divider? */
+function startsLikeMarkup(body) {
+  return !!(parseLinePrefix(body) || HR_RE.test(body))
+}
+
+// one run of inline Markdown (no links) → runs; null when its marks don't pair up
+function scanMarks(src, baseMarks, plain) {
+  const runs = []
+  const st = { b: false, i: false, u: false, s: false, hl: null }
+  let buf = ''
+  const marks = () => {
+    const o = { ...baseMarks }
+    for (const k of BOOL_MARKS) if (st[k]) o[k] = true
+    if (st.hl) o.hl = st.hl
+    return o
+  }
+  const flush = () => {
+    if (!buf) return
+    const m = marks()
+    const last = runs[runs.length - 1]
+    if (last && sameMarks(last.marks, m)) last.text += buf
+    else runs.push({ text: buf, marks: m })
+    buf = ''
+  }
+  for (let i = 0; i < src.length; ) {
+    const c = src[i]
+    if (c === '\\' && i + 1 < src.length && ESCAPABLE.includes(src[i + 1])) {
+      buf += src[i + 1]
+      i += 2
+      continue
+    }
+    if (!plain) {
+      const rest = src.slice(i, i + 40)
+      const tok = /^(\*\*|~~|==|\*)/.exec(rest)
+      if (tok) {
+        const key = { '**': 'b', '*': 'i', '~~': 's', '==': 'hl' }[tok[1]]
+        const on = key === 'hl' ? !!st.hl : st[key]
+        // opens before a non-space, closes after one
+        const ok = on ? !isSpace(src[i - 1]) : !isSpace(src[i + tok[1].length])
+        if (ok) {
+          flush()
+          if (key === 'hl') st.hl = on ? null : 'yellow'
+          else st[key] = !on
+          i += tok[1].length
+          continue
+        }
+      }
+      const tag = /^(<u>|<\/u>|<mark(?: data-color="(\w+)")?>|<\/mark>)/.exec(rest)
+      if (tag) {
+        flush()
+        if (tag[1] === '<u>') st.u = true
+        else if (tag[1] === '</u>') st.u = false
+        else if (tag[1] === '</mark>') st.hl = null
+        else st.hl = HIGHLIGHTS.includes(tag[2]) ? tag[2] : 'yellow'
+        i += tag[1].length
+        continue
+      }
+    }
+    buf += c
+    i++
+  }
+  flush()
+  if (st.b || st.i || st.s || st.u || st.hl) return null
+  return runs
+}
 
 /**
- * Inline Markdown → runs [{ text, marks }]: the marks this app writes, plus
- * [label](https://…) links. Anything unbalanced is kept as plain text.
+ * Inline Markdown → runs [{ text, marks }]: the marks this app writes (**, *, ~~,
+ * <u>, ==, <mark>), backslash escapes, and [label](https://…) links. Marks that
+ * don't pair up are kept as plain text.
  */
 export function parseInline(md) {
   const src = String(md || '')
@@ -460,44 +554,16 @@ export function parseInline(md) {
   let m
   const parts = []
   while ((m = LINK.exec(src))) {
+    if (m.index > 0 && src[m.index - 1] === '\\') continue // an escaped "["
     if (m.index > last) parts.push({ text: src.slice(last, m.index) })
-    let href = m[2]
-    try {
-      href = decodeURI(href)
-    } catch {
-      /* keep as written */
-    }
-    parts.push({ text: m[1], href })
+    parts.push({ text: m[1], href: hrefIn(m[2]) })
     last = m.index + m[0].length
   }
   if (last < src.length) parts.push({ text: src.slice(last) })
   for (const part of parts) {
-    const toks = part.text.split(INLINE_TOKEN)
-    // split() with capture groups interleaves: text, token, color, text, token, color, …
-    const st = { b: false, i: false, u: false, s: false, hl: null }
-    const out = []
-    for (let k = 0; k < toks.length; k += 3) {
-      const text = toks[k]
-      const marks = {}
-      for (const key of BOOL_MARKS) if (st[key]) marks[key] = true
-      if (st.hl) marks.hl = st.hl
-      if (part.href) marks.href = part.href
-      if (text) out.push({ text, marks })
-      const tok = toks[k + 1]
-      if (tok == null) break
-      if (tok === '**') st.b = !st.b
-      else if (tok === '*') st.i = !st.i
-      else if (tok === '~~') st.s = !st.s
-      else if (tok === '==') st.hl = st.hl ? null : 'yellow'
-      else if (tok === '<u>') st.u = true
-      else if (tok === '</u>') st.u = false
-      else if (tok === '</mark>') st.hl = null
-      else if (tok.startsWith('<mark')) st.hl = HIGHLIGHTS.includes(toks[k + 2]) ? toks[k + 2] : 'yellow'
-    }
-    if (st.b || st.i || st.s || st.u || st.hl) {
-      // unbalanced: fall back to the text without its marks
-      push(stripMarks(part.text), part.href ? { href: part.href } : {})
-    } else for (const r of out) push(r.text, r.marks)
+    const base = part.href ? { href: part.href } : {}
+    const out = scanMarks(part.text, base, false) || scanMarks(part.text, base, true)
+    for (const r of out) push(r.text, r.marks)
   }
   return runs
 }
@@ -512,7 +578,14 @@ export function markdownToLines(md) {
   if (!src) return []
   let prev = null
   return src.split('\n').map((raw) => {
-    if (/^\s*(\*\s*\*\s*\*|-\s*-\s*-|_\s*_\s*_)[\s*_-]*$/.test(raw)) {
+    // "\- not a list": a paragraph that only looks like markup
+    if (raw[0] === '\\' && startsLikeMarkup(raw.slice(1))) {
+      prev = {}
+      const runs = parseInline(raw.slice(1).replace(/^([^\\])/, '\\$1'))
+      const text = runs.map((r) => r.text).join('')
+      return runs.some((r) => Object.keys(r.marks).length) ? { text, attrs: {}, runs } : { text, attrs: {} }
+    }
+    if (HR_RE.test(raw)) {
       prev = { lt: 'hr' }
       return { text: '', attrs: { lt: 'hr' } }
     }

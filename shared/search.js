@@ -115,7 +115,7 @@ function termMatches(t, f, typos) {
       return false
     default: {
       if (f.hay.includes(t.value)) return true
-      if (!typos || t.phrase || t.value.length < 5 || /\s/.test(t.value)) return false
+      if (!typos || t.neg || t.phrase || t.value.length < 5 || /\s/.test(t.value)) return false
       if (!f.words) f.words = new Set(f.hay.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4))
       for (const w of f.words) if (oneEdit(t.value, w)) return true
       return false

@@ -21,6 +21,7 @@ const paths = {
   play: 'm9 5 11 7-11 7V5Z', stop: 'M5 5h14v14H5Z',
   camera: 'M3 7h4l2-3h6l2 3h4v14H3ZM16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
   download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
+  upload: 'M12 15V3m-5 5 5-5 5 5M4 16v5h16v-5',
   external: 'M14 3h7v7M21 3 10 14M11 4H4v16h16v-7',
   grid: 'M3 3h7v7H3ZM14 3h7v7h-7ZM3 14h7v7H3ZM14 14h7v7h-7Z',
   rows: 'M3 3h18v7H3ZM3 14h18v7H3Z',
@@ -48,7 +49,7 @@ const paths = {
   calendar: 'M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM3 10h18M8 3v4M16 3v4',
   palette: 'M12 21a9 9 0 1 1 9-9.5 4.5 4.5 0 0 1-4.5 4.5h-1.6a1.75 1.75 0 0 0-1.4 2.8l.3.4A1.75 1.75 0 0 1 12.4 21ZM13.5 6.5h.01M17.5 10.5h.01M6.5 12h.01M8.5 7.5h.01',
 }
-const aliases = { '⚙':'settings','⌂':'home','☰':'list','⌕':'search','✎':'pencil','⤢':'expand','✕':'close','×':'close','⋯':'more','▸':'right','⌄':'down','⌃':'up','🖼':'image','+':'plus','−':'minus','🗑':'trash','🗄':'archive','🎨':'palette','📌':'pin','📍':'pin','⌫':'eraser','↶':'undo','↷':'redo','📁':'folder','☐':'todo','☑':'todo','✓':'check','✔':'check','⬇':'download','▶':'play','■':'stop','▦':'grid','▤':'rows','∞':'canvas','⇲':'expand','★':'star','←':'back','→':'arrow','↔':'both','—':'minus','┄':'dashed','⇄':'swap','•':'list','▪':'square','–':'minus','1.':'numbers','a.':'numbers','i.':'numbers','H':'heading','¶':'text' }
+const aliases = { '⬆':'upload','🔗':'external','⎙':'download','⚙':'settings','⌂':'home','☰':'list','⌕':'search','✎':'pencil','⤢':'expand','✕':'close','×':'close','⋯':'more','▸':'right','⌄':'down','⌃':'up','🖼':'image','+':'plus','−':'minus','🗑':'trash','🗄':'archive','🎨':'palette','📌':'pin','📍':'pin','⌫':'eraser','↶':'undo','↷':'redo','📁':'folder','☐':'todo','☑':'todo','✓':'check','✔':'check','⬇':'download','▶':'play','■':'stop','▦':'grid','▤':'rows','∞':'canvas','⇲':'expand','★':'star','←':'back','→':'arrow','↔':'both','—':'minus','┄':'dashed','⇄':'swap','•':'list','▪':'square','–':'minus','1.':'numbers','a.':'numbers','i.':'numbers','H':'heading','¶':'text' }
 
 export const iconNames = () => Object.keys(paths)
 

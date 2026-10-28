@@ -346,8 +346,27 @@ const pageView = document.getElementById('page-view')
 youName.textContent = me.name
 youName.style.setProperty('--me', me.color)
 
+// A deploy restarts the Pi: when we reconnect to a server with a newer app, offer
+// to reload (or just do it while the page is in the background), so old code
+// never keeps editing a board whose format moved on.
+const myVersion = (/[?&]v=([\w-]+)/.exec(document.querySelector('script[src*="bundle.js"]')?.getAttribute('src') || '') || [])[1] || null
+let updateOffered = false
+function checkForUpdate() {
+  if (!myVersion || updateOffered) return
+  fetch('/health', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((h) => {
+      if (!h || !h.version || h.version === myVersion || updateOffered) return
+      updateOffered = true
+      if (document.hidden) return location.reload()
+      ui.toast('A new version of Notes is ready.', { action: 'Reload', ms: 600000, onAction: () => location.reload() })
+      document.addEventListener('visibilitychange', () => document.hidden && location.reload())
+    })
+    .catch(() => {})
+}
 let everConnected = false
 provider.onStatus((connected) => {
+  if (connected && everConnected) checkForUpdate()
   if (connected) everConnected = true
   dot.classList.toggle('on', connected)
   dot.title = connected ? 'Connected' : 'Reconnecting...'
@@ -816,7 +835,7 @@ function renderTabs() {
     tab.tabIndex = isActive ? 0 : -1
     tab.addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab(t.id) }
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); const i = list.indexOf(t); setActiveTab(list[(i + (e.key === 'ArrowRight' ? 1 : list.length - 1)) % list.length].id); tabsEl.querySelector('.tab.on')?.focus() }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); const i = list.indexOf(t); setActiveTab(list[(i + (e.key === 'ArrowRight' ? 1 : list.length - 1)) % list.length].id, { push: false }); tabsEl.querySelector('.tab.on')?.focus() }
       if (e.key === 'F2') { e.preventDefault(); renamingTabId = t.id; renderTabs() }
     })
 
@@ -1001,7 +1020,7 @@ function openTabMenu(anchor, t) {
         ui.toast('Canvas: drag the background to pan, Ctrl/⌘+wheel or pinch to zoom. Shift+drag selects.', { ms: 7000 })
       })
     if (t.view !== 'canvas') item('⇲  Bring every note into view', () => bringAllIntoView())
-    item('＋  New note from template…', () => {
+    item('+  New note from template…', () => {
       if (activeTabId !== t.id) setActiveTab(t.id)
       chooseTemplate((tpl) => newFromTemplate(tpl, { tabId: t.id }))
     })
@@ -1354,7 +1373,7 @@ function setAllCollapsed(on) {
 // { nav: 1, tab, note?, full? }; popstate puts the app back the way it was.
 const here = () => location.pathname + location.search
 function navState(extra = {}) {
-  return { nav: 1, tab: activeTab()?.id || null, ...extra }
+  return { nav: 1, tab: activeTab()?.id || activeTabId || null, ...extra }
 }
 function navPush(extra, url) {
   if (navQuiet) return false
@@ -1413,7 +1432,7 @@ function goToNote(id, opts = {}) {
       else c.el.scrollIntoView({ block: 'center', behavior: 'smooth' })
       c.el.classList.add('flash')
       setTimeout(() => c.el.classList.remove('flash'), 1400)
-      if (opts.line) c.body?.editors?.some((r) => r.revealAt(opts.line))
+      if (opts.line) revealInCard(c, opts.line)
       return
     }
     if (left > 0) setTimeout(() => tryFlash(left - 1), 60)
@@ -1441,6 +1460,9 @@ function findNamed(name, { includeHidden = false } = {}) {
 
 // [[Title]], [[Title#Heading]], [[Title^lineId]] → { noteId?, tabId, line? }
 function resolveLink(inner) {
+  // a title may itself hold # or ^ ("C# notes"): the whole text wins when a note has it
+  const whole = findNamed(inner)
+  if (whole) return { ...whole, line: null, title: inner.trim() }
   const tg = parseTarget(inner)
   const target = findNamed(tg.title)
   if (!target) return null
@@ -1464,7 +1486,7 @@ function followLink(href) {
         openFullscreen(target.noteId, { line: target.line }) // following a link from a full-screen note opens the next one full screen
       } else goToNote(target.noteId, { push: true, line: target.line })
     } else {
-      if (full) closeFullscreen()
+      dropFullscreen()
       setActiveTab(target.tabId)
       if (target.line) setTimeout(() => pageState?.rich?.revealAt(target.line), 80)
     }
@@ -1489,13 +1511,14 @@ function createNoteNamed(title, { tabId, lines, open = false, color } = {}) {
 // what the [[ picker offers for what has been typed after "[["
 function linkCandidates(q = '') {
   const tg = parseTarget(q)
-  const hasHead = q.includes('#')
-  const hasBlock = q.includes('^')
+  // "Note#…" / "Note^…" lists that note's headings / lines, once the part before names one
+  const target = (q.includes('#') || q.includes('^')) && findNamed(tg.title)
+  const hasHead = !!target && q.includes('#')
+  const hasBlock = !!target && !hasHead && q.includes('^')
   if (hasHead || hasBlock) {
-    const target = findNamed(tg.title)
-    if (!target) return []
-    const bodies = target.noteId
-      ? [yNotes.get(target.noteId).get('body'), yNotes.get(target.noteId).get('body2')].filter(Boolean)
+    const tn = target.noteId ? yNotes.get(target.noteId) : null
+    const bodies = tn
+      ? [tn.get('body'), tn.get('layout') === 'book' ? tn.get('body2') : null].filter(Boolean)
       : [yPages.get(target.tabId)?.get('body')].filter(Boolean)
     const title = tg.title
     const want = (hasBlock ? q.slice(q.indexOf('^') + 1) : q.slice(q.indexOf('#') + 1)).trim().toLowerCase()
@@ -1553,12 +1576,16 @@ function ensureBid(ytext, index) {
 // before, every [[old name]] on the board (trash and archive too) is rewritten.
 function watchTitle(input, getNote, id) {
   let before = null
+  let typed = false // only the person who typed the new name rewrites the links
   input.addEventListener('focus', () => {
     before = getNote().get('title').toString()
+    typed = false
   })
+  input.addEventListener('input', () => (typed = true))
   const commit = () => {
     const note = getNote()
-    if (before == null || !note) return
+    if (before == null || !note || !typed) return
+    typed = false
     const now = note.get('title').toString()
     const was = before
     before = input === document.activeElement ? now : null
@@ -1579,10 +1606,19 @@ function bodyOf(src) {
   if (src.kind === 'page') return yPages.get(src.id)?.get('body') || null
   return yNotes.get(src.id)?.get(src.field || 'body') || null
 }
+// show a line in a card's editors: by index on the page it is on (body / body2), else by id or heading
+function revealInCard(card, line, o) {
+  const eds = card.body?.editors || []
+  if (line.index != null) {
+    const r = eds[line.field === 'body2' ? 1 : 0]
+    return r ? r.revealAt(line, o) : false
+  }
+  return eds.some((r) => r.revealAt(line, o))
+}
 function openSource(src) {
-  const line = { index: src.index }
+  const line = { index: src.index, field: src.field }
   if (src.kind === 'page') {
-    if (full) closeFullscreen()
+    dropFullscreen()
     setActiveTab(src.id)
     setTimeout(() => pageState?.rich?.revealAt(line), 80)
     return
@@ -1702,7 +1738,7 @@ function openQuickSwitcher() {
     items: switcherItems,
     onPick: (it, ev) => {
       if (it.kind === 'tab') {
-        if (full) closeFullscreen()
+        dropFullscreen()
         closeHome()
         setActiveTab(it.id)
       } else if (it.kind === 'today') openToday()
@@ -1836,9 +1872,10 @@ async function extractSelection(card) {
   let lines = sel.lines
   if (lines.length > 1 && first.text.trim() === name) lines = lines.filter((l) => l !== first)
   const src = card.note
+  // the text must still be there (someone may have edited it while the dialog was open)
+  if (!rich.replacePinned(sel.pin, '[[' + name + ']]')) return ui.toast('That text changed meanwhile; select it again.')
   const at = { x: Math.round((Number(src.get('x')) || 0) + (Number(src.get('w')) || W_DEFAULT) + 24), y: Math.round(Number(src.get('y')) || 0) }
   const id = createNote(src.get('color') || PAPER[0], { title: name, lines, at })
-  rich.replaceSpan(sel.start, sel.end, '[[' + name + ']]')
   ui.toast('Moved to “' + name + '”', { action: 'Open', onAction: () => (full ? openFullscreen(id) : goToNote(id, { push: true })) })
   return id
 }
@@ -3522,12 +3559,13 @@ function buildPopover(card) {
   })
   akaSec.append(akaInput)
 
-  // What links here
-  const linkSec = section('Links')
+  // What links here (the section brings its own headings)
+  const linkSec = document.createElement('div')
+  linkSec.className = 'pop-sec'
   const linkHost = document.createElement('div')
   linkSec.append(linkHost)
 
-  pop.append(cSec, tSec, wSec, lSec, oSec, mSec, akaSec, linkSec, aSec)
+  pop.append(cSec, tSec, wSec, lSec, oSec, mSec, akaSec, aSec, linkSec)
   card.el.appendChild(pop)
   card.pop = pop
   card.popRefs = { colorInput, favWrap, fsVal, sizeBtns, layoutBtns, tsChk, tsStep, tsVal, agChk, mSel, lSec, taBtns, pinBtn, akaInput, linkHost, shareBtn }
@@ -4381,6 +4419,7 @@ function openFullscreen(id, opts = {}) {
   if (!note || note.get('deleted')) return false
   if (full && full.id === id) return true
   const sourceRect = cards.get(id)?.el.getBoundingClientRect()
+  const prev = full
   if (full) closeFullscreenNow()
   closeMenus()
   closeAllPopovers()
@@ -4548,7 +4587,14 @@ function openFullscreen(id, opts = {}) {
   card.unbinds.push(() => note.unobserve(obs), () => yNotes.unobserve(gone))
 
   full = { id, back, card, pushed: false }
-  if (!opts.fromHash) full.pushed = navPush({ full: id }, '#note=' + id + '&full')
+  if (!opts.fromHash) {
+    // one note large after another (a link, a search hit) takes over its Back step,
+    // so closing it returns to the board instead of to the note before
+    if (prev && prev.pushed && history.state && history.state.full === prev.id) {
+      navReplace({ full: id }, '#note=' + id + '&full')
+      full.pushed = true
+    } else full.pushed = navPush({ full: id }, '#note=' + id + '&full')
+  }
   else if (!navQuiet) navReplace({ full: id }, '#note=' + id + '&full')
   renderPresence()
   requestAnimationFrame(() => {
@@ -4557,7 +4603,7 @@ function openFullscreen(id, opts = {}) {
     if (opts.focus === false) return
     if (!note.get('title').toString().trim()) titleEl.focus()
     else if (card.body && card.body.rich && !phoneMode() && !opts.line) card.body.rich.focusEnd()
-    if (opts.line) setTimeout(() => card.body?.editors?.some((r) => r.revealAt(opts.line, { caret: !phoneMode() })), 60)
+    if (opts.line) setTimeout(() => revealInCard(card, opts.line, { caret: !phoneMode() }), 60)
   })
   return true
 }
@@ -4597,6 +4643,14 @@ function closeFullscreenNow() {
   document.body.classList.remove('has-full')
   if (awareness.getLocalState()?.focus === f.id) awareness.setLocalStateField('focus', null)
   if (phoneMode()) phoneRefresh()
+}
+
+// Leave full screen without a Back step, just before going somewhere else
+// (history.back() now would be cancelled by the next pushState).
+function dropFullscreen() {
+  if (!full) return
+  closeFullscreenNow()
+  navReplace({})
 }
 
 function closeFullscreen() {
@@ -5721,10 +5775,13 @@ const b64uBytes = (s) => {
   return Uint8Array.from(b, (c) => c.charCodeAt(0))
 }
 async function pushSubscription(create) {
-  const reg = await navigator.serviceWorker.ready
+  // .ready never settles if the service worker could not be installed
+  const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((_, rej) => setTimeout(() => rej(new Error('the app’s service worker is not running; reload and try again')), 8000))])
   let sub = await reg.pushManager.getSubscription()
   if (!create) return sub
-  const { publicKey } = await (await fetch('/api/push/key')).json()
+  const r = await fetch('/api/push/key')
+  const { publicKey } = r.ok ? await r.json() : {}
+  if (typeof publicKey !== 'string' || !publicKey) throw new Error('the Pi has reminders turned off')
   const key = b64uBytes(publicKey)
   // a subscription made for another key (the Pi's keys were reset) must go first
   if (sub && sub.options?.applicationServerKey && new Uint8Array(sub.options.applicationServerKey).join() !== key.join()) {
@@ -5784,7 +5841,7 @@ function drawReminderSettings(host) {
   lbl.textContent = 'Daily reminder of what’s due'
   row.append(box, lbl)
   const hourRow = document.createElement('div')
-  hourRow.className = 'settings-enum remind-hour'
+  hourRow.className = 'remind-hour'
   const hl = document.createElement('span')
   hl.textContent = 'At'
   const sel = document.createElement('select')
@@ -6016,7 +6073,7 @@ function openSettingsMenu(anchor) {
   for (const row of menu.querySelectorAll('.menu-check')) {
     const tile = document.createElement('span')
     tile.className = 'settings-tile'
-    tile.appendChild(makeIcon(row.textContent.includes('offline') ? 'cloud' : row.textContent.includes('launch') ? 'home' : row.textContent.includes('Snap') ? 'grid' : 'text'))
+    tile.appendChild(makeIcon(row.textContent.includes('offline') ? 'cloud' : row.textContent.includes('launch') ? 'home' : row.textContent.includes('Snap') ? 'grid' : row.textContent.includes('reminder') ? 'calendar' : row.textContent.includes('Dates') ? 'calendar' : 'text'))
     row.prepend(tile)
   }
 
@@ -6123,6 +6180,13 @@ function followHashOnce() {
 }
 provider.onSync(() => {
   migrateBoard()
+  // the entry we started on was stamped before the tabs arrived
+  if (history.state && history.state.nav && !history.state.tab) {
+    const rest = { ...history.state }
+    delete rest.nav
+    delete rest.tab
+    navReplace(rest, location.href)
+  }
   followHashOnce()
 })
 // With the Pi unreachable the server never syncs, but the board is in IndexedDB:

@@ -80,7 +80,13 @@ export async function importFiles(files, ctx) {
   for (const f of list) if (IMG.test(f.name)) images.set(f.name.toLowerCase(), f)
   const uploaded = new Map() // File -> url
   const imageUrl = async (ref) => {
-    const name = decodeURIComponent(base(String(ref).split(/[?#|]/)[0])).toLowerCase()
+    let name = base(String(ref).split(/[?#|]/)[0])
+    try {
+      name = decodeURIComponent(name)
+    } catch {
+      /* a stray % : use it as written */
+    }
+    name = name.toLowerCase()
     const f = images.get(name)
     if (!f) return null
     if (!uploaded.has(f)) {
@@ -145,7 +151,9 @@ export async function importFiles(files, ctx) {
     const raw = await f.text()
     if (lower === 'readme.md' && raw.startsWith('# Shared Notes export')) continue // our mirror's own README
     if (/^document--[\w-]+\.md$/.test(lower)) {
-      docs.push({ tab, lines: markdownToLines(await fixImages(raw)) })
+      // each document gets its own tab (two in one folder must not land on one page)
+      const name = docs.some((d) => d.tab === tab) ? (tab + ' ' + (docs.filter((d) => d.tab.startsWith(tab)).length + 1)).slice(0, 28) : tab
+      docs.push({ tab: name, lines: markdownToLines(await fixImages(raw)) })
       continue
     }
     if (raw.startsWith('---\n') && /\ntabId:/.test(raw.slice(0, 600))) {

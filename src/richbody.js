@@ -1251,7 +1251,7 @@ export function bindRichText(ytext, el, opts = {}) {
       const iL = lineIndexAt(start)
       const L = lines[iL]
       // Backspace straight after an @date puts the typed words back.
-      if (t === 'deleteContentBackward' && lastDate && lastDate.at === start) {
+      if (t === 'deleteContentBackward' && lastDate && lastDate.at === start && text.slice(lastDate.from, start) === lastDate.made) {
         const ld = lastDate
         lastDate = null
         replaceRange(ld.from, start, ld.orig, charMarks(ld.from))
@@ -1394,7 +1394,7 @@ export function bindRichText(ytext, el, opts = {}) {
     const marks = charMarks(from)
     delete marks.href
     replaceRange(from, pos, '@' + hit.date + tail, marks)
-    lastDate = { from, at: from + 1 + hit.date.length + tail.length, orig }
+    lastDate = { from, at: from + 1 + hit.date.length + tail.length, orig, made: '@' + hit.date + tail }
     lastArrow = null
     lastShortcut = null
     return true
@@ -1433,11 +1433,18 @@ export function bindRichText(ytext, el, opts = {}) {
     const sel = getSel()
     if (!sel) return false
     const cur = linkAt(sel.start)
-    let range = sel.end > sel.start ? sel : cur
+    const range = sel.end > sel.start ? sel : cur
     if (!range) return false
+    // the dialog takes a while: remember the span by position in the CRDT, not by index
+    const span = pinSpan(range.start, range.end)
     const url = await askLink(cur ? cur.href : '')
     if (url == null) return true
     el.focus()
+    const now = unpinSpan(span)
+    if (!now) {
+      ui.toast('That text changed meanwhile; select it again.')
+      return true
+    }
     let clean = url.trim()
     if (clean && !/^(https?:\/\/|mailto:)/i.test(clean)) {
       if (/^[a-z][\w+.-]*:/i.test(clean) && !/^[\w.-]+:\d/.test(clean)) {
@@ -1446,8 +1453,25 @@ export function bindRichText(ytext, el, opts = {}) {
       }
       clean = 'https://' + clean
     }
-    setLinkRange(range.start, range.end, clean || null)
+    setLinkRange(now.start, now.end, clean || null)
     return true
+  }
+
+  // a span that survives other people's edits: relative positions plus the text it held
+  function pinSpan(start, end) {
+    return {
+      a: Y.createRelativePositionFromTypeIndex(ytext, start),
+      b: Y.createRelativePositionFromTypeIndex(ytext, end, -1),
+      text: ytext.toString().slice(start, end),
+    }
+  }
+  // where that span is now, or null if its text changed
+  function unpinSpan(p) {
+    const a = Y.createAbsolutePositionFromRelativePosition(p.a, ytext.doc)
+    const b = Y.createAbsolutePositionFromRelativePosition(p.b, ytext.doc)
+    if (!a || !b || b.index < a.index) return null
+    if (ytext.toString().slice(a.index, b.index) !== p.text) return null
+    return { start: a.index, end: b.index }
   }
 
   // A single pasted address: inserted as is, then (unless it is a picture or a
@@ -1814,6 +1838,7 @@ export function bindRichText(ytext, el, opts = {}) {
       picker = { el: box, items: [], index: 0, from: 0, mode }
     }
     picker.items = items
+    picker.q = mode === 'slash' ? m[0].slice(1) : null
     picker.index = Math.min(picker.index, items.length - 1)
     picker.from = sel.start - m[0].length
     picker.el.replaceChildren()
@@ -1906,6 +1931,11 @@ export function bindRichText(ytext, el, opts = {}) {
       return true
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
+      // a bare "/" then Enter is just a new line
+      if (picker.mode === 'slash' && !picker.q) {
+        closePicker()
+        return false
+      }
       e.preventDefault()
       choosePick(picker.index)
       return true
@@ -1997,6 +2027,7 @@ export function bindRichText(ytext, el, opts = {}) {
     if (document.activeElement !== el) return
     const sel = getSel()
     if (sel) lastSel = sel
+    if (lastDate && !(sel && sel.start === lastDate.at && sel.end === sel.start)) lastDate = null // the caret moved on
     if (sel && !(pendingMarks && pendingMarksAt === sel.start)) {
       pendingMarks = null
       pendingMarksAt = -1
@@ -2093,7 +2124,14 @@ export function bindRichText(ytext, el, opts = {}) {
       pos += len
     }
     const ls = deltaToLines(slice).filter((L, i, all) => L.text || L.attrs.lt || i < all.length - 1)
-    return { start: sel.start, end: sel.end, lines: ls.map((L) => ({ text: L.text, attrs: pickLine(L.attrs), runs: L.runs })) }
+    return { start: sel.start, end: sel.end, pin: pinSpan(sel.start, sel.end), lines: ls.map((L) => ({ text: L.text, attrs: pickLine(L.attrs), runs: L.runs })) }
+  }
+  // replace a span taken by selectionLines(), if its text is still what it was
+  function replacePinned(pin, str) {
+    const at = unpinSpan(pin)
+    if (!at) return false
+    replaceSpan(at.start, at.end, str)
+    return true
   }
   function replaceSpan(start, end, str) {
     const m = charMarks(start)
@@ -2140,6 +2178,7 @@ export function bindRichText(ytext, el, opts = {}) {
     ensureLineId,
     selectionLines,
     replaceSpan,
+    replacePinned,
     insertLines,
     insertAtCaret,
     lines: () => lines.map((L) => ({ text: L.text, attrs: L.attrs, start: L.start, len: L.len })),

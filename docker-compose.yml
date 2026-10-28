@@ -9,6 +9,7 @@ services:
       - ./data:/app/data               # board.bin + data/export mirror persist (existing notes preserved)
     environment:
       - NODE_ENV=production
+      - NOTES_PUSH_SUBJECT=https://notes.timhufnagel.org   # contact for Web Push (reminders)
       # - NOTES_PASSWORD=change-me     # recommended when reachable from the internet (see README)
       # - NOTES_TRASH_DAYS=30
       # - NOTES_HISTORY=0              # disable the git history of data/export

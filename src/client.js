@@ -684,6 +684,14 @@ async function sendToTodo(tabId, tree) {
     items.forEach((m) => {
       if (!m.get('parent')) top = Math.max(top, Number(m.get('order')) || 0)
     })
+    // into the list this device has on show in that tab (the first list otherwise)
+    let list = null
+    try {
+      const shown = JSON.parse(localStorage.getItem('notesTasksList') || '{}')[id]
+      if (shown && shown !== '*' && shown !== 'main' && page.get('lists')?.has?.(shown)) list = shown
+    } catch {
+      /* no saved choice */
+    }
     const put = (node, parent, order) => {
       const iid = genId()
       const m = new Y.Map()
@@ -691,6 +699,7 @@ async function sendToTodo(tabId, tree) {
       m.set('order', order)
       m.set('created', Date.now())
       if (parent) m.set('parent', parent)
+      else if (list) m.set('list', list)
       items.set(iid, m)
       node.children.forEach((c, i) => put(c, iid, i + 1))
     }

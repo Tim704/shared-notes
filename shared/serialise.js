@@ -318,7 +318,7 @@ export function inkToSvg(strokes) {
 export function pageMarkdown(ydoc, tab, opts = {}) {
   const page = ydoc.getMap('pages').get(tab.id)
   if (!page || typeof page.get !== 'function') return ''
-  if (tab.kind === 'tasks') return tasksMarkdown(text(page.get('title')) || tab.name || 'To-do', page.get('items'))
+  if (tab.kind === 'tasks') return tasksMarkdown(text(page.get('title')) || tab.name || 'To-do', page.get('items'), { lists: page.get('lists'), classes: ydoc.getMap('taskClasses') })
   // a mind map with its own bubbles (older ones drew the outline in `body`)
   if (tab.kind === 'mindmap' && page.get('nodes')) return mapMarkdown(text(page.get('title')) || tab.name || 'Mind map', page.get('nodes'), page.get('links'))
   const body = richToMarkdown(page.get('body'), opts)
@@ -581,7 +581,7 @@ export function buildMirror(ydoc, opts = {}) {
 function pageView(ydoc, tab) {
   const page = ydoc.getMap('pages').get(tab.id)
   if (!page || typeof page.get !== 'function') return { title: '', markdown: '' }
-  if (tab.kind === 'tasks') return { title: text(page.get('title')), tasks: tasksView(page.get('items')) }
+  if (tab.kind === 'tasks') return { title: text(page.get('title')), tasks: tasksView(page.get('items'), { lists: page.get('lists'), classes: ydoc.getMap('taskClasses') }) }
   if (tab.kind === 'mindmap' && page.get('nodes')) return { title: text(page.get('title')), map: mapView(text(page.get('title')), page.get('nodes'), page.get('links')) }
   return { title: text(page.get('title')), markdown: richToMarkdown(page.get('body')) }
 }

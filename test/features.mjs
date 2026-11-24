@@ -4,7 +4,7 @@ import { linesOf, parseCrop, formatCrop, cropStyles } from '../shared/lines.js'
 import { setLineAttrs } from '../shared/lineops.js'
 import { tabRec, buildMirror, exportMarkdown } from '../shared/serialise.js'
 import { smoothPoint, simplify } from '../src/stroke.js'
-import { taskTree, progress, dueState, dueLabel, dueCount, orderBetween } from '../shared/tasks.js'
+import { taskTree, progress, dueState, dueLabel, dueCount, orderBetween, taskLists, taskClasses, tasksMarkdown, tasksView, MAIN_LIST } from '../shared/tasks.js'
 import { mapTree, layoutMap, fromOutline, mapMarkdown, branchToTasks } from '../shared/mindmap.js'
 import { outlineTree } from '../shared/lines.js'
 import { referencedMedia } from '../server/media.js'
@@ -305,6 +305,34 @@ check(
   let p = { x: 0, y: 0 }
   for (let i = 0; i < 20; i++) p = smoothPoint(p, { x: 10, y: 10 })
   check('smoothPoint converges on the pen', Math.abs(p.x - 10) < 0.01 && Math.abs(p.y - 10) < 0.01)
+  // To-do: several lists in a tab, and classes
+  {
+    const items = {
+      a: { text: 'Essay', order: 1 },
+      a1: { text: 'Outline', parent: 'a', order: 1, list: 'zzz' },
+      b: { text: 'Problem set', order: 2, list: 'L1', cls: 'calc' },
+      b1: { text: 'Part 1', parent: 'b', order: 1, done: true },
+      b2: { text: 'Part 2', parent: 'b', order: 2, cls: 'phys' },
+      c: { text: 'Stray', order: 3, list: 'gone' },
+    }
+    const lists = { L1: { name: 'Calculus', order: 1 }, main: { name: 'Everything else' } }
+    const classes = { calc: { name: 'Calculus', color: 'red' }, phys: { name: 'Physics', color: 'nope' } }
+    const all = taskLists(lists)
+    check('the first list always exists and can be renamed', all.length === 2 && all[0].id === MAIN_LIST && all[0].name === 'Everything else' && all[1].name === 'Calculus')
+    check('a tab without lists has just the first one', taskLists(undefined).length === 1 && taskLists(undefined)[0].name === 'Tasks')
+    const tree = taskTree(items, all.map((l) => l.id))
+    const by = Object.fromEntries(tree.map((n) => [n.id, n]))
+    check('a task is in the list it names; one naming a deleted list falls back to the first', by.a.list === MAIN_LIST && by.b.list === 'L1' && by.c.list === MAIN_LIST)
+    check('parts are in their task\'s list whatever they say', by.a.children[0].list === MAIN_LIST && by.b.children[0].list === 'L1')
+    check('parts inherit the class unless they name their own', by.b.children[0].classId === 'calc' && by.b.children[1].classId === 'phys' && by.a.classId === null)
+    const cl = taskClasses(classes)
+    check('classes come back by name, with a safe colour', cl.length === 2 && cl[0].name === 'Calculus' && cl[0].color === 'red' && cl[1].color === 'blue')
+    const md = tasksMarkdown('Homework', items, { lists, classes })
+    check('the Markdown groups tasks under a heading per list', /## Everything else\n\n- \[ \] Essay\n  - \[ \] Outline\n- \[ \] Stray\n\n## Calculus\n\n- \[ \] Problem set \[Calculus\]\n  - \[x\] Part 1\n  - \[ \] Part 2 \[Physics\]/.test(md))
+    check('one list needs no headings', !/##/.test(tasksMarkdown('T', { a: { text: 'x', order: 1 } })))
+    const view = tasksView(items, { lists, classes })
+    check('the JSON export names the list and the class', view.find((n) => n.id === 'b').list === 'Calculus' && view.find((n) => n.id === 'b').class === 'Calculus' && view.find((n) => n.id === 'a').list === 'Everything else')
+  }
   // a picture's crop
   {
     const c = parseCrop(formatCrop({ x: 10, y: 0, w: 50, h: 100, ratio: 0.75 }))

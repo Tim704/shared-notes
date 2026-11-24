@@ -230,6 +230,18 @@ instead.
 - **Tasks:** broken into parts as deep as you like, each with a tick, a due date and a
   progress bar that counts its smallest parts.
 - **Due date from the keyboard:** Ctrl/⌘+Shift+/ on a task opens its date picker.
+- **Several lists in one tab:** *New list* adds another list beside the first. Pills under
+  the title switch between them, and **All** shows every list. A new task goes to the
+  list on show; a task's ⋯ menu moves it to another list. Click the current pill again to
+  rename, reorder or delete a list (deleting asks whether its tasks move or go too).
+- **Classes with a colour:** a task's ⋯ menu → *Class…* gives it a class such as
+  "Calculus". Each class has one colour on the whole board, shown as a stripe and a
+  label on the task and on its entries in Week, Month and Board. Parts take their task's
+  class unless they are given their own. *Edit classes…* renames, recolours or deletes.
+- **Week is a calendar:** seven days side by side, Monday first, with Previous / This
+  week / Next. Tick a task right in its day, click it to find it in the list, or click an
+  empty part of a day to add a task due then. What is overdue sits above the week.
+  Phones keep the days as a list.
 - **Four views:** List, Week, Month and **Board**: To do, Doing and Done columns to drag
   tasks between (or move them from a card's ⋯, or with ← and →).
 - **From notes:** checkboxes written in any note or document show up too, grouped by their

@@ -2,7 +2,7 @@ import * as Y from 'yjs'
 import { icon } from './icons.js'
 import * as ui from './ui.js'
 import { genId } from './util.js'
-import { taskTree, flatten, progress, dueState, dueLabel, ymd, parseYmd, addDays, orderBetween, validDate } from '../shared/tasks.js'
+import { taskTree, flatten, progress, dueState, dueLabel, ymd, parseYmd, addDays, orderBetween, validDate, taskLists, taskClasses, MAIN_LIST, CLASS_COLORS } from '../shared/tasks.js'
 import { noteTodos } from '../shared/links.js'
 import { setLineAttrs, findLineById } from '../shared/lineops.js'
 import { linesOf } from '../shared/lines.js'
@@ -16,7 +16,10 @@ import { linesOf } from '../shared/lines.js'
 // it in its note.
 //
 // Data (see shared/tasks.js): page.get('items') is a flat Y.Map of
-// id -> Y.Map{ text, done, due, parent, order, created }.
+// id -> Y.Map{ text, done, due, parent, order, created, list, cls }.
+// A tab can hold several lists (page.get('lists')); the pills under the title
+// pick the one on show. Tasks can belong to a class with a colour, shared by the
+// whole board (doc.getMap('taskClasses')); parts take their task's class.
 //
 // Typing writes with the TYPE origin and doesn't redraw (that would replace the
 // field under the caret); every other change redraws and puts focus back.
@@ -31,6 +34,8 @@ const FOLD_KEY = 'notesTaskFolds'
 const DONE_FOLD = 'notesTasksDoneOpen'
 const FROM_FOLD = 'notesTasksFromNotes'
 const VIEW_KEY = 'notesTasksView'
+const LIST_KEY = 'notesTasksList' // { [tabId]: list id | '*' (all lists) }
+const ALL = '*'
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 
@@ -63,6 +68,26 @@ export function createTasksView(host, page, opts = {}) {
   if (!(page.get('items') instanceof Y.Map)) page.doc.transact(() => page.set('items', new Y.Map()))
   const items = page.get('items')
   const doc = page.doc
+  if (!(page.get('lists') instanceof Y.Map)) doc.transact(() => page.set('lists', new Y.Map()))
+  const listsMap = page.get('lists')
+  const classesMap = doc.getMap('taskClasses')
+  const lists = () => taskLists(listsMap)
+  const classes = () => taskClasses(classesMap)
+  const classOf = (n) => (n.classId ? classes().find((c) => c.id === n.classId) || null : null)
+  const shown = load(LIST_KEY, {})
+  // the list on show: one list's id, or ALL
+  const curList = () => {
+    const v = shown[tabId]
+    if (v === ALL) return lists().length > 1 ? ALL : MAIN_LIST
+    return lists().some((l) => l.id === v) ? v : MAIN_LIST
+  }
+  const setList = (id) => {
+    shown[tabId] = id
+    save(LIST_KEY, shown)
+    draw()
+  }
+  // a new top-level task goes to the list on show
+  const newTaskList = () => (curList() === ALL ? MAIN_LIST : curList())
 
   const folds = new Set(load(FOLD_KEY, []))
   const doneOpen = load(DONE_FOLD, {})
@@ -96,8 +121,11 @@ export function createTasksView(host, page, opts = {}) {
   const seg = ui.segmented('View', [['list', 'List'], ['week', 'Week'], ['month', 'Month'], ['board', 'Board']], view, (v) => setView(v))
   seg.classList.add('tasks-views')
   head.append(title, seg)
+  const pills = el('div', 'tasks-lists')
+  pills.setAttribute('role', 'tablist')
+  pills.setAttribute('aria-label', 'Lists in this tab')
   const body = el('div', 'tasks-body')
-  root.append(head, body)
+  root.append(head, pills, body)
   host.appendChild(root)
 
   function setView(v) {
@@ -110,10 +138,18 @@ export function createTasksView(host, page, opts = {}) {
 
   // ---- data helpers ----
   const node = (id) => items.get(id)
-  function siblings(parent) {
+  // the list a top-level item is in (one that names a deleted list is in the first)
+  const listOfItem = (m) => {
+    const l = m.get('list')
+    return l && l !== MAIN_LIST && listsMap.has(l) ? l : MAIN_LIST
+  }
+  // siblings under `parent`; at the top level, with `list`, only that list's tasks
+  function siblings(parent, list) {
     const out = []
     items.forEach((m, id) => {
-      if ((m.get('parent') || null) === (parent || null)) out.push({ id, order: Number(m.get('order')) || 0, created: m.get('created') || 0 })
+      if ((m.get('parent') || null) !== (parent || null)) return
+      if (!parent && list && listOfItem(m) !== list) return
+      out.push({ id, order: Number(m.get('order')) || 0, created: m.get('created') || 0 })
     })
     return out.sort((a, b) => a.order - b.order || a.created - b.created || (a.id < b.id ? -1 : 1))
   }
@@ -141,6 +177,10 @@ export function createTasksView(host, page, opts = {}) {
       m.set('order', orderAfter(parent, afterId))
       m.set('created', Date.now())
       if (parent) m.set('parent', parent)
+      else {
+        const list = extra.list || newTaskList()
+        if (list !== MAIN_LIST) m.set('list', list)
+      }
       if (extra.due) m.set('due', extra.due)
       items.set(id, m)
     })
@@ -193,7 +233,7 @@ export function createTasksView(host, page, opts = {}) {
   }
   function indent(id) {
     const m = node(id)
-    const sib = siblings(m.get('parent'))
+    const sib = siblings(m.get('parent'), listOfItem(m))
     const i = sib.findIndex((s) => s.id === id)
     if (i <= 0) return
     const newParent = sib[i - 1].id
@@ -201,6 +241,7 @@ export function createTasksView(host, page, opts = {}) {
     doc.transact(() => {
       m.set('parent', newParent)
       m.set('order', order)
+      m.delete('list') // a part is in its task's list
     })
     setFold(newParent, false)
   }
@@ -210,15 +251,22 @@ export function createTasksView(host, page, opts = {}) {
     if (!parent) return
     const grand = node(parent)?.get('parent') || null
     const order = orderAfter(grand, parent)
+    // stepping out to the top level, it stays in the list it was a part of
+    let top = parent
+    for (let i = 0; node(top)?.get('parent') && i < 100; i++) top = node(top).get('parent')
+    const list = node(top)?.get('list')
     doc.transact(() => {
       m.set('order', order)
       if (grand) m.set('parent', grand)
-      else m.delete('parent')
+      else {
+        m.delete('parent')
+        if (list && list !== MAIN_LIST) m.set('list', list)
+      }
     })
   }
   function move(id, dir) {
     const m = node(id)
-    const sib = siblings(m.get('parent'))
+    const sib = siblings(m.get('parent'), listOfItem(m))
     const i = sib.findIndex((s) => s.id === id)
     const j = i + dir
     if (j < 0 || j >= sib.length) return
@@ -232,6 +280,196 @@ export function createTasksView(host, page, opts = {}) {
     if (on) folds.add(id)
     else folds.delete(id)
     save(FOLD_KEY, Array.from(folds).slice(-2000))
+  }
+
+  // ---- lists ----
+  function moveToList(id, list) {
+    const m = node(id)
+    if (!m) return
+    doc.transact(() => {
+      if (list === MAIN_LIST) m.delete('list')
+      else m.set('list', list)
+      m.set('order', orderAfter(null, null))
+    })
+  }
+  async function addList() {
+    const name = await ui.prompt('Name of the new list:', '', { title: 'New list', okLabel: 'Add', maxLength: 40, placeholder: 'e.g. Calculus' })
+    if (!name || !name.trim()) return
+    const all = lists()
+    const id = genId()
+    doc.transact(() => listsMap.set(id, { name: name.trim().slice(0, 40), order: (all.length > 1 ? all[all.length - 1].order : 0) + 1 }))
+    setList(id)
+  }
+  async function renameList(l) {
+    const name = await ui.prompt('Name of this list:', l.name, { title: 'Rename list', okLabel: 'Rename', maxLength: 40 })
+    if (!name || !name.trim() || name.trim() === l.name) return
+    doc.transact(() => listsMap.set(l.id, l.id === MAIN_LIST ? { name: name.trim().slice(0, 40) } : { name: name.trim().slice(0, 40), order: l.order }))
+  }
+  function shiftList(l, dir) {
+    const all = lists().filter((x) => x.id !== MAIN_LIST)
+    const i = all.findIndex((x) => x.id === l.id)
+    const j = i + dir
+    if (i < 0 || j < 0 || j >= all.length) return
+    const next = all.slice()
+    next.splice(j, 0, next.splice(i, 1)[0])
+    doc.transact(() => next.forEach((x, k) => listsMap.set(x.id, { name: x.name, order: k + 1 })))
+  }
+  async function deleteList(l) {
+    if (l.id === MAIN_LIST) return
+    const mine = []
+    items.forEach((m, id) => !m.get('parent') && m.get('list') === l.id && mine.push(id))
+    let what = 'empty'
+    if (mine.length) {
+      const first = lists()[0].name
+      what = await ui.dialog({
+        title: `Delete "${l.name}"?`,
+        message: `It has ${mine.length} task${mine.length > 1 ? 's' : ''}.`,
+        buttons: [
+          { label: 'Cancel', value: null },
+          { label: 'Delete the tasks too', value: 'delete', danger: true },
+          { label: `Move them to "${first}"`, value: 'move', primary: true },
+        ],
+      })
+      if (!what) return
+    }
+    doc.transact(() => {
+      if (what === 'delete') for (const id of mine) subtree(id).forEach((i) => items.delete(i))
+      else for (const id of mine) node(id)?.delete('list')
+      listsMap.delete(l.id)
+    })
+    setList(MAIN_LIST)
+  }
+  function drawPills() {
+    const all = lists()
+    const cur = curList()
+    pills.replaceChildren()
+    const tree = taskTree(items, all.map((l) => l.id))
+    const pill = (id, label, count, l) => {
+      const b = el('button', 'tasks-list' + (id === cur ? ' on' : ''))
+      b.type = 'button'
+      b.dataset.list = id
+      b.setAttribute('role', 'tab')
+      b.setAttribute('aria-selected', String(id === cur))
+      b.append(el('span', 'tasks-list-name', label))
+      if (count) b.append(el('span', 'tasks-list-n', String(count)))
+      b.addEventListener('click', () => (id === cur && l ? listMenu(b, l) : setList(id)))
+      if (l) {
+        b.title = id === cur ? 'Click again to rename, move or delete this list' : ''
+        b.addEventListener('contextmenu', (e) => {
+          e.preventDefault()
+          listMenu(b, l)
+        })
+      }
+      pills.appendChild(b)
+    }
+    const open = (id) => tree.filter((n) => !n.done && (id === ALL || n.list === id)).length
+    if (all.length > 1) {
+      pill(ALL, 'All', open(ALL), null)
+      for (const l of all) pill(l.id, l.name, open(l.id), l)
+    }
+    const add = el('button', 'tasks-list tasks-list-add')
+    add.type = 'button'
+    add.title = 'Add another list to this tab'
+    add.setAttribute('aria-label', add.title)
+    add.append(icon('plus'), el('span', '', all.length > 1 ? 'List' : 'New list'))
+    add.addEventListener('click', addList)
+    pills.appendChild(add)
+  }
+  function listMenu(anchor, l) {
+    const others = lists().filter((x) => x.id !== MAIN_LIST)
+    const i = others.findIndex((x) => x.id === l.id)
+    ui.menu(anchor, [
+      { label: 'Rename…', onClick: () => renameList(l) },
+      ...(l.id !== MAIN_LIST && i > 0 ? [{ label: 'Move left', onClick: () => shiftList(l, -1) }] : []),
+      ...(l.id !== MAIN_LIST && i < others.length - 1 ? [{ label: 'Move right', onClick: () => shiftList(l, 1) }] : []),
+      ...(l.id !== MAIN_LIST ? ['sep', { label: 'Delete list…', icon: 'trash', cls: 'danger', onClick: () => deleteList(l) }] : []),
+    ])
+  }
+
+  // ---- classes ----
+  function setClass(id, cls) {
+    const m = node(id)
+    if (m) doc.transact(() => (cls ? m.set('cls', cls) : m.delete('cls')))
+  }
+  async function newClass(forTask) {
+    const name = await ui.prompt('Name of the class:', '', { title: 'New class', okLabel: 'Add', maxLength: 30, placeholder: 'e.g. Calculus' })
+    if (!name || !name.trim()) return
+    const used = new Set(classes().map((c) => c.color))
+    const color = CLASS_COLORS.find((c) => !used.has(c)) || CLASS_COLORS[classes().length % CLASS_COLORS.length]
+    const id = genId()
+    doc.transact(() => {
+      classesMap.set(id, { name: name.trim().slice(0, 30), color })
+      if (forTask) node(forTask)?.set('cls', id)
+    })
+  }
+  function classMenu(anchor, n) {
+    const all = classes()
+    ui.menu(
+      anchor,
+      [
+        ...all.map((c) => ({ icon: '●', label: c.name, cls: 'cls-pick cls-' + c.color, on: n.cls === c.id, onClick: () => setClass(n.id, c.id) })),
+        ...(all.length ? ['sep'] : []),
+        ...(n.cls ? [{ label: n.parent ? 'Same class as its task' : 'No class', onClick: () => setClass(n.id, null) }] : []),
+        { label: 'New class…', icon: 'plus', onClick: () => newClass(n.id) },
+        ...(all.length ? [{ label: 'Edit classes…', onClick: () => editClasses(anchor) }] : []),
+      ],
+      { align: 'right' }
+    )
+  }
+  // every class with its colour, name and a delete button, in one sheet
+  let classSheet = null
+  function editClasses(anchor) {
+    const box = el('div', 'menu cls-edit')
+    box.addEventListener('click', (e) => e.stopPropagation())
+    const fill = () => {
+      box.replaceChildren(el('div', 'menu-h', 'Classes'))
+      for (const c of classes()) {
+        const r = el('div', 'cls-row')
+        const dot = el('button', 'cls-dot cls-' + c.color)
+        dot.type = 'button'
+        dot.title = 'Change colour'
+        dot.setAttribute('aria-label', 'Colour of ' + c.name)
+        dot.addEventListener('click', (e) => {
+          e.stopPropagation()
+          ui.menu(dot, CLASS_COLORS.map((k) => ({ icon: '●', label: k[0].toUpperCase() + k.slice(1), cls: 'cls-pick cls-' + k, on: k === c.color, onClick: () => classesMap.set(c.id, { name: c.name, color: k }) })), { keepFocus: true })
+        })
+        const name = el('input', 'cls-name')
+        name.value = c.name
+        name.maxLength = 30
+        name.setAttribute('aria-label', 'Class name')
+        name.addEventListener('change', () => name.value.trim() && classesMap.set(c.id, { name: name.value.trim(), color: c.color }))
+        const del = el('button', 'cls-del')
+        del.type = 'button'
+        del.title = 'Delete this class (its tasks stay)'
+        del.setAttribute('aria-label', 'Delete ' + c.name)
+        del.appendChild(icon('trash'))
+        del.addEventListener('click', () => classesMap.delete(c.id))
+        r.append(dot, name, del)
+        box.appendChild(r)
+      }
+      if (!classes().length) box.appendChild(el('div', 'cls-none', 'No classes yet.'))
+    }
+    fill()
+    const outside = (e) => {
+      if (!box.contains(e.target) && !e.target.closest?.('.menu')) close()
+    }
+    const close = ui.popover(box, anchor, {
+      label: 'Classes',
+      onClose: () => {
+        classSheet = null
+        document.removeEventListener('pointerdown', outside, true)
+      },
+    })
+    setTimeout(() => document.addEventListener('pointerdown', outside, true))
+    classSheet = { fill, close }
+  }
+  // the class of a task as a colour, for rows, chips and cards
+  function paintClass(e, n) {
+    const c = classOf(n)
+    if (!c) return null
+    e.classList.add('has-cls')
+    e.style.setProperty('--cls', `var(--${c.color})`)
+    return c
   }
 
   function setColumn(id, col) {
@@ -342,7 +580,9 @@ export function createTasksView(host, page, opts = {}) {
     }
     root.dataset.view = view
     body.replaceChildren()
-    const tree = taskTree(items)
+    drawPills()
+    const cur = curList()
+    const tree = taskTree(items, lists().map((l) => l.id)).filter((n) => cur === ALL || n.list === cur)
     if (view === 'week') drawWeek(tree)
     else if (view === 'month') drawMonth(tree)
     else if (view === 'board') drawBoard(tree)
@@ -448,6 +688,18 @@ export function createTasksView(host, page, opts = {}) {
     })
     text.addEventListener('keydown', (e) => onKey(e, n, text))
     r.append(fold, check(n), text)
+    const cls = paintClass(r, n)
+    if (cls && (n.cls || !depth)) {
+      // the name once per task; parts that inherit it only carry the colour
+      const chip = el('button', 'task-cls', cls.name)
+      chip.type = 'button'
+      chip.title = 'Class: ' + cls.name + ' (click to change)'
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation()
+        classMenu(chip, n)
+      })
+      r.appendChild(chip)
+    }
     if (n.doing) r.appendChild(el('span', 'task-doing', 'Doing'))
     if (n.children.length) {
       const p = progress(n)
@@ -476,6 +728,10 @@ export function createTasksView(host, page, opts = {}) {
           { label: 'Set due date…', icon: 'calendar', onClick: () => r.querySelector('.task-due').click() },
           ...(n.done ? [] : [{ label: n.doing ? 'Not in progress' : 'In progress', onClick: () => setColumn(n.id, n.doing ? 'todo' : 'doing') }]),
           ...(n.due ? [{ label: 'Clear due date', onClick: () => setDue(n.id, null) }] : []),
+          { label: 'Class…', icon: 'palette', onClick: () => setTimeout(() => classMenu(more, n)) },
+          ...(!depth && lists().length > 1
+            ? [{ label: 'Move to list…', onClick: () => setTimeout(() => ui.menu(more, lists().filter((l) => l.id !== n.list).map((l) => ({ label: l.name, onClick: () => moveToList(n.id, l.id) })), { align: 'right' })) }]
+            : []),
           'sep',
           { label: 'Move up', onClick: () => move(n.id, -1) },
           { label: 'Move down', onClick: () => move(n.id, 1) },
@@ -605,6 +861,7 @@ export function createTasksView(host, page, opts = {}) {
     const n = f.node
     const r = el('div', 'task-entry' + (n.done ? ' done' : ''))
     r.dataset.id = n.id
+    paintClass(r, n)
     const txt = el('button', 'task-entry-text')
     txt.type = 'button'
     txt.appendChild(el('span', 'task-entry-name', n.text || 'Untitled'))
@@ -624,7 +881,107 @@ export function createTasksView(host, page, opts = {}) {
     return r
   }
 
+  // everything with a date, by day: tasks, and dated checkboxes from notes as { node, path, src }
+  function itemsByDay(tree) {
+    const byDay = new Map()
+    for (const f of flatten(tree)) {
+      if (!f.node.due) continue
+      if (!byDay.has(f.node.due)) byDay.set(f.node.due, [])
+      byDay.get(f.node.due).push(f)
+    }
+    for (const x of noteItems) {
+      if (!x.due || x.state === '-') continue
+      if (!byDay.has(x.due)) byDay.set(x.due, [])
+      byDay.get(x.due).push({ node: { id: 'note:' + x.id + ':' + x.index, text: withoutDate(x.text), done: x.done, due: x.due, children: [] }, path: [x.title || 'Note'], src: x })
+    }
+    return byDay
+  }
+  // one item in a calendar cell (Month)
+  function dayChip(f, d, t) {
+    const c = el('button', 'task-chip' + (f.node.done ? ' done' : ''))
+    c.type = 'button'
+    c.dataset.state = f.node.done ? 'done' : dueState(d, t)
+    c.textContent = f.node.text || 'Untitled'
+    c.title = (f.path.length ? f.path.join(' › ') + ' › ' : '') + (f.node.text || 'Untitled')
+    paintClass(c, f.node)
+    c.addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (phone()) {
+        pickedDay = d
+        draw()
+      } else if (f.src) opts.openSource?.(f.src)
+      else reveal(f.node.id)
+    })
+    return c
+  }
+  const navBtn = (label, ico, fn) => {
+    const b = el('button', 'task-nav')
+    b.type = 'button'
+    if (ico) b.appendChild(icon(ico))
+    else b.textContent = label
+    b.title = label
+    b.setAttribute('aria-label', label)
+    b.addEventListener('click', fn)
+    return b
+  }
+
+  // Week: a calendar of seven days, Monday first (phones get the days as a list)
+  let weekStart = null // the Monday on show; null = this week
   function drawWeek(tree) {
+    if (phone()) return drawWeekList(tree)
+    const t = today()
+    const thisMonday = addDays(t, -((parseYmd(t).getDay() + 6) % 7))
+    const start = weekStart || thisMonday
+    const end = addDays(start, 6)
+    const byDay = itemsByDay(tree)
+    const a = parseYmd(start)
+    const b = parseYmd(end)
+    const span = a.getMonth() === b.getMonth() ? `${a.getDate()} – ${b.getDate()} ${MONTHS[b.getMonth()]} ${b.getFullYear()}` : `${a.getDate()} ${MONTHS[a.getMonth()].slice(0, 3)} – ${b.getDate()} ${MONTHS[b.getMonth()].slice(0, 3)} ${b.getFullYear()}`
+    const bar = el('div', 'task-month-bar')
+    const go = (n) => {
+      weekStart = n == null ? null : addDays(start, n)
+      if (weekStart === thisMonday) weekStart = null
+      draw()
+    }
+    bar.append(el('h3', 'task-month-h', span), navBtn('Previous week', 'back', () => go(-7)), navBtn('This week', null, () => go(null)), navBtn('Next week', 'right', () => go(7)))
+    body.appendChild(bar)
+
+    // what is already late sits above the days, so it is not lost in a past week
+    const late = []
+    for (const [d, list] of byDay) if (d < t && d < start) list.forEach((f) => !f.node.done && late.push(f))
+    if (late.length && start === thisMonday) {
+      const g = el('section', 'task-day overdue task-wlate')
+      g.appendChild(el('h3', 'task-day-h', 'Overdue'))
+      late.sort((x, y) => (x.node.due < y.node.due ? -1 : 1)).forEach((f) => g.appendChild(f.src ? noteRow(f.src) : dueEntry(f, t, { showDate: true })))
+      body.appendChild(g)
+    }
+
+    const grid = el('div', 'task-wgrid')
+    grid.setAttribute('role', 'grid')
+    for (let d = start; d <= end; d = addDays(d, 1)) {
+      const dt = parseYmd(d)
+      const col = el('div', 'task-wcol' + (d === t ? ' today' : '') + (d < t ? ' past' : ''))
+      col.setAttribute('role', 'gridcell')
+      col.dataset.day = d
+      const h = el('div', 'task-wcol-h')
+      h.append(el('span', 'task-wcol-dow', DOW[(dt.getDay() + 6) % 7]), el('span', 'task-cell-n', String(dt.getDate())))
+      col.appendChild(h)
+      const list = el('div', 'task-wcol-list')
+      ;(byDay.get(d) || []).forEach((f) => list.appendChild(f.src ? noteRow(f.src, { showDate: false }) : dueEntry(f, t)))
+      col.appendChild(list)
+      col.title = 'Click an empty part of the day to add a task due then'
+      col.addEventListener('click', (e) => {
+        if (e.target.closest('.task-entry')) return
+        const id = create(null, null, { due: d })
+        pendingFocus = { id }
+        setView('list')
+      })
+      grid.appendChild(col)
+    }
+    body.appendChild(grid)
+  }
+
+  function drawWeekList(tree) {
     const t = today()
     const all = flatten(tree).filter((f) => f.node.due)
     const dow = (parseYmd(t).getDay() + 6) % 7 // Monday = 0
@@ -657,18 +1014,7 @@ export function createTasksView(host, page, opts = {}) {
 
   function drawMonth(tree) {
     const t = today()
-    const byDay = new Map()
-    for (const f of flatten(tree)) {
-      if (!f.node.due) continue
-      if (!byDay.has(f.node.due)) byDay.set(f.node.due, [])
-      byDay.get(f.node.due).push(f)
-    }
-    // dated checkboxes from notes ride along as { node, path, src }
-    for (const x of noteItems) {
-      if (!x.due || x.state === '-') continue
-      if (!byDay.has(x.due)) byDay.set(x.due, [])
-      byDay.get(x.due).push({ node: { id: 'note:' + x.id + ':' + x.index, text: withoutDate(x.text), done: x.done, due: x.due, children: [] }, path: [x.title || 'Note'], src: x })
-    }
+    const byDay = itemsByDay(tree)
     const journal = opts.journal ? opts.journal.days() : new Map()
     const [y, mo] = month.split('-').map(Number)
     const first = new Date(y, mo - 1, 1)
@@ -676,16 +1022,7 @@ export function createTasksView(host, page, opts = {}) {
     const last = ymd(new Date(y, mo, 0))
 
     const bar = el('div', 'task-month-bar')
-    const nav = (label, ico, fn) => {
-      const b = el('button', 'task-nav')
-      b.type = 'button'
-      if (ico) b.appendChild(icon(ico))
-      else b.textContent = label
-      b.title = label
-      b.setAttribute('aria-label', label)
-      b.addEventListener('click', fn)
-      return b
-    }
+    const nav = navBtn
     const shift = (n) => {
       const d = new Date(y, mo - 1 + n, 1)
       month = ymd(d).slice(0, 7)
@@ -725,22 +1062,7 @@ export function createTasksView(host, page, opts = {}) {
       }
       const list = byDay.get(d) || []
       const chips = el('div', 'task-chips')
-      list.slice(0, 3).forEach((f) => {
-        const c = el('button', 'task-chip' + (f.node.done ? ' done' : ''))
-        c.type = 'button'
-        c.dataset.state = f.node.done ? 'done' : dueState(d, t)
-        c.textContent = f.node.text || 'Untitled'
-        c.title = (f.path.length ? f.path.join(' › ') + ' › ' : '') + (f.node.text || 'Untitled')
-        c.addEventListener('click', (e) => {
-          e.stopPropagation()
-          if (phone()) {
-            pickedDay = d
-            draw()
-          } else if (f.src) opts.openSource?.(f.src)
-          else reveal(f.node.id)
-        })
-        chips.appendChild(c)
-      })
+      list.slice(0, 3).forEach((f) => chips.appendChild(dayChip(f, d, t)))
       if (list.length > 3) {
         const more = el('button', 'task-chip more', `+${list.length - 3} more`)
         more.type = 'button'
@@ -801,6 +1123,7 @@ export function createTasksView(host, page, opts = {}) {
       for (const n of cards) {
         const c = el('div', 'task-card' + (n.done ? ' done' : ''))
         c.dataset.id = n.id
+        paintClass(c, n)
         c.draggable = true
         c.tabIndex = 0
         c.setAttribute('aria-label', (n.text || 'Untitled') + ', ' + label)
@@ -906,6 +1229,12 @@ export function createTasksView(host, page, opts = {}) {
     schedule()
   }
   items.observeDeep(onItems)
+  const onMeta = () => {
+    schedule()
+    classSheet?.fill()
+  }
+  listsMap.observe(onMeta)
+  classesMap.observe(onMeta)
   // checkboxes in notes: redraw only when the list of them actually changes
   let noteTimer = 0
   const onNotes = () => {
@@ -930,7 +1259,8 @@ export function createTasksView(host, page, opts = {}) {
     el: root,
     addTask() {
       if (view !== 'list') setView('list')
-      const tree = taskTree(items).filter((n) => !n.done)
+      const cur = newTaskList()
+      const tree = taskTree(items, lists().map((l) => l.id)).filter((n) => !n.done && n.list === cur)
       focusRow(create(null, tree.length ? tree[tree.length - 1].id : null))
     },
     destroy() {
@@ -940,6 +1270,9 @@ export function createTasksView(host, page, opts = {}) {
       notesMap.unobserveDeep(onNotes)
       pagesMap.unobserveDeep(onNotes)
       items.unobserveDeep(onItems)
+      listsMap.unobserve(onMeta)
+      classesMap.unobserve(onMeta)
+      classSheet?.close()
       titleText?.unobserve(syncTitle)
       root.remove()
     },

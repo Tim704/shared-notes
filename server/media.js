@@ -102,7 +102,7 @@ export function createMedia({ mediaDir, maxBytes }) {
 }
 
 /** Every /media/<file> the board mentions: note bodies (trash included), document
- *  pages and pictures in mind map bubbles. */
+ *  pages, pictures in mind map bubbles and tab wallpapers. */
 export function referencedMedia(ydoc) {
   const out = new Set()
   const re = /\/media\/([a-f0-9]{64}\.(?:png|jpg|webp|gif|avif))/g
@@ -123,6 +123,7 @@ export function referencedMedia(ydoc) {
     const nodes = p.get('nodes')
     if (nodes && typeof nodes.forEach === 'function') nodes.forEach((n) => n && typeof n.get === 'function' && scan(n.get('image')))
   })
+  ydoc.getArray('tabs').forEach((t) => scan(t && typeof t.get === 'function' ? t.get('wallpaper') : t && t.wallpaper))
   return out
 }
 

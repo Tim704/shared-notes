@@ -305,6 +305,19 @@ check(
   let p = { x: 0, y: 0 }
   for (let i = 0; i < 20; i++) p = smoothPoint(p, { x: 10, y: 10 })
   check('smoothPoint converges on the pen', Math.abs(p.x - 10) < 0.01 && Math.abs(p.y - 10) < 0.01)
+  // a tab's wallpaper
+  {
+    const d = new Y.Doc()
+    const wall = '/media/' + 'b'.repeat(64) + '.webp'
+    const m = new Y.Map()
+    d.getArray('tabs').push([m])
+    m.set('id', 't1')
+    m.set('name', 'Wall')
+    m.set('wallpaper', wall)
+    d.getArray('tabs').push([{ id: 't2', name: 'Plain', wallpaper: 'https://elsewhere.example/x.png' }])
+    check('a tab\'s wallpaper counts as a used picture (not swept)', referencedMedia(d).has('b'.repeat(64) + '.webp'))
+    check('tabRec keeps a wallpaper from the board\'s own pictures only', tabRec(m).wallpaper === wall && !('wallpaper' in tabRec(d.getArray('tabs').get(1))))
+  }
   // To-do: several lists in a tab, and classes
   {
     const items = {

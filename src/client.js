@@ -398,6 +398,9 @@ function tabRec(t) {
       view: t.get('view') === 'canvas' ? 'canvas' : 'board',
       icon: t.get('icon') || null,
       color: t.get('color') || null,
+      wallpaper: wallOf(t.get('wallpaper')),
+      wallFit: t.get('wallFit') === 'tile' ? 'tile' : null,
+      wallDim: dimOf(t.get('wallDim')),
     }
   }
   return {
@@ -408,7 +411,18 @@ function tabRec(t) {
     view: t.view === 'canvas' ? 'canvas' : 'board',
     icon: t.icon || null,
     color: t.color || null,
+    wallpaper: wallOf(t.wallpaper),
+    wallFit: t.wallFit === 'tile' ? 'tile' : null,
+    wallDim: dimOf(t.wallDim),
   }
+}
+// a tab's wallpaper is one of the board's own pictures, nothing from elsewhere
+function wallOf(v) {
+  return typeof v === 'string' && /^\/media\/[A-Za-z0-9_.-]+$/.test(v) ? v : null
+}
+function dimOf(v) {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? Math.min(60, Math.round(n)) : 0
 }
 function tabsList() {
   return yTabs.toArray().map(tabRec).filter((t) => t && t.id)
@@ -446,6 +460,9 @@ function makeTabMap(rec) {
   if (rec.view === 'canvas') m.set('view', 'canvas') // reordering a tab keeps its canvas view
   if (rec.icon) m.set('icon', rec.icon)
   if (rec.color) m.set('color', rec.color)
+  if (rec.wallpaper) m.set('wallpaper', rec.wallpaper)
+  if (rec.wallFit) m.set('wallFit', rec.wallFit)
+  if (rec.wallDim) m.set('wallDim', rec.wallDim)
   return m
 }
 
@@ -466,6 +483,111 @@ function updateTab(id, patch) {
       yTabs.insert(i, [makeTabMap({ ...tabRec(raw), ...patch })])
     }
   })
+}
+
+// ---- tab wallpaper ----
+// A picture behind a NotePad, To-do, document or mind map tab, shared with
+// everyone: `wallpaper` is a /media/… address, `wallFit` 'tile' repeats it
+// (otherwise it covers the window) and `wallDim` (0..60) washes it out towards
+// the theme's background so text stays readable.
+const wallLayer = document.createElement('div')
+wallLayer.id = 'wallpaper'
+wallLayer.setAttribute('aria-hidden', 'true')
+document.body.prepend(wallLayer)
+const hasWall = (t) => !!t && !!t.wallpaper && t.kind !== 'draw'
+function applyWallpaper(t) {
+  const on = hasWall(t)
+  document.body.classList.toggle('has-wall', on)
+  wallLayer.hidden = !on
+  if (!on) {
+    wallLayer.style.backgroundImage = ''
+    return
+  }
+  wallLayer.style.backgroundImage = `url("${t.wallpaper}")`
+  wallLayer.dataset.fit = t.wallFit || 'cover'
+  wallLayer.style.setProperty('--wall-dim', String((t.wallDim || 0) / 100))
+}
+function openWallpaper(t, anchor) {
+  closeMenus()
+  const box = document.createElement('div')
+  box.className = 'menu tab-look tab-wall'
+  box.addEventListener('click', (e) => e.stopPropagation())
+  const cur = () => tabsList().find((x) => x.id === t.id) || t
+  const head = (text) => {
+    const h = document.createElement('div')
+    h.className = 'menu-h'
+    h.textContent = text
+    box.appendChild(h)
+  }
+  head('Wallpaper')
+  const prev = document.createElement('div')
+  prev.className = 'wall-preview'
+  box.appendChild(prev)
+  const row = document.createElement('div')
+  row.className = 'wall-row'
+  const pick = document.createElement('button')
+  pick.type = 'button'
+  pick.className = 'dlg-btn primary wall-pick'
+  const none = document.createElement('button')
+  none.type = 'button'
+  none.className = 'dlg-btn wall-none'
+  none.textContent = 'Remove'
+  row.append(pick, none)
+  box.appendChild(row)
+  pick.addEventListener('click', async () => {
+    const files = await pickImages()
+    if (!files.length) return
+    const urls = await uploadImages(files.slice(0, 1))
+    if (!urls.length) return
+    updateTab(t.id, { wallpaper: urls[0] })
+    refresh()
+  })
+  none.addEventListener('click', () => {
+    updateTab(t.id, { wallpaper: null, wallFit: null, wallDim: null })
+    refresh()
+  })
+  const fitRow = document.createElement('div')
+  fitRow.className = 'settings-enum'
+  const fitLabel = document.createElement('span')
+  fitLabel.textContent = 'Fit'
+  const fitHost = document.createElement('div')
+  fitRow.append(fitLabel, fitHost)
+  box.appendChild(fitRow)
+  const dimRow = document.createElement('div')
+  dimRow.className = 'settings-enum settings-range'
+  const dimLabel = document.createElement('span')
+  dimLabel.textContent = 'Fade'
+  const dimVal = document.createElement('small')
+  dimLabel.appendChild(dimVal)
+  const dim = document.createElement('input')
+  dim.type = 'range'
+  dim.min = '0'
+  dim.max = '60'
+  dim.step = '5'
+  dim.className = 'wall-dim'
+  dim.setAttribute('aria-label', 'Fade the wallpaper so text is easier to read')
+  dim.addEventListener('input', () => {
+    updateTab(t.id, { wallDim: Number(dim.value) || null })
+    dimVal.textContent = Number(dim.value) ? dim.value + '%' : 'Off'
+  })
+  const dimHint = document.createElement('small')
+  dimHint.textContent = 'Fades the picture so writing on top stays easy to read. Everyone on the board sees this wallpaper.'
+  dimRow.append(dimLabel, dim, dimHint)
+  box.appendChild(dimRow)
+  function refresh() {
+    const now = cur()
+    prev.style.backgroundImage = now.wallpaper ? `url("${now.wallpaper}")` : ''
+    prev.textContent = now.wallpaper ? '' : 'No wallpaper'
+    pick.textContent = now.wallpaper ? 'Change picture…' : 'Choose a picture…'
+    none.hidden = !now.wallpaper
+    fitRow.hidden = dimRow.hidden = !now.wallpaper
+    fitHost.replaceChildren(ui.segmented('Fit', [['cover', 'Fill the window'], ['tile', 'Tile']], now.wallFit || 'cover', (v) => updateTab(t.id, { wallFit: v === 'tile' ? 'tile' : null })))
+    dim.value = String(now.wallDim || 0)
+    dimVal.textContent = now.wallDim ? now.wallDim + '%' : 'Off'
+  }
+  refresh()
+  const dismiss = ui.popover(box, anchor, { label: 'Wallpaper' })
+  openMenus.push({ remove: dismiss })
 }
 
 // ---- tab icon & colour ----
@@ -1010,6 +1132,11 @@ function openTabMenu(anchor, t) {
     renderTabs()
   })
   item('🎨  Icon & colour…', () => setTimeout(() => openTabLook(t, anchor))) // after this click has bubbled
+  if (t.kind !== 'draw')
+    item('🖼  Wallpaper…', () => {
+      if (activeTabId !== t.id) setActiveTab(t.id)
+      setTimeout(() => openWallpaper(t, anchor))
+    })
   if (isNotesTab(t)) {
     if (t.view === 'canvas')
       item('▦  Back to the board view', () => {
@@ -4375,6 +4502,7 @@ function reconcile() {
   addBtn.style.display = notesTab ? '' : 'none'
   searchWrap.style.visibility = notesTab ? '' : 'hidden'
   document.body.dataset.tabKind = kind
+  applyWallpaper(active)
 
   if (!notesTab) {
     for (const [id, card] of cards) {

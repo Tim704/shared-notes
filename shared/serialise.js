@@ -30,6 +30,7 @@ export function tabRec(entry) {
     kind: PAGE_KINDS.has(get('kind')) ? get('kind') : 'notes',
     archived: get('archived') === true,
     view: get('view') === 'canvas' ? 'canvas' : 'board',
+    ...(typeof get('wallpaper') === 'string' && /^\/media\/[A-Za-z0-9_.-]+$/.test(get('wallpaper')) ? { wallpaper: get('wallpaper') } : {}),
   }
 }
 

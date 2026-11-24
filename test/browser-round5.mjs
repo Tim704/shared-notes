@@ -205,6 +205,34 @@ try {
   await evaluate(`document.querySelector('.task-nav[title="This week"]').click()`)
   await sleep(150)
 
+  // ---------------------------------------------------------------- a tab's wallpaper
+  // the file picker cannot be driven from here: hand it a picture when it opens
+  await evaluate(`(() => {
+    const click = HTMLInputElement.prototype.click
+    HTMLInputElement.prototype.click = function () {
+      if (this.type !== 'file') return click.call(this)
+      const cv = document.createElement('canvas'); cv.width = 64; cv.height = 64
+      const g = cv.getContext('2d'); g.fillStyle = '#0a7'; g.fillRect(0, 0, 64, 64)
+      cv.toBlob((blob) => { const dt = new DataTransfer(); dt.items.add(new File([blob], 'wall.png', { type: 'image/png' })); this.files = dt.files; this.dispatchEvent(new Event('change')) }, 'image/png')
+    }
+  })()`)
+  await evaluate(`document.querySelector('#tabs .tab.on .tab-x').click()`)
+  await sleep(120)
+  await evaluate(`[...document.querySelectorAll('.menu-item')].find((b) => /Wallpaper/.test(b.textContent)).click()`)
+  await sleep(200)
+  check('the tab menu opens the wallpaper sheet', await evaluate(`!!document.querySelector('.tab-wall .wall-pick')`))
+  await evaluate(`document.querySelector('.tab-wall .wall-pick').click()`)
+  await sleep(1200)
+  const wall = await evaluate(`({ on: document.body.classList.contains('has-wall'), img: document.getElementById('wallpaper').style.backgroundImage, hidden: document.getElementById('wallpaper').hidden })`)
+  check('a chosen picture becomes the tab\'s wallpaper', wall.on && !wall.hidden && /\/media\/[a-f0-9]{64}\.png/.test(wall.img))
+  await evaluate(`(() => { const r = document.querySelector('.tab-wall .wall-dim'); r.value = '40'; r.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+  await sleep(150)
+  check('Fade washes the wallpaper out', (await evaluate(`document.getElementById('wallpaper').style.getPropertyValue('--wall-dim')`)) === '0.4')
+  await evaluate(`document.body.click()`)
+  await evaluate(`document.querySelector('#tabs .tab').click()`)
+  await sleep(300)
+  check('another tab does not show it', !(await evaluate(`document.body.classList.contains('has-wall')`)))
+
   check('no native alert/confirm/prompt dialogs were used', h.dialogs() === 0)
   check('no console errors or uncaught exceptions', h.errors.length === 0)
   if (h.errors.length) h.errors.slice(0, 8).forEach((e) => console.log('   !! ' + e))

@@ -25,6 +25,9 @@ adds one of five kinds:
 
 - **Managing tabs:** add, rename (double-click and type in place), reorder by dragging,
   archive or delete. Each tab can have an icon.
+- **Wallpaper:** tab menu ⋯ → *Wallpaper…* puts one of your own pictures behind a
+  NotePad, To-do, document or mind map tab. It can fill the window or tile, and *Fade*
+  washes it out so writing stays readable. Everyone on the board sees it.
 - **Remembered per device:** the tab you had open last.
 - **A safe rename:** renaming a tab is a single change to its name field, so two people
   renaming or reordering at once can't duplicate or lose it.

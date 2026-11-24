@@ -4175,6 +4175,29 @@ body.phone .page-outline-btn, body.phone .page-outline { display: none !importan
 .task-wcol .task-entry-path { font-size: 11px; }
 .task-wcol .task-count { min-width: 0; font-size: 11px; }
 
+/* ---- a tab's wallpaper: one fixed layer behind the board or the page ---- */
+#wallpaper {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-color: var(--bg); background-position: center; background-size: cover; background-repeat: no-repeat;
+}
+#wallpaper[hidden] { display: none; }
+#wallpaper[data-fit='tile'] { background-size: auto; background-repeat: repeat; background-position: 0 0; }
+#wallpaper::after { content: ''; position: absolute; inset: 0; background: var(--bg); opacity: var(--wall-dim, 0); }
+/* panels that were opaque let the picture through; text that sat on the bare background gets a plate */
+body.has-wall .tasks { background: color-mix(in srgb, var(--bg-elevated) 86%, transparent); backdrop-filter: blur(22px) saturate(1.3); -webkit-backdrop-filter: blur(22px) saturate(1.3); }
+body.has-wall .mm-wrap, body.has-wall .page-view[data-kind='mindmap'] .mm-wrap { background-color: color-mix(in srgb, var(--bg-elevated) 72%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+body.has-wall .board.canvas { background-image: none; }
+body.has-wall .empty-card { background: color-mix(in srgb, var(--bg-elevated) 88%, transparent); border-radius: var(--r-card); padding: var(--s-6); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+.tab-wall { padding: var(--s-2) var(--s-3) var(--s-3); width: 280px; }
+.wall-preview {
+  height: 120px; border-radius: var(--r-field); background: var(--fill) center / cover no-repeat;
+  display: flex; align-items: center; justify-content: center; color: var(--label-2); font: var(--t-callout); margin-bottom: var(--s-2);
+}
+.wall-row { display: flex; gap: var(--s-2); margin-bottom: var(--s-2); }
+.wall-row .dlg-btn { flex: 1; }
+.tab-wall .settings-enum { padding: var(--s-2) 0 0; }
+@media print { #wallpaper { display: none !important; } }
+
 /* ---- print / PDF: one note (opened large) or a document tab */
 @media print {
   body.print-note > *:not(.full-back), body.print-doc > *:not(#page-view) { display: none !important; }

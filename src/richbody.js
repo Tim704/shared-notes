@@ -121,6 +121,7 @@ export function bindRichText(ytext, el, opts = {}) {
   const linkCandidates = opts.linkCandidates || null // () => [{label, hint}]
   const folds = opts.folds || null // per-device folded line ids: { has, set, subscribe }
   const reveal = opts.reveal || (() => false) // true while searching: show folded lines
+  const hideDone = opts.hideDone || (() => false) // per device: finished lines are tucked away
   const onEmbedClick = opts.onEmbedClick || null // (embed) => void (picture lightbox)
   const onFiles = opts.onFiles || null // (File[]) => void (pasted / dropped pictures)
   const onTag = opts.onTag || null // (tag) => void, for clicks on #tags
@@ -153,6 +154,11 @@ export function bindRichText(ytext, el, opts = {}) {
   let pendingCaret = null // restore a collapsed caret after a local edit
   let pendingRange = null // restore a selection range after a local edit
   let lastSel = null // last known selection (for inserting pictures after a blur)
+  // "Hide finished lines": the line being typed in stays in view until the caret leaves it
+  let caretHint = null // where the caret will be after the next render (a character index)
+  let keptLine = -1 // the finished line the last render kept in view for the caret
+  let showDoneHere = false // "3 hidden" was clicked: this editor shows them for now
+  let doneNote = null // the "3 finished lines hidden" button under the body
 
   const undo = new Y.UndoManager(ytext, { trackedOrigins: new Set([LOCAL]), captureTimeout: 350 })
 
@@ -210,6 +216,27 @@ export function bindRichText(ytext, el, opts = {}) {
         if (!showAll && folds && bid && folds.has(bid) && !hidden[i]) for (let j = i + 1; j < ends[i]; j++) hidden[j] = true
       }
     }
+    // finished lines (ticked or cancelled checkboxes, text struck through from end
+    // to end) and the points under them, when this device hides them
+    const hiding = !showAll && !!hideDone()
+    let nDone = 0
+    keptLine = -1
+    if (hiding) {
+      const at = caretHint != null ? caretHint : document.activeElement === el ? getSel()?.start ?? null : null
+      const caretLine = at == null ? -1 : ls.findIndex((L) => at >= L.start && at <= L.start + L.len)
+      for (let i = 0; i < ls.length; i++) {
+        if (hidden[i] || !isFinished(ls[i])) continue
+        if (caretLine >= i && caretLine < ends[i]) {
+          keptLine = i
+          continue
+        }
+        nDone++
+        if (!showDoneHere) for (let j = i; j < ends[i]; j++) hidden[j] = true
+        i = ends[i] - 1
+      }
+    }
+    caretHint = null
+    paintDoneNote(hiding ? nDone : 0)
     const emptyDoc = ls.length === 1 && !ls[0].len && !ls[0].attrs.lt
 
     // reuse existing line elements whose rendering would be identical
@@ -262,6 +289,39 @@ export function bindRichText(ytext, el, opts = {}) {
     while (el.childNodes.length > rec.length) el.lastChild.remove()
     lines = rec
     el.classList.toggle('rb-empty', emptyDoc)
+  }
+
+  const isFinished = (L) => {
+    const a = L.attrs
+    if (a.lt === 'todo' && (a.done || a.ts === '-')) return true
+    let text = false
+    for (const run of L.runs) {
+      if (!run.text.trim()) continue
+      if (!run.marks.s) return false
+      text = true
+    }
+    return text
+  }
+  // The count sits under the body, outside it, so it is never part of the text.
+  function paintDoneNote(n) {
+    if (!n) {
+      showDoneHere = false
+      if (doneNote) doneNote.remove()
+      return
+    }
+    if (!doneNote) {
+      doneNote = document.createElement('button')
+      doneNote.type = 'button'
+      doneNote.className = 'rb-done-note'
+      doneNote.addEventListener('click', (e) => {
+        e.stopPropagation()
+        showDoneHere = !showDoneHere
+        render()
+      })
+    }
+    doneNote.textContent = showDoneHere ? 'Hide finished lines again' : n + (n === 1 ? ' finished line hidden' : ' finished lines hidden')
+    doneNote.title = showDoneHere ? '' : 'Show them in this note for now'
+    if (doneNote.previousSibling !== el) el.after(doneNote)
   }
 
   function buildLine(L, marker, kids, folded, nKids, hidden, emb, emptyDoc, group) {
@@ -2007,6 +2067,7 @@ export function bindRichText(ytext, el, opts = {}) {
     const local = transaction.origin === LOCAL
     if (composing && !local) return // folded in by reconcilePlain on compositionend
     if (local) {
+      if (document.activeElement === el) caretHint = pendingRange ? pendingRange[1] : pendingCaret != null ? pendingCaret : lastSel ? lastSel.end : null
       render()
       if (pendingRange) {
         setSelection(pendingRange[0], pendingRange[1])
@@ -2024,10 +2085,11 @@ export function bindRichText(ytext, el, opts = {}) {
     // remote (or undo/redo, or the other editor of this note): keep the caret roughly where it was.
     const focused = document.activeElement === el
     const sel = focused ? getSel() : null
+    const s = sel ? shiftThroughDelta(event.delta, sel.start) : 0
+    const en = sel ? shiftThroughDelta(event.delta, sel.end) : 0
+    if (sel) caretHint = en
     render()
     if (sel) {
-      const s = shiftThroughDelta(event.delta, sel.start)
-      const en = shiftThroughDelta(event.delta, sel.end)
       setSelection(s, en)
     }
     onChange()
@@ -2039,6 +2101,12 @@ export function bindRichText(ytext, el, opts = {}) {
     if (document.activeElement !== el) return
     const sel = getSel()
     if (sel) lastSel = sel
+    // the caret left a finished line that was kept in view for it: tuck it away now
+    if (sel && keptLine >= 0 && lines[keptLine] && !(sel.end >= lines[keptLine].start && sel.end <= lines[keptLine].start + lines[keptLine].len)) {
+      caretHint = sel.end
+      render()
+      setSelection(sel.start, sel.end)
+    }
     if (lastDate && !(sel && sel.start === lastDate.at && sel.end === sel.start)) lastDate = null // the caret moved on
     if (sel && !(pendingMarks && pendingMarksAt === sel.start)) {
       pendingMarks = null
@@ -2067,6 +2135,10 @@ export function bindRichText(ytext, el, opts = {}) {
   const onBlur = () => {
     clearTimeout(blurTimer)
     blurTimer = setTimeout(closePicker, 120)
+    if (keptLine >= 0) {
+      caretHint = -1 // the caret is gone: the finished line that was kept for it can go now
+      render()
+    }
   }
   const onFocus = () => clearTimeout(blurTimer)
   el.addEventListener('blur', onBlur)
@@ -2230,6 +2302,7 @@ export function bindRichText(ytext, el, opts = {}) {
       el.removeEventListener('blur', onBlur)
       el.removeEventListener('focus', onFocus)
       document.removeEventListener('selectionchange', onSelectionChange)
+      if (doneNote) doneNote.remove()
       undo.destroy()
     },
   }

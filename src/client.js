@@ -1034,6 +1034,13 @@ function openTabMenu(anchor, t) {
       setTimeout(printDoc, 60)
     })
   }
+  if (isNotesTab(t) || t.kind === 'doc') {
+    const hiding = !!getSettings().hideDone
+    item(hiding ? '☑  Finished lines are hidden' : '☐  Hide finished lines', () => {
+      setSetting('hideDone', !hiding)
+      ui.toast(hiding ? 'Finished lines are shown again.' : 'Ticked and struck-through lines are hidden on this device.')
+    })
+  }
   item(t.archived ? 'Unarchive' : 'Archive', () => setTabArchived(t.id, !t.archived))
   const excluded = backup.isExcluded(t.id)
   item(excluded ? '☐  Back up on this device' : '☑  Backed up on this device', () => {
@@ -2081,6 +2088,7 @@ function editorOpts(note, extra) {
     spellcheck: () => getSettings().spellcheck,
     folds,
     reveal: () => !!search.value.trim(), // searching shows what is folded
+    hideDone: () => !!getSettings().hideDone,
     onEmbedClick: (emb) => openLightbox(emb),
     onFiles: async (files) => {
       const urls = await uploadImages(files)
@@ -4108,6 +4116,7 @@ ribWidth.addEventListener('input', () => {
   ink.setTool(inkTool)
 })
 inkTools.appendChild(ribWidth)
+inkTools.appendChild(smoothingSlider('rib-width'))
 const ribErase = ribbon.button(inkTools, {
   icon: 'eraser',
   title: 'Eraser: removes whole strokes',
@@ -4310,7 +4319,7 @@ function buildDrawBar(surface) {
   })
   clearBtn.classList.add('danger')
 
-  drawBar.append(color, swatches, width, penBtn, textBtn, eraseBtn, undoBtn, clearBtn)
+  drawBar.append(color, swatches, width, smoothingSlider('draw-width'), penBtn, textBtn, eraseBtn, undoBtn, clearBtn)
   drawBar._modeBtns = [penBtn, textBtn, eraseBtn]
   drawBar._swatches = swatchRefs
   drawBar._colorInput = color
@@ -6073,6 +6082,21 @@ function openSettingsMenu(anchor) {
   check('Spell-check underline', 'spellcheck', 'Red squiggles in notes')
   check('Smart arrows', 'arrows', '-> becomes →, -- becomes —')
   check('Dates from words', 'dates', '@friday, @tomorrow or @in 3 days becomes a date')
+  check('Hide finished lines', 'hideDone', 'Ticked checkboxes and struck-through lines are tucked away')
+  const smoothRow = document.createElement('div')
+  smoothRow.className = 'settings-enum settings-range'
+  const smoothLabel = document.createElement('span')
+  iconLabel(smoothLabel, 'Line smoothing', 'pencil')
+  const smoothVal = document.createElement('small')
+  const smoothInput = smoothingSlider('settings-smooth')
+  const paintSmooth = () => (smoothVal.textContent = Number(smoothInput.value) ? smoothInput.value + '%' : 'Off')
+  paintSmooth()
+  smoothInput.addEventListener('input', paintSmooth)
+  smoothLabel.appendChild(smoothVal)
+  const smoothHint = document.createElement('small')
+  smoothHint.textContent = 'How much drawn lines are straightened. Off follows your hand exactly.'
+  smoothRow.append(smoothLabel, smoothInput, smoothHint)
+  menu.appendChild(smoothRow)
   head('Board')
   check('Snap notes to each other', 'snap', 'Edges and centres line up while dragging (hold Alt to place freely)')
   check('Snap to a grid', 'grid', 'Every ' + (st.gridSize || 20) + ' px')
@@ -6173,7 +6197,35 @@ onSettingChange((key, value) => {
       c.el.querySelectorAll('.todo-text').forEach((i) => (i.spellcheck = value))
     }
   } else if (key === 'offline') applyOfflineSetting()
+  else if (key === 'hideDone') refreshEditors()
 })
+// redraw every open body editor (a per-device view switch changed)
+function refreshEditors() {
+  for (const [, c] of cards) if (c.body && c.body.editors) c.body.editors.forEach((r) => r.refresh())
+  if (full?.card?.body?.editors) full.card.body.editors.forEach((r) => r.refresh())
+  pageState?.rich?.refresh?.()
+}
+// A slider for how much free-hand lines are smoothed (this device). Every copy
+// of it follows the setting, wherever it was changed.
+function smoothingSlider(cls) {
+  const r = document.createElement('input')
+  r.type = 'range'
+  r.min = '0'
+  r.max = '90'
+  r.step = '5'
+  r.className = cls + ' smooth-range'
+  const paint = () => {
+    const pct = Math.round((Number(getSettings().inkSmoothing) || 0) * 100)
+    r.value = String(pct)
+    r.title = 'Line smoothing: ' + (pct ? pct + '%' : 'off') + ' (more irons out a shaky hand, less follows it exactly)'
+    r.setAttribute('aria-label', 'Line smoothing')
+    r.setAttribute('aria-valuetext', pct ? pct + ' percent' : 'off')
+  }
+  paint()
+  r.addEventListener('input', () => setSetting('inkSmoothing', Number(r.value) / 100))
+  onSettingChange((key) => { if (key === 'inkSmoothing' && r.isConnected) paint() })
+  return r
+}
 
 // ---- this device's own backup to a folder (Chromium desktop) ----
 function folderStatusText(st) {

@@ -13,6 +13,9 @@
 // strokes: Y.Array<Y.Map{ color, width, points: Y.Array<number> /* x,y,x,y… */ }>
 
 import { smoothPoint, simplify, pathData } from './stroke.js'
+import { getSettings } from './settings.js'
+
+const smoothing = () => Math.max(0, Math.min(0.9, Number(getSettings().inkSmoothing) || 0))
 
 const NS = 'http://www.w3.org/2000/svg'
 const LOCAL = { ink: 'local' } // creating / erasing a stroke: one undo step each
@@ -153,7 +156,7 @@ export function createInk({ Y, toPlane, zoom, onChange }) {
     const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || []
     for (const ev of evs.length ? evs : [e]) {
       cur.raw = evs.length ? toPlane(ev.clientX, ev.clientY) : p
-      cur.smooth = smoothPoint(cur.smooth, cur.raw)
+      cur.smooth = smoothPoint(cur.smooth, cur.raw, smoothing())
       const q = cur.smooth
       if (Math.hypot(q.x - cur.last.x, q.y - cur.last.y) < MIN_STEP / zoom()) continue
       cur.last = q

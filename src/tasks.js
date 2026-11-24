@@ -384,10 +384,10 @@ export function createTasksView(host, page, opts = {}) {
     if (n.due) {
       chip.dataset.state = n.done ? 'done' : dueState(n.due, t)
       chip.textContent = dueLabel(n.due, t)
-      chip.title = 'Due ' + parseYmd(n.due).toDateString() + ' (click to change)'
+      chip.title = 'Due ' + parseYmd(n.due).toDateString() + ' (click or Ctrl/⌘+Shift+/ to change)'
     } else {
       chip.appendChild(icon('calendar'))
-      chip.title = 'Set a due date'
+      chip.title = 'Set a due date (Ctrl/⌘+Shift+/)'
     }
     chip.setAttribute('aria-label', chip.title)
     const picker = el('input', 'task-date')
@@ -499,6 +499,12 @@ export function createTasksView(host, page, opts = {}) {
     const m = node(n.id)
     if (!m) return
     const mod = e.metaKey || e.ctrlKey
+    if (mod && e.shiftKey && e.code === 'Slash') {
+      // Ctrl/⌘+Shift+/ : the due date, without leaving the keyboard
+      e.preventDefault()
+      input.closest('.task-row')?.querySelector('.task-due')?.click()
+      return
+    }
     if (e.key === 'Enter' && mod) {
       e.preventDefault()
       pendingFocus = { id: n.id, caret: input.selectionStart }

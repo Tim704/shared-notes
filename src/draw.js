@@ -2,6 +2,9 @@ import * as Y from 'yjs'
 import { DOCUMENT_INK } from './util.js'
 import { rafThrottle, clamp } from './util.js'
 import { smoothPoint, simplify, tracePath } from './stroke.js'
+import { getSettings } from './settings.js'
+
+const smoothing = () => Math.max(0, Math.min(0.9, Number(getSettings().inkSmoothing) || 0))
 
 // ---------------------------------------------------------------------------
 // Collaborative sketch surface. Strokes AND text labels live in one Yjs
@@ -310,7 +313,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
     for (const ev of events.length ? events : [e]) {
       const [rx, ry] = toLogical(ev.clientX, ev.clientY)
       active.raw = { x: rx, y: ry }
-      active.smooth = smoothPoint(active.smooth, active.raw)
+      active.smooth = smoothPoint(active.smooth, active.raw, smoothing())
       const { x, y } = active.smooth
       const dx = x - active.last[0]
       const dy = y - active.last[1]

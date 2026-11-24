@@ -66,6 +66,8 @@ Any tab can switch to an endless canvas (tab menu ⋯ → *Canvas view*):
 space around the notes:
 
 - **Tools:** a choice of colour and size, and an eraser that removes a whole stroke.
+- **Line smoothing:** a slider beside the pen size (also in Settings → Editing, and on the
+  Sketch Pad) sets how much a drawn line is straightened, from off to 90%. Per device.
 - **Undo:** Ctrl/⌘+Z takes back only your own strokes.
 - **Where it sits:** the ink lies under the notes and pans and zooms with them on the
   canvas.
@@ -107,6 +109,12 @@ space around the notes:
   - Hover over the bullet to show its fold arrow, or press Ctrl/⌘+. on the line.
   - Folding is per device, so it never hides anything for anyone else.
   - Searching shows folded lines again.
+- **Hide finished lines:** Settings → Editing (or the tab menu) tucks away ticked and
+  cancelled checkboxes, lines that are struck through from end to end, and the points
+  under them.
+  - It is per device, like folding. The note shows "3 finished lines hidden"; click that
+    to see them in that note.
+  - The line you are typing in stays until the caret leaves it. Searching shows them.
 - **Undo and redo** for each note.
 - **Merging:** everything above is stored in the shared document, so two people editing the
   same list at once merge cleanly.
@@ -221,6 +229,7 @@ instead.
 
 - **Tasks:** broken into parts as deep as you like, each with a tick, a due date and a
   progress bar that counts its smallest parts.
+- **Due date from the keyboard:** Ctrl/⌘+Shift+/ on a task opens its date picker.
 - **Four views:** List, Week, Month and **Board**: To do, Doing and Done columns to drag
   tasks between (or move them from a card's ⋯, or with ← and →).
 - **From notes:** checkboxes written in any note or document show up too, grouped by their

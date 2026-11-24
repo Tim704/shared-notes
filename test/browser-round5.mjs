@@ -19,7 +19,7 @@ watchdog.unref?.()
 
 try {
   h = await launch({ port: PORT, debugPort: 9331 })
-  const { evaluate, type, c } = h
+  const { evaluate, type, key, enter, c } = h
   const mouse = (t, x, y, extra = {}) => c.send('Input.dispatchMouseEvent', { type: t, x, y, button: 'left', buttons: t === 'mouseReleased' ? 0 : 1, clickCount: 1, ...extra })
   const clickAt = async (x, y) => {
     await mouse('mouseMoved', x, y, { button: 'none', buttons: 0 })
@@ -91,6 +91,62 @@ try {
   await evaluate(`document.querySelector('.cropper .crop-done').click()`)
   await sleep(400)
   check('"Whole picture" takes the crop off again', Math.abs((await cardH()) - before) < 3 && (await evaluate(`document.querySelector('#board .card.is-image .rb-crop')`)) == null)
+
+  // ---------------------------------------------------------------- hide finished lines
+  await evaluate(`(() => { const b = document.querySelector('.card[data-id="${noteId}"] .card-body'); b.focus(); const r = document.createRange(); r.selectNodeContents(b); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r) })()`)
+  await sleep(120)
+  await enter()
+  await type('[] buy milk')
+  await enter()
+  await type('second thing')
+  await sleep(100)
+  const bodyLines = () => evaluate(`[...document.querySelectorAll('.card[data-id="${noteId}"] .card-body .rb-line')].map((l) => ({ text: l.textContent, hidden: l.classList.contains('rb-hidden') }))`)
+  const setting = (label) => evaluate(`(async () => { document.getElementById('settings').click(); await new Promise((r) => setTimeout(r, 120)); const l = [...document.querySelectorAll('.settings-menu .menu-check')].find((x) => x.textContent.includes(${JSON.stringify(label)})); l.querySelector('input').click(); document.body.click() })()`)
+  await setting('Hide finished lines')
+  await sleep(150)
+  check('nothing is hidden while nothing is finished', (await bodyLines()).every((l) => !l.hidden))
+  // strike the line being typed: it stays until the caret leaves it
+  let BL
+  await evaluate(`(() => { const b = document.querySelector('.card[data-id="${noteId}"] .card-body'); const s = getSelection(); s.selectAllChildren([...b.querySelectorAll('.rb-line')].at(-1)) })()`)
+  await key('x', 'KeyX', 88, 2 | 8)
+  await sleep(150)
+  BL = await bodyLines()
+  check('a line struck through while the caret is in it stays in view', BL.at(-1).text.includes('second thing') && !BL.at(-1).hidden)
+  await evaluate(`document.querySelector('.card[data-id="${noteId}"] .rb-todo .rb-check').click()`)
+  await sleep(150)
+  BL = await bodyLines()
+  check('a box ticked elsewhere in the note is hidden at once', BL[1].hidden && !BL[2].hidden)
+  await evaluate(`(() => { const b = document.querySelector('.card[data-id="${noteId}"] .card-body'); const r = document.createRange(); r.setStart(b.querySelector('.rb-line'), 0); r.collapse(true); const s = getSelection(); s.removeAllRanges(); s.addRange(r) })()`)
+  await sleep(250)
+  BL = await bodyLines()
+  check('the struck-through line is hidden once the caret has left it', BL.filter((l) => l.hidden).length === 2 && !BL[0].hidden)
+  check('the note says how many lines are hidden', (await evaluate(`document.querySelector('.card[data-id="${noteId}"] .rb-done-note')?.textContent`)) === '2 finished lines hidden')
+  await evaluate(`document.querySelector('.card[data-id="${noteId}"] .rb-done-note').click()`)
+  await sleep(120)
+  check('clicking the count shows them in that note', (await bodyLines()).every((l) => !l.hidden))
+  await setting('Hide finished lines')
+  await sleep(150)
+  check('switching the setting off shows everything and drops the count', (await bodyLines()).every((l) => !l.hidden) && (await evaluate(`document.querySelector('.rb-done-note')`)) == null)
+
+  // ---------------------------------------------------------------- line smoothing
+  await evaluate(`(async () => { document.getElementById('settings').click(); await new Promise((r) => setTimeout(r, 120)); const r = document.querySelector('.settings-menu .settings-smooth'); r.value = '80'; r.dispatchEvent(new Event('input', { bubbles: true })); document.body.click() })()`)
+  await sleep(100)
+  check('the smoothing slider is saved on this device', (await evaluate(`JSON.parse(localStorage.getItem('notesSettings')).inkSmoothing`)) === 0.8)
+
+  // ---------------------------------------------------------------- To-do: the due-date shortcut
+  await evaluate(`document.querySelector('#tabs .tab-add').click()`)
+  await sleep(60)
+  await evaluate(`[...document.querySelectorAll('.menu-item')].find((b) => /To-do/.test(b.textContent)).click()`)
+  await sleep(80)
+  await evaluate(`(() => { const d = document.querySelector('.dlg'); d.querySelector('.dlg-input').value = 'Homework'; d.querySelector('.dlg-btn.primary').click() })()`)
+  await sleep(500)
+  await evaluate(`document.querySelector('.task-add').click()`)
+  await sleep(200)
+  await type('Calculus')
+  await evaluate(`(() => { window.__picked = 0; HTMLInputElement.prototype.showPicker = function () { window.__picked++ } })()`)
+  await key('?', 'Slash', 191, 2 | 8)
+  await sleep(120)
+  check('Ctrl+Shift+/ on a task opens its due-date picker', (await evaluate(`window.__picked`)) === 1)
 
   check('no native alert/confirm/prompt dialogs were used', h.dialogs() === 0)
   check('no console errors or uncaught exceptions', h.errors.length === 0)

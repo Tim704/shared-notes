@@ -3588,6 +3588,26 @@ body.phone .page-view[data-kind='doc'] .page-fmt .fmt-btn { min-width: 44px; hei
 .card .card-tools .crop { display: none; }
 .card.is-image .card-tools .crop { display: inline-flex; }
 
+/* "Hide finished lines": the count under a note or document */
+.rb-done-note {
+  display: block;
+  margin: var(--s-1) 0 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  font: var(--t-caption, 12px/1.3 system-ui);
+  color: var(--note-ink-dim, var(--label-2));
+  cursor: pointer;
+  text-align: left;
+}
+.rb-done-note:hover { text-decoration: underline; }
+.card.collapsed .rb-done-note, .card.is-image .rb-done-note { display: none; }
+.smooth-range { width: 64px; }
+.settings-range input[type='range'] { width: 100%; accent-color: var(--accent); }
+.settings-range > span small { margin-left: auto; color: var(--label-2); }
+.settings-range > small { color: var(--label-2); font: var(--t-caption, 12px/1.3 system-ui); }
+@media print { .rb-done-note { display: none !important; } }
+
 /* a cropped picture: the whole file behind a window (see `cr` in shared/lines.js) */
 .rb-crop { position: relative; overflow: hidden; width: 100%; border-radius: var(--r-control); background: var(--fill); }
 .rb-embed .rb-crop img, .card.is-image .rb-embed .rb-crop img { position: absolute; max-width: none; border-radius: 0; }

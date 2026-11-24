@@ -72,13 +72,13 @@ try {
   await evaluate(`document.querySelector('#board .card.is-image .card-tools .crop').click()`)
   await sleep(400)
   check('Crop opens the crop overlay', await evaluate(`!!document.querySelector('.cropper .crop-frame')`))
-  // drag the bottom edge up to half the picture, with the real mouse
+  // drag the bottom edge up by half the picture, with the real mouse
   const s = await centre('.cropper .crop-s')
   const pic = await evaluate(`(() => { const r = document.querySelector('.cropper .crop-stage img').getBoundingClientRect(); return { top: r.top, h: r.height } })()`)
   await mouse('mouseMoved', s.x, s.y, { button: 'none', buttons: 0 })
   await mouse('mousePressed', s.x, s.y)
-  await mouse('mouseMoved', s.x, pic.top + pic.h / 2)
-  await mouse('mouseReleased', s.x, pic.top + pic.h / 2)
+  await mouse('mouseMoved', s.x, s.y - pic.h / 2)
+  await mouse('mouseReleased', s.x, s.y - pic.h / 2)
   await sleep(100)
   await evaluate(`document.querySelector('.cropper .crop-done').click()`)
   await sleep(400)

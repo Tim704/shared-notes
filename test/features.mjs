@@ -8,6 +8,10 @@ import { taskTree, progress, dueState, dueLabel, dueCount, orderBetween, taskLis
 import { mapTree, layoutMap, fromOutline, mapMarkdown, branchToTasks } from '../shared/mindmap.js'
 import { outlineTree } from '../shared/lines.js'
 import { referencedMedia } from '../server/media.js'
+import { lockOf, lockedTabIds } from '../shared/locks.js'
+import { makeLock } from '../server/locks.js'
+import { backlinks, noteTodos, tagCounts, rewriteLinks, setHiddenTabs } from '../shared/links.js'
+import { dueItems } from '../server/push.js'
 
 // Exercises the v2 data model through the real server: tabs, per-note fields,
 // rich-text formatting attributes, and collaborative drawing strokes all sync.
@@ -305,6 +309,51 @@ check(
   let p = { x: 0, y: 0 }
   for (let i = 0; i < 20; i++) p = smoothPoint(p, { x: 10, y: 10 })
   check('smoothPoint converges on the pen', Math.abs(p.x - 10) < 0.01 && Math.abs(p.y - 10) < 0.01)
+  // locked tabs
+  {
+    const d = new Y.Doc()
+    const lock = makeLock('pw')
+    const mk = (id, name, extra) => {
+      const m = new Y.Map()
+      d.getArray('tabs').push([m])
+      m.set('id', id)
+      m.set('name', name)
+      m.set('kind', 'notes')
+      for (const [k, v] of Object.entries(extra || {})) m.set(k, v)
+      return m
+    }
+    const open = mk('open', 'Open')
+    const shut = mk('shut', 'Diary', { lock })
+    mk('bad', 'Broken', { lock: { salt: 'zz', hash: 'nope' } })
+    check('a tab\'s lock is read back; a broken one is no lock', lockOf(shut)?.hash === lock.hash && lockOf(open) === null && lockedTabIds(d).size === 1 && lockedTabIds(d).has('shut'))
+    check('tabRec says a tab is locked without giving the hash away', tabRec(shut).locked === true && !('lock' in tabRec(shut)) && !('locked' in tabRec(open)))
+    const note = (id, tabId, title, body) => {
+      const n = new Y.Map()
+      d.getMap('notes').set(id, n)
+      const t = new Y.Text()
+      t.insert(0, title)
+      const b = new Y.Text()
+      b.insert(0, body)
+      n.set('title', t)
+      n.set('body', b)
+      n.set('tabId', tabId)
+      return n
+    }
+    note('n1', 'open', 'Plans', 'see [[Target]] #work\n')
+    const hidden = note('n2', 'shut', 'Dear diary', 'about [[Target]] #private\ncall mum @2026-01-01\n')
+    hidden.get('body').format(hidden.get('body').toString().length - 1, 1, { lt: 'todo' })
+    note('n3', 'open', 'Target', 'x\n')
+    setHiddenTabs(() => lockedTabIds(d))
+    check('backlinks skip a locked tab', backlinks(d, ['Target']).map((b) => b.id).join() === 'n1')
+    check('"From notes" checkboxes skip a locked tab', noteTodos(d).length === 0)
+    check('tags skip a locked tab', tagCounts(d).map((t) => t.name).join() === 'work')
+    rewriteLinks(d, 'Target', 'Goal')
+    check('renames still reach links inside a locked tab', /\[\[Goal\]\]/.test(hidden.get('body').toString()))
+    setHiddenTabs(null)
+    check('with the tab open on this device everything is back', backlinks(d, ['Goal']).length === 2 && noteTodos(d).length === 1)
+    const due = dueItems(d, '2026-12-31')
+    check('a reminder counts what is due in a locked tab but never quotes it', due.length === 1 && due[0].locked === true && !/mum/.test(JSON.stringify(due)))
+  }
   // a tab's wallpaper
   {
     const d = new Y.Doc()

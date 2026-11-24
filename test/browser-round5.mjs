@@ -233,6 +233,55 @@ try {
   await sleep(300)
   check('another tab does not show it', !(await evaluate(`document.body.classList.contains('has-wall')`)))
 
+  // ---------------------------------------------------------------- a password lock on a tab
+  const tabMenu = async (label) => {
+    await evaluate(`document.querySelector('#tabs .tab.on .tab-x').click()`)
+    await sleep(120)
+    await evaluate(`[...document.querySelectorAll('.menu-item')].find((b) => b.textContent.includes(${JSON.stringify(label)})).click()`)
+    await sleep(200)
+  }
+  const pwDlg = async (text) => {
+    check('the password field hides what is typed', (await evaluate(`document.querySelector('.dlg .dlg-input').type`)) === 'password')
+    await dlg(text)
+    await sleep(350)
+  }
+  const switcherHas = async (q) => {
+    await key('k', 'KeyK', 75, 2)
+    await sleep(200)
+    await type(q)
+    await sleep(250)
+    const out = await evaluate(`[...document.querySelectorAll('.qs .qs-row')].map((e) => e.textContent).join(' | ')`)
+    await key('Escape', 'Escape', 27)
+    await sleep(150)
+    return out
+  }
+  // the first tab holds the note typed at the start ("typing here")
+  check('before the lock, the switcher finds the note', /typing here/.test(await switcherHas('typing')))
+  await tabMenu('Lock with a password')
+  await pwDlg('hunter2')
+  await pwDlg('hunter2')
+  await sleep(500)
+  check('a freshly locked tab stays open on the device that locked it', !(await evaluate(`document.body.dataset.tabKind === 'locked'`)) && (await evaluate(`document.querySelectorAll('#board .card').length`)) > 0)
+  await tabMenu('Lock now')
+  await sleep(300)
+  const lk = await evaluate(`({ kind: document.body.dataset.tabKind, shown: !document.getElementById('lock-view').hidden, cards: document.querySelectorAll('#board .card').length, title: document.querySelector('.lock-title').textContent })`)
+  check('"Lock now" swaps the tab for a lock screen and takes its notes off the page', lk.kind === 'locked' && lk.shown && lk.cards === 0 && /is locked/.test(lk.title))
+  check('the switcher no longer finds a note in the locked tab', !/typing here/.test(await switcherHas('typing')))
+  check('the API refuses the locked tab without its password', (await evaluate(`fetch('/api/search?q=typing').then((r) => r.json()).then((d) => d.length)`)) === 0)
+  check('and serves it with the password the browser hashed', (await evaluate(`fetch('/api/search?q=typing', { headers: { 'X-Tab-Password': 'hunter2' } }).then((r) => r.json()).then((d) => d.length)`)) === 1)
+  const tryPw = async (pw) => {
+    await evaluate(`(() => { const i = document.querySelector('.lock-input'); i.value = ${JSON.stringify(pw)}; document.querySelector('.lock-card').requestSubmit() })()`)
+    await sleep(600)
+  }
+  await tryPw('wrong')
+  check('a wrong password keeps it locked and says so', (await evaluate(`document.body.dataset.tabKind`)) === 'locked' && !(await evaluate(`document.querySelector('.lock-err').hidden`)))
+  await tryPw('hunter2')
+  check('the right password opens the tab again', (await evaluate(`document.body.dataset.tabKind`)) === 'notes' && (await evaluate(`document.querySelectorAll('#board .card').length`)) > 0)
+  await tabMenu('Remove lock')
+  await pwDlg('hunter2')
+  await sleep(400)
+  check('Remove lock takes the password off', !(await evaluate(`!!document.querySelector('#tabs .tab.on .tab-lock')`)))
+
   check('no native alert/confirm/prompt dialogs were used', h.dialogs() === 0)
   check('no console errors or uncaught exceptions', h.errors.length === 0)
   if (h.errors.length) h.errors.slice(0, 8).forEach((e) => console.log('   !! ' + e))

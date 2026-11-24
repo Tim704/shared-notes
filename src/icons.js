@@ -19,6 +19,7 @@ const paths = {
   history: 'M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2',
   image: 'M3 3h18v18H3ZM3 17l6-6 4 4 3-3 5 5M9 7h.01',
   crop: 'M6 2v16h16M2 6h16v16',
+  lock: 'M5 11h14v10H5ZM8 11V7a4 4 0 0 1 8 0v4',
   play: 'm9 5 11 7-11 7V5Z', stop: 'M5 5h14v14H5Z',
   camera: 'M3 7h4l2-3h6l2 3h4v14H3ZM16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
   download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',

@@ -28,7 +28,8 @@ export function dialog(opts) {
     let input = null
     if (opts.input) {
       input = h('input', 'dlg-input')
-      input.type = 'text'
+      input.type = opts.input.type === 'password' ? 'password' : 'text'
+      if (input.type === 'password') input.autocomplete = opts.input.autocomplete || 'off'
       input.value = opts.input.value || ''
       input.placeholder = opts.input.placeholder || ''
       if (opts.input.maxLength) input.maxLength = opts.input.maxLength

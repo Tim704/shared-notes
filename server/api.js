@@ -30,6 +30,7 @@ import { capture } from './capture.js'
 import { unfurl } from './unfurl.js'
 import { createZip } from './zip.js'
 import { referencedMedia } from './media.js'
+import { closedTabs } from './locks.js'
 
 const NOTE_ID_RE = /^[A-Za-z0-9_-]+$/
 const COMMIT_RE = /^[0-9a-f]{7,40}$/
@@ -104,6 +105,19 @@ export function createApi({ ydoc, mediaDir, push = null }) {
     }
   }
 
+  // ---- locked tabs: nothing of theirs leaves without X-Tab-Password ----
+  const closed = (req) => closedTabs(ydoc, req)
+  const noteClosed = (req, n) => closed(req).has(String(n.get('tabId')))
+  const refuse = (res) => res.status(423).json({ error: 'tab is locked', hint: 'send its password in the X-Tab-Password header' })
+
+  // history is asked for by a note's id, or a document tab's
+  const historyClosed = (req, id) => {
+    const shut = closed(req)
+    if (!shut.size) return false
+    const n = yNotes.get(id)
+    return isNote(n) ? shut.has(String(n.get('tabId'))) : shut.has(id)
+  }
+
   const touch = (n) => {
     n.set('lastEditedAt', Date.now())
     n.set('lastEditedBy', API_EDITOR)
@@ -148,7 +162,8 @@ export function createApi({ ydoc, mediaDir, push = null }) {
         const t = String(n.get('tabId'))
         counts.set(t, (counts.get(t) || 0) + 1)
       }
-      sendCached(req, res, tabs().map((t) => ({ ...t, count: counts.get(t.id) || 0 })))
+      const shut = closed(req)
+      sendCached(req, res, tabs().map((t) => ({ ...t, count: shut.has(t.id) ? 0 : counts.get(t.id) || 0 })))
     })
   )
 
@@ -157,6 +172,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
     safe((req, res) => {
       const tab = findTab(req.params.id)
       if (!tab) return res.status(404).json({ error: 'unknown tab' })
+      if (closed(req).has(tab.id)) return refuse(res)
       const includeTrash = req.query.trash === '1'
       const pairs = listNotes(includeTrash).filter(([, n]) => String(n.get('tabId')) === tab.id)
       if (req.query.summary === '1') {
@@ -181,6 +197,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       const tab = findTab(req.params.id)
       if (!tab) return res.status(404).json({ error: 'unknown tab' })
       if (tab.kind !== 'notes') return res.status(400).json({ error: 'not a notes tab' })
+      if (closed(req).has(tab.id)) return refuse(res)
       const body = req.body && typeof req.body === 'object' ? req.body : {}
       const title = body.title == null ? '' : String(body.title).replace(/\s*\n\s*/g, ' ')
       const lines = body.lines != null ? toLines(body.lines) : body.body == null ? [] : toLines(body.body)
@@ -227,6 +244,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       const id = String(req.params.id)
       const n = yNotes.get(id)
       if (!isNote(n)) return res.status(404).json({ error: 'unknown note' })
+      if (noteClosed(req, n)) return refuse(res)
       sendCached(req, res, { ...noteView(id, n), tabId: n.get('tabId') == null ? null : String(n.get('tabId')) })
     })
   )
@@ -238,6 +256,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       const id = String(req.params.id)
       const n = yNotes.get(id)
       if (!isNote(n)) return res.status(404).json({ error: 'unknown note' })
+      if (noteClosed(req, n)) return refuse(res)
       const body = req.body && typeof req.body === 'object' ? req.body : {}
       if (body.color != null && !(typeof body.color === 'string' && COLOR_RE.test(body.color)))
         return res.status(400).json({ error: 'bad color' })
@@ -280,6 +299,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       const id = String(req.params.id)
       const n = yNotes.get(id)
       if (!isNote(n)) return res.status(404).json({ error: 'unknown note' })
+      if (noteClosed(req, n)) return refuse(res)
       const body = req.body && typeof req.body === 'object' ? req.body : {}
       const done = body.done === true || body.done === 'true' || body.done === 1
       const want = body.lineId != null ? String(body.lineId) : body.itemId != null ? String(body.itemId) : null
@@ -319,8 +339,10 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       const words = plainWords(terms)
       const tabName = new Map(tabs().map((t) => [t.id, t.name]))
       const hits = []
+      const shut = closed(req)
       for (const [id, n] of listNotes(req.query.trash === '1')) {
         const tabId0 = n.get('tabId') == null ? null : String(n.get('tabId'))
+        if (shut.has(tabId0)) continue
         if (!matchFacts(terms, noteFacts(n, tabName.get(tabId0) || ''))) continue
         const hay = searchText(n)
         const idx = words.length ? Math.max(0, hay.toLowerCase().indexOf(words[0])) : 0
@@ -345,6 +367,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
     safe(async (req, res) => {
       const noteId = String(req.params.noteId)
       if (!NOTE_ID_RE.test(noteId)) return res.status(400).json({ error: 'bad note id' })
+      if (historyClosed(req, noteId)) return refuse(res)
       const available = historyAvailable()
       const versions = available ? await listVersions(noteId) : []
       res.json({ available, versions })
@@ -357,6 +380,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
       const noteId = String(req.params.noteId)
       const commit = String(req.params.commit)
       if (!NOTE_ID_RE.test(noteId) || !COMMIT_RE.test(commit)) return res.status(400).json({ error: 'bad id' })
+      if (historyClosed(req, noteId)) return refuse(res)
       const v = await readVersion(noteId, commit)
       if (!v) return res.status(404).json({ error: 'no such version' })
       res.json({ title: v.title, body: v.body, body2: v.body2, front: v.front })
@@ -366,7 +390,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
   router.get(
     '/export.md',
     safe((req, res) => {
-      const md = exportMarkdown(ydoc, { mediaPrefix: absoluteMedia(req) })
+      const md = exportMarkdown(ydoc, { mediaPrefix: absoluteMedia(req), excludeTabs: closed(req) })
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8')
       res.setHeader('Content-Disposition', `attachment; filename="notes-${datestamp()}.md"`)
       res.send(md)
@@ -376,7 +400,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
   router.get(
     '/export.json',
     safe((req, res) => {
-      const data = exportJson(ydoc, { includeTrash: req.query.trash === '1' })
+      const data = exportJson(ydoc, { includeTrash: req.query.trash === '1', excludeTabs: closed(req) })
       res.setHeader('Content-Type', 'application/json; charset=utf-8')
       res.setHeader('Content-Disposition', `attachment; filename="notes-${datestamp()}.json"`)
       res.send(JSON.stringify(data, null, 2))
@@ -389,7 +413,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
     safe((req, res) => {
       const body = req.body && typeof req.body === 'object' ? req.body : {}
       try {
-        const out = capture(ydoc, { text: body.text, note: body.note, heading: body.heading, tab: body.tab, as: body.as })
+        const out = capture(ydoc, { text: body.text, note: body.note, heading: body.heading, tab: body.tab, as: body.as, closedTabs: closed(req) })
         res.status(out.created ? 201 : 200).json(out)
       } catch (err) {
         fail(res, err)
@@ -415,7 +439,7 @@ export function createApi({ ydoc, mediaDir, push = null }) {
   router.get(
     '/export.zip',
     safe(async (req, res) => {
-      const files = buildMirror(ydoc, { mediaPrefix: '../../media/' }) // notes sit in notes/<tab>/
+      const files = buildMirror(ydoc, { mediaPrefix: '../../media/', excludeTabs: closed(req) }) // notes sit in notes/<tab>/
       res.setHeader('Content-Type', 'application/zip')
       res.setHeader('Content-Disposition', `attachment; filename="notes-${datestamp()}.zip"`)
       res.setHeader('Cache-Control', 'no-store')

@@ -62,12 +62,22 @@ const hiddenNote = (n) => typeof n.get('deleted') === 'number' || n.get('archive
  * document tabs. [{ kind: 'note'|'page', id, tabId, title, ytext, hidden }]
  * Trash and archived notes are included only with { includeHidden: true }.
  */
+let hiddenTabs = null
+/** The browser tells this module which tabs are locked right now: fn() → Set of tab ids. */
+export function setHiddenTabs(fn) {
+  hiddenTabs = fn
+}
+
 export function bodiesOf(ydoc, opts = {}) {
   const skipTabs = opts.skipTemplates ? new Set(tabsOf(ydoc).filter((t) => normTitle(t.name) === 'templates').map((t) => t.id)) : null
+  // tabs that are locked on this device: readers skip them; rewrites
+  // (includeHidden) still reach them, so links inside keep following renames
+  const shut = !opts.includeHidden && hiddenTabs ? hiddenTabs() : null
   const out = []
   ydoc.getMap('notes').forEach((n, id) => {
     if (!isMap(n) || n.get('kind') === 'todo') return
     if (skipTabs && skipTabs.has(String(n.get('tabId')))) return
+    if (shut && shut.has(String(n.get('tabId')))) return
     const hidden = hiddenNote(n)
     if (hidden && !opts.includeHidden) return
     const base = { kind: 'note', id, tabId: n.get('tabId') == null ? null : String(n.get('tabId')), title: text(n.get('title')).trim(), hidden }
@@ -81,6 +91,7 @@ export function bodiesOf(ydoc, opts = {}) {
   for (const t of tabsOf(ydoc)) {
     if (t.kind !== 'doc') continue
     if (t.archived && !opts.includeHidden) continue
+    if (shut && shut.has(t.id)) continue
     const p = pages.get(t.id)
     const yt = isMap(p) ? p.get('body') : null
     if (yt && typeof yt.toDelta === 'function' && yt.length) out.push({ kind: 'page', id: t.id, tabId: t.id, title: t.name, field: 'body', ytext: yt, hidden: t.archived })
@@ -256,8 +267,10 @@ export function hasTag(tags, want) {
 /** Every tag on live notes with how many notes carry it; parents count their children. */
 export function tagCounts(ydoc) {
   const counts = new Map() // lower → { name, count }
+  const shut = hiddenTabs ? hiddenTabs() : null
   ydoc.getMap('notes').forEach((n) => {
     if (!isMap(n) || hiddenNote(n)) return
+    if (shut && shut.has(String(n.get('tabId')))) return
     const seen = new Set()
     for (const t of tagsIn(text(n.get('title')) + '\n' + text(n.get('body')) + '\n' + text(n.get('body2')))) {
       const parts = t.split('/')

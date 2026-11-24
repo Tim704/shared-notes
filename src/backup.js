@@ -11,15 +11,26 @@ import { buildMirror, exportMarkdown, exportJson } from '../shared/serialise.js'
 import { getSettings, setSetting } from './settings.js'
 
 // ---- which tabs this device leaves out -------------------------------------
-export function excludedTabs() {
+// tabs the person chose to leave out of this device's backups
+function chosenTabs() {
   const v = getSettings().backupExclude
   return new Set(Array.isArray(v) ? v : [])
 }
+// …plus the tabs that are locked on this device right now (the app says which)
+let alsoExcluded = () => new Set()
+export function setAlsoExcluded(fn) {
+  alsoExcluded = fn
+}
+export function excludedTabs() {
+  const s = chosenTabs()
+  for (const id of alsoExcluded()) s.add(id)
+  return s
+}
 export function isExcluded(tabId) {
-  return excludedTabs().has(tabId)
+  return chosenTabs().has(tabId)
 }
 export function setExcluded(tabId, on) {
-  const s = excludedTabs()
+  const s = chosenTabs()
   if (on) s.add(tabId)
   else s.delete(tabId)
   setSetting('backupExclude', Array.from(s))

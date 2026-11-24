@@ -5,6 +5,7 @@ import { connect, sleep } from './lib.mjs'
 import { parseNoteMarkdown } from '../server/mirror.js'
 import { linesOf } from '../shared/lines.js'
 import { buildMirror } from '../shared/serialise.js'
+import { makeLock, verifyLock } from '../server/locks.js'
 
 // Exercises the JSON API, the markdown mirror and the history endpoint against
 // a running server. Assumes a server on PORT (started separately, like the
@@ -202,6 +203,69 @@ const hist = await api('GET', `/api/history/${noteId}`)
 check('GET /api/history/:id -> {available, versions[]}', hist.status === 200 && typeof hist.data.available === 'boolean' && Array.isArray(hist.data.versions))
 check('GET /api/history/:id/badcommit -> 400', (await api('GET', `/api/history/${noteId}/zzz`)).status === 400)
 check('GET /api/history/:id/<unknown sha> -> 404', (await api('GET', `/api/history/${noteId}/0123456789abcdef`)).status === 404)
+
+// --- a locked tab: nothing of it leaves without its password ---
+{
+  const lockTab = 'tab_' + Math.random().toString(36).slice(2, 8)
+  const secretId = 'note_' + Math.random().toString(36).slice(2, 8)
+  const word = 'zebrafinch' + suffix
+  const lock = makeLock('open sesame')
+  check('a lock checks its own password and no other', verifyLock(lock, 'open sesame') && !verifyLock(lock, 'open sesame ') && !verifyLock(lock, ''))
+  A.doc.transact(() => {
+    const t = new Y.Map()
+    t.set('id', lockTab)
+    t.set('name', 'Diary')
+    t.set('kind', 'notes')
+    t.set('lock', lock)
+    A.doc.getArray('tabs').push([t])
+    const n = new Y.Map()
+    const title = new Y.Text()
+    title.insert(0, 'Secret ' + suffix)
+    const body = new Y.Text()
+    body.insert(0, 'the ' + word + ' flies at dawn\n')
+    n.set('title', title)
+    n.set('body', body)
+    n.set('created', Date.now())
+    n.set('tabId', lockTab)
+    A.doc.getMap('notes').set(secretId, n)
+    A.doc.getArray('order').unshift([secretId])
+  })
+  await sleep(400)
+  const withPw = async (method, url, body, pw = 'open sesame') => {
+    const res = await fetch(HTTP + url, { method, headers: { 'X-Tab-Password': pw, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined })
+    const type = res.headers.get('content-type') || ''
+    return { status: res.status, data: type.includes('json') ? await res.json() : await res.text() }
+  }
+  const listed = (await api('GET', '/api/tabs')).data.find((t) => t.id === lockTab)
+  check('GET /api/tabs lists a locked tab as locked, without its count or its lock', listed && listed.locked === true && listed.count === 0 && !('lock' in listed))
+  check('GET /api/tabs/:id of a locked tab -> 423', (await api('GET', `/api/tabs/${lockTab}`)).status === 423)
+  check('GET /api/notes/:id in a locked tab -> 423', (await api('GET', `/api/notes/${secretId}`)).status === 423)
+  check('PATCH /api/notes/:id in a locked tab -> 423', (await api('PATCH', `/api/notes/${secretId}`, { append: 'x' })).status === 423)
+  check('POST /api/tabs/:id/notes into a locked tab -> 423', (await api('POST', `/api/tabs/${lockTab}/notes`, { title: 'x' })).status === 423)
+  check('search does not find a locked tab\'s notes', (await api('GET', '/api/search?q=' + word)).data.length === 0)
+  check('the Markdown and JSON exports leave a locked tab out', !(await api('GET', '/api/export.md')).data.includes(word) && !JSON.stringify((await api('GET', '/api/export.json')).data).includes(word))
+  check('capture cannot append to a note in a locked tab', (await api('POST', '/api/capture', { text: 'x', note: secretId })).status === 423)
+  check('history of a note in a locked tab -> 423', (await api('GET', `/api/history/${secretId}`)).status === 423)
+  check('a wrong X-Tab-Password is refused too', (await withPw('GET', `/api/notes/${secretId}`, null, 'nope')).status === 423)
+  const open = await withPw('GET', `/api/notes/${secretId}`)
+  check('the right X-Tab-Password opens the note', open.status === 200 && open.data.body.includes(word))
+  check('and the tab, search and export', (await withPw('GET', `/api/tabs/${lockTab}`)).data.notes?.length === 1 && (await withPw('GET', '/api/search?q=' + word)).data.length === 1 && (await withPw('GET', '/api/export.md')).data.includes(word))
+  check('the Pi\'s own mirror still keeps the locked tab (it is the backup)', Object.values(buildMirror(A.doc)).some((f) => typeof f === 'string' && f.includes(word)))
+  // a forgotten password: the tool on the Pi takes the lock off
+  const { execFileSync } = await import('child_process')
+  const run = (...args) => {
+    try {
+      return execFileSync(process.execPath, ['tools/unlock-tab.mjs', ...args], { env: { ...process.env, PORT: String(PORT) }, encoding: 'utf8', timeout: 15000 })
+    } catch (err) {
+      return 'ERR ' + (err.stderr || err.message)
+    }
+  }
+  check('tools/unlock-tab.mjs lists the locked tabs', /Diary/.test(run()))
+  check('and refuses a name that is not locked', /^ERR/.test(run('Api Tab')))
+  check('and unlocks one by name', /Unlocked 1 tab/.test(run('Diary')))
+  await sleep(500)
+  check('after which the API serves the tab again', (await api('GET', `/api/notes/${secretId}`)).status === 200)
+}
 
 A.close()
 await sleep(150)

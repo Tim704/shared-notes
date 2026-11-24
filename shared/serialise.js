@@ -9,6 +9,7 @@
 
 import { linesOf, linesToMarkdown, linesToPlain, isList, MARKS } from './lines.js'
 import { tasksMarkdown, tasksView } from './tasks.js'
+import { lockOf } from './locks.js'
 import { mapMarkdown, mapView } from './mindmap.js'
 
 const LW = 1600 // sketch logical width  (must match src/draw.js)
@@ -30,6 +31,7 @@ export function tabRec(entry) {
     kind: PAGE_KINDS.has(get('kind')) ? get('kind') : 'notes',
     archived: get('archived') === true,
     view: get('view') === 'canvas' ? 'canvas' : 'board',
+    ...(lockOf(entry) ? { locked: true } : {}),
     ...(typeof get('wallpaper') === 'string' && /^\/media\/[A-Za-z0-9_.-]+$/.test(get('wallpaper')) ? { wallpaper: get('wallpaper') } : {}),
   }
 }

@@ -28,6 +28,9 @@ adds one of five kinds:
 - **Wallpaper:** tab menu ⋯ → *Wallpaper…* puts one of your own pictures behind a
   NotePad, To-do, document or mind map tab. It can fill the window or tile, and *Fade*
   washes it out so writing stays readable. Everyone on the board sees it.
+- **Password lock:** tab menu ⋯ → *Lock with a password…*. A locked tab shows a lock
+  screen until its password is typed on that device. See section 15 for what the lock
+  does and does not protect.
 - **Remembered per device:** the tab you had open last.
 - **A safe rename:** renaming a tab is a single change to its name field, so two people
   renaming or reordering at once can't duplicate or lose it.
@@ -354,6 +357,21 @@ Phones get their own layout, in the style of Google Keep:
 - **Optional password** (`NOTES_PASSWORD`): each browser logs in once and gets a
   long-lived cookie, which the live connection, the API and the pictures all require.
   Scripts send `Authorization: Bearer <password>` instead.
+- **Locked tabs** are a privacy screen for people who share the board:
+  - **Hidden until unlocked:** a locked tab's notes stay out of the switcher, search, the
+    `[[` picker, link previews, "Linked from", tags, "From notes" in To-do tabs and this
+    device's backups. The tab menu offers only *Unlock…*.
+  - **Unlocking** lasts until the browser closes, *Lock now* is pressed, or the device has
+    been idle for the time set in Settings → *Locked tabs* (never, 5 min, 15 min, 1 hour).
+  - **Changing or removing** the password asks for the current one.
+  - **The API** answers `423` for anything in a locked tab unless the request carries its
+    password in an `X-Tab-Password` header. Reminders count what is due there without
+    quoting it, and webhooks skip it. Share links made on purpose keep working.
+  - **What it is not:** encryption. Every browser on the board holds the whole board, so
+    someone technical could still read a locked tab out of their own browser's storage.
+    The Pi's Markdown mirror also keeps the tab, as the backup.
+  - **Forgotten password:** on the Pi, `docker compose exec notes node
+    tools/unlock-tab.mjs "Tab name"` takes the lock off.
 - **A REST API** for scripts, widgets and automations:
   - list tabs and read their notes;
   - create notes, edit them, add lines to them and tick checkboxes by line;

@@ -31,16 +31,21 @@ export function capture(ydoc, input = {}) {
   const lines = captureLines(input.text, input.as)
   if (!lines.some((l) => l.text.trim())) throw { status: 400, message: 'text is required' }
   const yNotes = ydoc.getMap('notes')
+  const shut = input.closedTabs || new Set() // locked tabs the caller has no password for
   const want = input.note == null || String(input.note).trim() === '' ? 'Inbox' : String(input.note).trim()
 
   let id = null
   const byId = yNotes.get(want)
-  if (byId && typeof byId.get === 'function' && typeof byId.get('deleted') !== 'number') id = want
+  if (byId && typeof byId.get === 'function' && typeof byId.get('deleted') !== 'number') {
+    if (shut.has(String(byId.get('tabId')))) throw { status: 423, message: 'tab is locked' }
+    id = want
+  }
   if (!id) {
     // by name: a live note first (not archived first)
     let best = null
     yNotes.forEach((n, nid) => {
       if (!n || typeof n.get !== 'function' || typeof n.get('deleted') === 'number' || n.get('kind') === 'todo') return
+      if (shut.has(String(n.get('tabId')))) return
       if (!namesOf(n).some((x) => normTitle(x) === normTitle(want))) return
       const score = n.get('archived') ? 0 : 1
       if (!best || score > best.score) best = { nid, score }
@@ -49,7 +54,7 @@ export function capture(ydoc, input = {}) {
   }
 
   let created = false
-  const tabs = tabsOf(ydoc).filter((t) => t.kind === 'notes')
+  const tabs = tabsOf(ydoc).filter((t) => t.kind === 'notes' && !shut.has(t.id))
   let tab = null
   if (!id) {
     if (input.tab != null) {

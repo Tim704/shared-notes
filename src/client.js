@@ -13,13 +13,14 @@ import * as ui from './ui.js'
 import { snippetOf } from '../shared/serialise.js'
 import { markdownToLines, linesOf, embedOf, genLineId, HIGHLIGHTS, parseCrop, formatCrop } from '../shared/lines.js'
 import { replaceAllLines, ensureTerminator, insertLinesAt, appendLines, setLineAttrs } from '../shared/lineops.js'
-import { normTitle, namesOf, aliasesOf, parseTarget, followRename, rewriteLinks, nameTaken, backlinks, unlinkedMentions, linkMention, tagCounts, renameTag } from '../shared/links.js'
+import { normTitle, namesOf, aliasesOf, parseTarget, followRename, rewriteLinks, nameTaken, backlinks, unlinkedMentions, linkMention, tagCounts, renameTag, setHiddenTabs } from '../shared/links.js'
 import { parseQuery, noteFacts, matchFacts } from '../shared/search.js'
 import { openSwitcher, rank as rankItems } from './switcher.js'
 import { initHoverPreview } from './preview.js'
 import { importFiles } from './importer.js'
 import { uploadImages, openLightbox, pickImages } from './media.js'
 import { openCrop } from './crop.js'
+import { lockOf, toHex, fromHex, sameHex, LOCK_ITERATIONS, LOCK_BYTES } from '../shared/locks.js'
 import { createFoldStore } from './folds.js'
 import * as backup from './backup.js'
 import { createMindMap } from './mindmap.js'
@@ -401,6 +402,7 @@ function tabRec(t) {
       wallpaper: wallOf(t.get('wallpaper')),
       wallFit: t.get('wallFit') === 'tile' ? 'tile' : null,
       wallDim: dimOf(t.get('wallDim')),
+      lock: lockOf(t),
     }
   }
   return {
@@ -414,6 +416,7 @@ function tabRec(t) {
     wallpaper: wallOf(t.wallpaper),
     wallFit: t.wallFit === 'tile' ? 'tile' : null,
     wallDim: dimOf(t.wallDim),
+    lock: lockOf(t),
   }
 }
 // a tab's wallpaper is one of the board's own pictures, nothing from elsewhere
@@ -463,6 +466,7 @@ function makeTabMap(rec) {
   if (rec.wallpaper) m.set('wallpaper', rec.wallpaper)
   if (rec.wallFit) m.set('wallFit', rec.wallFit)
   if (rec.wallDim) m.set('wallDim', rec.wallDim)
+  if (rec.lock) m.set('lock', { salt: rec.lock.salt, hash: rec.lock.hash })
   return m
 }
 
@@ -484,6 +488,186 @@ function updateTab(id, patch) {
     }
   })
 }
+
+// ---- locked tabs ----
+// A tab can carry a password lock (shared/locks.js). It is a privacy screen:
+// this device shows a lock screen in place of the tab, and keeps its notes out
+// of search, the switcher, links, previews, "From notes" and this device's
+// backups, until the password is typed here. Unlocking lasts for this browser
+// session (sessionStorage) or until "Lock now" / the idle timer.
+const UNLOCK_KEY = 'notesUnlocked'
+let unlocked = {} // tabId -> { pw, hash }: the password typed here, and the lock it opened
+try {
+  unlocked = JSON.parse(sessionStorage.getItem(UNLOCK_KEY) || '{}') || {}
+} catch {
+  unlocked = {}
+}
+const saveUnlocked = () => {
+  try {
+    sessionStorage.setItem(UNLOCK_KEY, JSON.stringify(unlocked))
+  } catch {
+    /* private mode: unlocked until the page closes */
+  }
+}
+let lockCache = null // Set of the tab ids that are locked on this device right now
+function lockedTabs() {
+  if (lockCache) return lockCache
+  const out = new Set()
+  for (const t of tabsList()) if (t.lock && !(unlocked[t.id] && unlocked[t.id].hash === t.lock.hash)) out.add(t.id)
+  lockCache = out
+  return out
+}
+function isTabLocked(id) {
+  return id != null && lockedTabs().has(String(id))
+}
+yTabs.observeDeep(() => (lockCache = null))
+setHiddenTabs(lockedTabs)
+backup.setAlsoExcluded(lockedTabs)
+// the API wants a locked tab's password for anything of that tab's
+function lockHeaders(noteOrTabId) {
+  const n = yNotes.get(noteOrTabId)
+  const u = unlocked[n ? n.get('tabId') : noteOrTabId]
+  return u ? { 'X-Tab-Password': u.pw } : {}
+}
+async function hashTabPassword(pw, salt) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromHex(salt), iterations: LOCK_ITERATIONS }, key, LOCK_BYTES * 8)
+  return toHex(new Uint8Array(bits))
+}
+const canLock = () => !!(globalThis.crypto && crypto.subtle)
+const askPassword = (title, message, okLabel) => ui.dialog({ title, message, input: { type: 'password', placeholder: 'Password', maxLength: 200 }, buttons: [{ label: 'Cancel', value: null }, { label: okLabel, primary: true }] })
+function afterLockChange() {
+  lockCache = null
+  saveUnlocked()
+  scheduleReconcile()
+  refreshEditors() // "Linked from" and friends re-read what they may show
+}
+// true when `pw` opens the tab; remembers it for this session
+async function unlockTab(t, pw) {
+  if (!t.lock || !pw) return false
+  const hash = await hashTabPassword(pw, t.lock.salt)
+  if (!sameHex(hash, t.lock.hash)) return false
+  unlocked[t.id] = { pw, hash }
+  afterLockChange()
+  return true
+}
+function lockTabNow(id) {
+  if (!unlocked[id]) return
+  delete unlocked[id]
+  if (full && yNotes.get(full.id)?.get('tabId') === id) closeFullscreenNow()
+  afterLockChange()
+}
+async function newPassword(title) {
+  const pw = await askPassword(title, 'Anyone on the board will need it to open this tab. It hides the tab in the app; it does not encrypt it.', 'Next')
+  if (!pw) return null
+  const again = await askPassword(title, 'Type the password once more.', 'Lock')
+  if (again == null) return null
+  if (again !== pw) {
+    ui.toast('Those two did not match. Nothing was changed.')
+    return null
+  }
+  return pw
+}
+async function setTabPassword(t, pw) {
+  const salt = toHex(crypto.getRandomValues(new Uint8Array(16)))
+  const hash = await hashTabPassword(pw, salt)
+  unlocked[t.id] = { pw, hash } // it stays open here until it is locked
+  updateTab(t.id, { lock: { salt, hash } })
+  afterLockChange()
+}
+async function lockTabFlow(t) {
+  if (!canLock()) return ui.toast('Locks need a secure (https) connection to the board.')
+  const pw = await newPassword(`Lock "${t.name}"`)
+  if (!pw) return
+  await setTabPassword(t, pw)
+  ui.toast(`"${t.name}" now has a password. It is open on this device until you lock it.`, { action: 'Lock now', onAction: () => lockTabNow(t.id), ms: 8000 })
+}
+// the password again, even on a device where the tab is open
+async function confirmTabPassword(t, title) {
+  const pw = await askPassword(title, `Type the current password of "${t.name}".`, 'Continue')
+  if (!pw) return false
+  if (!sameHex(await hashTabPassword(pw, t.lock.salt), t.lock.hash)) {
+    ui.toast('That is not the password.')
+    return false
+  }
+  return true
+}
+async function changeTabPassword(t) {
+  if (!(await confirmTabPassword(t, 'Change password'))) return
+  const pw = await newPassword(`New password for "${t.name}"`)
+  if (!pw) return
+  await setTabPassword(t, pw)
+  ui.toast('Password changed. Other devices will be asked for the new one.')
+}
+async function removeTabLock(t) {
+  if (!(await confirmTabPassword(t, 'Remove lock'))) return
+  delete unlocked[t.id]
+  updateTab(t.id, { lock: null })
+  afterLockChange()
+  ui.toast(`"${t.name}" is no longer locked.`)
+}
+// the lock screen, shown in place of a locked tab
+const lockView = document.createElement('section')
+lockView.id = 'lock-view'
+lockView.className = 'lock-view'
+lockView.hidden = true
+lockView.innerHTML = `<form class="lock-card" autocomplete="off">
+  <span class="lock-icon"></span>
+  <h2 class="lock-title"></h2>
+  <p class="lock-sub">Type its password to open it on this device.</p>
+  <div class="lock-row"><input class="lock-input" type="password" placeholder="Password" aria-label="Tab password" autocomplete="off" maxlength="200" /><button class="dlg-btn primary lock-go" type="submit">Unlock</button></div>
+  <p class="lock-err" role="alert" hidden></p>
+</form>`
+lockView.querySelector('.lock-icon').appendChild(makeIcon('lock'))
+document.getElementById('page-view').after(lockView)
+let lockShown = null
+function showLockView(t) {
+  lockView.hidden = !t
+  if (!t) {
+    lockShown = null
+    return
+  }
+  lockView.querySelector('.lock-title').textContent = `"${t.name}" is locked`
+  if (lockShown !== t.id) {
+    lockShown = t.id
+    lockView.querySelector('.lock-input').value = ''
+    lockView.querySelector('.lock-err').hidden = true
+    if (!phoneMode()) requestAnimationFrame(() => lockView.querySelector('.lock-input').focus())
+  }
+}
+lockView.querySelector('form').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const t = tabsList().find((x) => x.id === lockShown)
+  const input = lockView.querySelector('.lock-input')
+  const err = lockView.querySelector('.lock-err')
+  if (!t || !input.value) return
+  if (!canLock()) {
+    err.textContent = 'Locks need a secure (https) connection to the board.'
+    err.hidden = false
+    return
+  }
+  const ok = await unlockTab(t, input.value)
+  if (ok) return
+  err.textContent = 'That is not the password.'
+  err.hidden = false
+  input.select()
+})
+// unlocked tabs lock again after a while without a click or a key
+let lastActivity = Date.now()
+const noteActivity = () => (lastActivity = Date.now())
+document.addEventListener('pointerdown', noteActivity, true)
+document.addEventListener('keydown', noteActivity, true)
+function checkIdleLock() {
+  const mins = Number(getSettings().lockAfter) || 0
+  if (!mins || !Object.keys(unlocked).length) return
+  if (Date.now() - lastActivity < mins * 60000) return
+  const ids = Object.keys(unlocked)
+  unlocked = {}
+  if (full && ids.includes(yNotes.get(full.id)?.get('tabId'))) closeFullscreenNow()
+  afterLockChange()
+}
+setInterval(checkIdleLock, 15000)
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && checkIdleLock())
 
 // ---- tab wallpaper ----
 // A picture behind a NotePad, To-do, document or mind map tab, shared with
@@ -778,7 +962,12 @@ const TAB_KINDS = {
   tasks: { label: 'To-do', menu: 'To-do', icon: 'todo', sub: 'To-do', blurb: 'Tasks broken into parts, with due dates and a calendar' },
 }
 const kindInfo = (kind) => TAB_KINDS[kind] || TAB_KINDS.notes
-const isNotesTab = (t) => !!t && !TAB_KINDS[t.kind]?.sub
+// a NotePad by kind, whether or not it is locked (for icons and labels)
+const isNotesKind = (t) => !!t && !TAB_KINDS[t.kind]?.sub
+// a NotePad this device may read and write right now
+const isNotesTab = (t) => isNotesKind(t) && !isTabLocked(t.id)
+// what the window shows for a tab: 'locked' until its password is typed here
+const viewKind = (t) => (!t ? 'notes' : isTabLocked(t.id) ? 'locked' : isNotesKind(t) ? 'notes' : t.kind)
 
 async function addTab(kind, { open = true, name: suggested } = {}) {
   const label = kindInfo(kind).label
@@ -1011,7 +1200,13 @@ function renderTabs() {
     label.className = 'tab-name'
     label.textContent = t.name
     tab.appendChild(label)
-    if (t.kind === 'tasks') {
+    if (t.lock) {
+      const lk = makeIcon('lock')
+      lk.classList.add('tab-lock')
+      if (!isTabLocked(t.id)) lk.classList.add('open')
+      tab.appendChild(lk)
+    }
+    if (t.kind === 'tasks' && !isTabLocked(t.id)) {
       // a To-do tab shows how many unticked tasks are due today or overdue
       const due = dueCount(yPages.get(t.id)?.get('items'), ymd(new Date()))
       if (due) {
@@ -1127,10 +1322,25 @@ function openTabMenu(anchor, t) {
     })
     menu.appendChild(b)
   }
+  const show = () => {
+    document.body.appendChild(menu)
+    const dismiss = ui.popover(menu, anchor, { menu: !menu.classList.contains('settings-menu'), label: 'Settings' })
+    openMenus.push({ remove: dismiss })
+  }
+  if (isTabLocked(t.id)) {
+    // a locked tab offers nothing but its lock screen until it is opened
+    item('🔒  Unlock…', () => lockView.querySelector('.lock-input').focus())
+    return show()
+  }
   item('Rename', () => {
     renamingTabId = t.id
     renderTabs()
   })
+  if (t.lock) {
+    item('🔒  Lock now', () => lockTabNow(t.id))
+    item('Change password…', () => changeTabPassword(t))
+    item('Remove lock…', () => removeTabLock(t))
+  } else item('🔒  Lock with a password…', () => lockTabFlow(t))
   item('🎨  Icon & colour…', () => setTimeout(() => openTabLook(t, anchor))) // after this click has bubbled
   if (t.kind !== 'draw')
     item('🖼  Wallpaper…', () => {
@@ -1188,9 +1398,7 @@ function openTabMenu(anchor, t) {
     )
   })
   item('Delete…', () => deleteTab(t.id), 'danger')
-  document.body.appendChild(menu)
-  const dismiss = ui.popover(menu, anchor, { menu: !menu.classList.contains('settings-menu'), label: 'Settings' })
-  openMenus.push({ remove: dismiss })
+  show()
 }
 
 function openAddMenu(anchor) {
@@ -1711,6 +1919,7 @@ function linkCandidates(q = '') {
   const hasHead = !!target && q.includes('#')
   const hasBlock = !!target && !hasHead && q.includes('^')
   if (hasHead || hasBlock) {
+    if (isTabLocked(target.tabId)) return []
     const tn = target.noteId ? yNotes.get(target.noteId) : null
     const bodies = tn
       ? [tn.get('body'), tn.get('layout') === 'book' ? tn.get('body2') : null].filter(Boolean)
@@ -1744,7 +1953,7 @@ function linkCandidates(q = '') {
   const items = []
   const tabsById = new Map(tabsList().map((t) => [t.id, t]))
   yNotes.forEach((n) => {
-    if (isHidden(n)) return
+    if (isHidden(n) || isTabLocked(n.get('tabId'))) return
     const t = tabsById.get(n.get('tabId'))
     for (const [i, name] of namesOf(n).entries()) items.push({ label: name, hint: i ? 'alias of ' + n.get('title').toString().trim() : t ? t.name : '', icon: 'note' })
   })
@@ -1908,7 +2117,7 @@ function switcherItems() {
   const tabsById = new Map(tabsList().map((t) => [t.id, t]))
   yOrder.toArray().forEach((id) => {
     const n = yNotes.get(id)
-    if (!n || n.get('deleted')) return
+    if (!n || n.get('deleted') || isTabLocked(n.get('tabId'))) return
     const t = tabsById.get(n.get('tabId'))
     const title = n.get('title').toString().trim()
     const names = aliasesOf(n)
@@ -1922,7 +2131,7 @@ function switcherItems() {
       weight: (n.get('archived') ? 2 : 0) + (title ? 0 : 1),
     })
   })
-  for (const t of tabsById.values()) items.push({ kind: 'tab', id: t.id, label: t.name || 'Untitled tab', hint: kindInfo(t.kind).label + (t.archived ? ' · archived' : ''), icon: t.kind === 'notes' ? 'folder' : kindInfo(t.kind).icon, weight: 1 })
+  for (const t of tabsById.values()) items.push({ kind: 'tab', id: t.id, label: t.name || 'Untitled tab', hint: kindInfo(t.kind).label + (t.archived ? ' · archived' : '') + (isTabLocked(t.id) ? ' · locked' : ''), icon: isTabLocked(t.id) ? 'lock' : t.kind === 'notes' ? 'folder' : kindInfo(t.kind).icon, weight: 1 })
   items.push({ kind: 'today', label: 'Today’s journal', names: ['today', 'daily', 'journal', ymd(new Date())], hint: 'daily note', icon: 'calendar', weight: 3 })
   return items
 }
@@ -2186,6 +2395,7 @@ initHoverPreview({
     if (!href || href[0] !== '[') return null
     const target = resolveLink(href.slice(2, -2))
     if (!target) return { title: parseTarget(href.slice(2, -2)).title, hint: 'No such note yet: click to create it', lines: [], empty: ' ' }
+    if (isTabLocked(target.tabId)) return { title: 'In a locked tab', hint: 'Unlock the tab to see it', lines: [], empty: ' ' }
     const lineInfo = (L) => ({ text: (L.attrs.lt === 'todo' ? (L.attrs.done ? '☑ ' : '☐ ') : L.attrs.lt === 'li' ? '• ' : '') + (embedOf(L.text) ? (embedOf(L.text).kind === 'image' ? '🖼 picture' : '▶ video') : L.text), cls: L.attrs.lt === 'h' ? 'lp-h' : '' })
     const pick = (yt) => {
       let ls = linesOf(yt).filter((L) => L.text.trim() || L.attrs.lt === 'todo')
@@ -3968,7 +4178,7 @@ function mountPage(tabId, kind) {
   if (kind === 'mindmap') {
     // createMindMap reads note.get('title' | 'body') and note.doc: a page has both
     const map = createMindMap(pageView, page, {
-      todoTabs: () => tabsList().filter((t) => t.kind === 'tasks' && !t.archived),
+      todoTabs: () => tabsList().filter((t) => t.kind === 'tasks' && !t.archived && !isTabLocked(t.id)),
       sendToTodo,
     })
     pageState = { tabId, kind, map, destroy: () => map.destroy() }
@@ -4282,7 +4492,7 @@ function ribbonState(card, marks, line) {
 
 function refreshRibbon() {
   const t = activeTab()
-  const kind = !t || isNotesTab(t) ? 'notes' : t.kind
+  const kind = viewKind(t)
   const show = !phoneMode() && (kind === 'notes' || kind === 'doc')
   const c = ribbonTarget?.card
   const n = c?.note
@@ -4493,7 +4703,7 @@ function scheduleReconcile() {
 
 function reconcile() {
   const active = activeTab()
-  const kind = !active || isNotesTab(active) ? 'notes' : active.kind // 'notes' | 'draw' | 'doc' | 'mindmap'
+  const kind = viewKind(active) // 'notes' | 'draw' | 'doc' | 'mindmap' | 'tasks' | 'locked'
   const notesTab = kind === 'notes'
 
   board.style.display = notesTab ? '' : 'none'
@@ -4502,7 +4712,8 @@ function reconcile() {
   addBtn.style.display = notesTab ? '' : 'none'
   searchWrap.style.visibility = notesTab ? '' : 'hidden'
   document.body.dataset.tabKind = kind
-  applyWallpaper(active)
+  applyWallpaper(kind === 'locked' ? null : active)
+  showLockView(kind === 'locked' ? active : null)
 
   if (!notesTab) {
     for (const [id, card] of cards) {
@@ -4514,7 +4725,11 @@ function reconcile() {
     setInking(false)
     ink.bind(null)
     empty.style.display = 'none'
-    if (kind === 'draw') {
+    if (kind === 'locked') {
+      unmountPage()
+      unmountDraw()
+      if (full) closeFullscreenNow()
+    } else if (kind === 'draw') {
       unmountPage()
       mountDraw(active.id)
     } else {
@@ -4641,6 +4856,11 @@ function keepCaretInView(host) {
 function openFullscreen(id, opts = {}) {
   const note = yNotes.get(id)
   if (!note || note.get('deleted')) return false
+  if (isTabLocked(note.get('tabId'))) {
+    // its tab is locked on this device: go to the lock screen and no further
+    if (activeTabId !== note.get('tabId')) setActiveTab(note.get('tabId'))
+    return false
+  }
   if (full && full.id === id) return true
   const sourceRect = cards.get(id)?.el.getBoundingClientRect()
   const prev = full
@@ -5547,8 +5767,8 @@ function openHome(query = '') {
       top.className = 'home-tab-top'
       const name = document.createElement('span')
       name.className = 'home-tab-name'
-      iconLabel(name, t.name, isNotesTab(t) ? 'folder' : kindInfo(t.kind).icon)
-      if (t.icon || t.color) name.firstChild.replaceWith(tabGlyph(t.icon ? t : { ...t, icon: isNotesTab(t) ? 'i:folder' : null }, 'icon'))
+      iconLabel(name, t.name, isTabLocked(t.id) ? 'lock' : isNotesKind(t) ? 'folder' : kindInfo(t.kind).icon)
+      if ((t.icon || t.color) && !isTabLocked(t.id)) name.firstChild.replaceWith(tabGlyph(t.icon ? t : { ...t, icon: isNotesKind(t) ? 'i:folder' : null }, 'icon'))
       top.appendChild(name)
       if (people.length) {
         const pp = document.createElement('span')
@@ -5568,7 +5788,7 @@ function openHome(query = '') {
       const sub = document.createElement('div')
       sub.className = 'home-tab-sub'
       sub.textContent =
-        !isNotesTab(t) ? kindInfo(t.kind).sub : count + (count === 1 ? ' note' : ' notes') + (at ? ' · edited ' + relTime(at) : '')
+        isTabLocked(t.id) ? 'Locked' : !isNotesTab(t) ? kindInfo(t.kind).sub : count + (count === 1 ? ' note' : ' notes') + (at ? ' · edited ' + relTime(at) : '')
       c.append(top, sub)
       if (backup.isExcluded(t.id)) {
         const nb = document.createElement('div')
@@ -5603,7 +5823,7 @@ function openHome(query = '') {
       const hits = []
       yOrder.toArray().forEach((id) => {
         const n = yNotes.get(id)
-        if (!n || n.get('deleted')) return
+        if (!n || n.get('deleted') || isTabLocked(n.get('tabId'))) return
         if (matchFacts(terms, noteFacts(n, tabsById.get(n.get('tabId'))?.name || ''))) hits.push({ id, n })
       })
       if (tagOnly(terms)) {
@@ -5783,7 +6003,7 @@ function openHistoryPanel(noteId) {
     body.appendChild(status)
     let data = null
     try {
-      const r = await fetch('/api/history/' + encodeURIComponent(noteId))
+      const r = await fetch('/api/history/' + encodeURIComponent(noteId), { headers: lockHeaders(noteId) })
       data = await r.json()
     } catch {
       data = null
@@ -5822,7 +6042,7 @@ function openHistoryPanel(noteId) {
         view.textContent = 'Loading…'
         let ver = null
         try {
-          const r = await fetch('/api/history/' + encodeURIComponent(noteId) + '/' + encodeURIComponent(v.commit))
+          const r = await fetch('/api/history/' + encodeURIComponent(noteId) + '/' + encodeURIComponent(v.commit), { headers: lockHeaders(noteId) })
           ver = r.ok ? await r.json() : null
         } catch {
           ver = null
@@ -6234,6 +6454,17 @@ function openSettingsMenu(anchor) {
   smoothHint.textContent = 'How much drawn lines are straightened. Off follows your hand exactly.'
   smoothRow.append(smoothLabel, smoothInput, smoothHint)
   menu.appendChild(smoothRow)
+  head('Locked tabs')
+  const lockRow = document.createElement('div')
+  lockRow.className = 'settings-enum'
+  const lockLabel = document.createElement('span')
+  iconLabel(lockLabel, 'Lock again after', 'lock')
+  lockRow.append(lockLabel, ui.segmented('Lock again after', [['0', 'Never'], ['5', '5 min'], ['15', '15 min'], ['60', '1 hour']], String(st.lockAfter ?? 15), (value) => setSetting('lockAfter', Number(value))))
+  const lockHint = document.createElement('small')
+  lockHint.className = 'settings-hint'
+  lockHint.textContent = 'Tabs you unlocked lock again after this long without a click or a key, and when the browser closes.'
+  lockRow.appendChild(lockHint)
+  menu.appendChild(lockRow)
   head('Board')
   check('Snap notes to each other', 'snap', 'Edges and centres line up while dragging (hold Alt to place freely)')
   check('Snap to a grid', 'grid', 'Every ' + (st.gridSize || 20) + ' px')

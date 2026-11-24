@@ -9,6 +9,7 @@
 
 import crypto from 'crypto'
 import { noteView, tabsOf } from '../shared/serialise.js'
+import { lockedTabIds } from '../shared/locks.js'
 
 export function parseHooks(env) {
   return String(env || '')
@@ -52,6 +53,7 @@ export function createWebhooks({ ydoc, urls, secret = '', delayMs = 5000, log = 
       else if (!trashed && before.wasTrashed) event = 'note.restored'
       else event = trashed ? null : 'note.updated'
       if (!event) return
+      if (lockedTabIds(ydoc).has(String(n.get('tabId')))) return // a locked tab's notes stay on the Pi
       const tab = tabsOf(ydoc).find((t) => t.id === String(n.get('tabId')))
       note = { ...noteView(id, n), tabId: n.get('tabId') == null ? null : String(n.get('tabId')), tabName: tab ? tab.name : null }
     }

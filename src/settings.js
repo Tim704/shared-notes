@@ -20,6 +20,7 @@ const DEFAULTS = {
   remindHour: 8, // …at this hour, on this device's clock
   dates: true, // "@friday " becomes a date while typing
   inkSmoothing: 0.5, // drawing: 0 follows the hand exactly, 0.9 irons out most of the wobble
+  lockAfter: 15, // minutes without a click or key before unlocked tabs lock again (0 = never)
   hideDone: false, // ticked checkboxes and struck-through lines are tucked away in notes
 }
 

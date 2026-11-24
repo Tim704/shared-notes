@@ -4198,6 +4198,25 @@ body.has-wall .empty-card { background: color-mix(in srgb, var(--bg-elevated) 88
 .tab-wall .settings-enum { padding: var(--s-2) 0 0; }
 @media print { #wallpaper { display: none !important; } }
 
+/* ---- locked tabs ---- */
+.lock-view { display: flex; align-items: center; justify-content: center; min-height: calc(100dvh - var(--chrome-h)); padding: var(--s-6); box-sizing: border-box; }
+.lock-view[hidden] { display: none; }
+.lock-card {
+  width: 100%; max-width: 380px; margin: 0; padding: var(--s-8) var(--s-6); box-sizing: border-box; text-align: center;
+  background: var(--bg-elevated); border-radius: var(--r-card); box-shadow: var(--elev-1);
+}
+.lock-icon { display: inline-flex; width: 56px; height: 56px; align-items: center; justify-content: center; border-radius: 50%; background: var(--fill); color: var(--label-2); }
+.lock-icon .icon { width: 26px; height: 26px; }
+.lock-title { font: var(--t-title-3, var(--t-headline)); font-weight: 600; margin: var(--s-3) 0 var(--s-1); overflow-wrap: anywhere; }
+.lock-sub { margin: 0 0 var(--s-4); color: var(--label-2); }
+.lock-row { display: flex; gap: var(--s-2); }
+.lock-input { flex: 1; min-width: 0; border: 0; border-radius: var(--r-control); background: var(--fill); color: var(--label); font: var(--t-body); padding: 8px 12px; }
+.lock-err { margin: var(--s-3) 0 0; color: var(--red); }
+.tab-lock { width: 12px; height: 12px; flex: none; margin-left: 4px; color: var(--label-2); }
+.tab-lock.open { opacity: .45; }
+.settings-hint { color: var(--label-2); font: var(--t-caption); }
+@media print { .lock-view { display: none !important; } }
+
 /* ---- print / PDF: one note (opened large) or a document tab */
 @media print {
   body.print-note > *:not(.full-back), body.print-doc > *:not(#page-view) { display: none !important; }

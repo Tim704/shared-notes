@@ -16,6 +16,7 @@ import https from 'https'
 import { tabsOf } from '../shared/serialise.js'
 import { taskTree, flatten } from '../shared/tasks.js'
 import { noteTodos } from '../shared/links.js'
+import { lockedTabIds } from '../shared/locks.js'
 
 const b64u = (buf) => Buffer.from(buf).toString('base64url')
 const fromB64u = (s) => Buffer.from(String(s || ''), 'base64url')
@@ -129,17 +130,23 @@ function post(endpoint, headers, body) {
 export function dueItems(ydoc, day) {
   const out = []
   const pages = ydoc.getMap('pages')
+  // what is due in a locked tab is counted, never quoted: the text would leave the Pi
+  const locked = lockedTabIds(ydoc)
   for (const t of tabsOf(ydoc)) {
     if (t.kind !== 'tasks' || t.archived) continue
     const p = pages.get(t.id)
     const items = p && typeof p.get === 'function' ? p.get('items') : null
     if (!items) continue
     for (const { node } of flatten(taskTree(items))) {
-      if (!node.done && node.due && node.due <= day) out.push({ text: node.text || 'Untitled task', due: node.due, where: t.name, tabId: t.id })
+      if (!node.done && node.due && node.due <= day) out.push(locked.has(t.id) ? { text: 'A task in a locked tab', due: node.due, where: 'Locked', tabId: t.id, locked: true } : { text: node.text || 'Untitled task', due: node.due, where: t.name, tabId: t.id })
     }
   }
   for (const x of noteTodos(ydoc)) {
     if (x.done || x.state === '-' || !x.due || x.due > day) continue
+    if (locked.has(String(x.tabId))) {
+      out.push({ text: 'A checkbox in a locked tab', due: x.due, where: 'Locked', locked: true })
+      continue
+    }
     out.push({ text: x.text.replace(/(^|\s)@\d{4}-\d{2}-\d{2}(?![\w-])/g, '$1').trim() || 'Checkbox', due: x.due, where: x.title, noteId: x.kind === 'note' ? x.id : null })
   }
   return out.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0))

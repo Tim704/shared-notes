@@ -280,6 +280,9 @@ instead.
 - **Drawing:** a pen with quick colour swatches and an adjustable size, an eraser, undo and
   clear.
 - **Text labels:** can be dropped anywhere.
+- **Pictures:** paste or drop a picture onto the sketch, or use *Picture*. It lies under
+  the ink, so you can draw on top of it and the eraser never rubs it out. With *Select*,
+  drag a picture to move it, drag its corner to resize it, and press Delete to remove it.
 - **Shared:** everyone draws on the same canvas live.
 
 ## 10. Phones

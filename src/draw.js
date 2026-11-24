@@ -11,6 +11,9 @@ const smoothing = () => Math.max(0, Math.min(0.9, Number(getSettings().inkSmooth
 // Y.Array so they sync and persist exactly like notes do.
 //   stroke: Y.Map { color, width, mode:'pen'|'erase', points: Y.Array<number> }
 //   text:   Y.Map { type:'text', x, y, text, color, size }
+//   image:  Y.Map { type:'image', src:'/media/…', x, y, w, h }
+// Pictures are drawn on their own canvas under the ink, so the eraser (which
+// cuts holes in the ink canvas) never eats them and you can draw on top.
 // Coordinates are stored in a fixed logical space (LW x LH) and scaled to fit
 // each client's canvas, so a drawing looks the same on a phone and a laptop.
 // Text is always rendered on top of strokes (so the eraser never eats it).
@@ -23,8 +26,12 @@ const FONT = '-apple-system, BlinkMacSystemFont, "Inter var", "Segoe UI", system
 const LINE_H = 1.25
 
 export function createDrawSurface(host, yStrokes, opts = {}) {
+  const under = document.createElement('canvas') // the paper and the pictures
+  under.className = 'draw-pics'
+  host.appendChild(under)
+  const uctx = under.getContext('2d')
   const canvas = document.createElement('canvas')
-  canvas.className = 'draw-canvas'
+  canvas.className = 'draw-canvas over-pics'
   host.appendChild(canvas)
   const ctx = canvas.getContext('2d')
 
@@ -56,6 +63,8 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
     dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2.5))
     canvas.width = Math.round(cssW * dpr)
     canvas.height = Math.round(cssH * dpr)
+    under.width = canvas.width
+    under.height = canvas.height
     scale = Math.min(cssW / LW, cssH / LH)
     ox = (cssW - LW * scale) / 2
     oy = (cssH - LH * scale) / 2
@@ -119,17 +128,68 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
     ctx.restore()
   }
 
+  function isImage(s) {
+    return s && s.get('type') === 'image'
+  }
+  const pics = new Map() // src -> HTMLImageElement (loaded, loading or failed)
+  function picFor(src) {
+    let im = pics.get(src)
+    if (!im) {
+      im = new Image()
+      im.onload = () => scheduleRedraw()
+      im.src = src
+      pics.set(src, im)
+    }
+    return im.complete && im.naturalWidth ? im : null
+  }
+  const boxOf = (s) => ({ x: Number(s.get('x')) || 0, y: Number(s.get('y')) || 0, w: Math.max(8, Number(s.get('w')) || 0), h: Math.max(8, Number(s.get('h')) || 0) })
+  const HANDLE = 14 // css px: the resize corner of the selected picture
+
   function redraw() {
+    uctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    uctx.clearRect(0, 0, cssW, cssH)
+    yStrokes.forEach((s) => {
+      if (!isImage(s)) return
+      const b = boxOf(s)
+      const im = picFor(String(s.get('src') || ''))
+      if (im) uctx.drawImage(im, ox + b.x * scale, oy + b.y * scale, b.w * scale, b.h * scale)
+      else {
+        uctx.fillStyle = 'rgba(127,127,127,.18)'
+        uctx.fillRect(ox + b.x * scale, oy + b.y * scale, b.w * scale, b.h * scale)
+      }
+    })
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, cssW, cssH)
     // strokes first (their eraser composites among themselves)...
     yStrokes.forEach((s) => {
-      if (!isText(s)) drawStroke(s)
+      if (!isText(s) && !isImage(s)) drawStroke(s)
     })
     // ...then text always on top.
     yStrokes.forEach((s) => {
       if (isText(s)) drawText(s)
     })
+    // what is on the sheet, readable without reading pixels back (tests, assistive tools)
+    let nPics = 0
+    yStrokes.forEach((s) => isImage(s) && nPics++)
+    host.dataset.pictures = String(nPics)
+    const pickedBox = picked && tool.mode === 'select' && indexOfStroke(picked) >= 0 ? boxOf(picked) : null
+    host.dataset.picked = pickedBox ? [pickedBox.x, pickedBox.y, pickedBox.w, pickedBox.h].join(',') : ''
+    // the picked picture's frame and resize corner
+    if (pickedBox) {
+      const b = pickedBox
+      const x = ox + b.x * scale
+      const y = oy + b.y * scale
+      ctx.save()
+      ctx.strokeStyle = '#0a84ff'
+      ctx.lineWidth = 2
+      ctx.strokeRect(x, y, b.w * scale, b.h * scale)
+      ctx.fillStyle = '#fff'
+      ctx.beginPath()
+      ctx.arc(x + b.w * scale, y + b.h * scale, HANDLE / 2, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+      ctx.restore()
+    }
   }
   const scheduleRedraw = rafThrottle(redraw)
 
@@ -256,6 +316,123 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
   textInput.addEventListener('blur', () => closeTextEditor(true))
   textInput.addEventListener('pointerdown', (e) => e.stopPropagation())
 
+  // ---- pictures: pick, move, resize, delete (the Select tool) ----
+  let picked = null // the selected image Y.Map
+  let moving = null // { obj, kind: 'move'|'size', sx, sy, box, ratio }
+  function imageAt(lx, ly) {
+    for (let i = yStrokes.length - 1; i >= 0; i--) {
+      const s = yStrokes.get(i)
+      if (!isImage(s)) continue
+      const b = boxOf(s)
+      if (lx >= b.x && lx <= b.x + b.w && ly >= b.y && ly <= b.y + b.h) return s
+    }
+    return null
+  }
+  function startPicture(e) {
+    const [lx, ly] = toLogical(e.clientX, e.clientY)
+    const grab = HANDLE / scale
+    let hit = null
+    let kind = 'move'
+    if (picked && indexOfStroke(picked) >= 0) {
+      const b = boxOf(picked)
+      if (Math.hypot(lx - (b.x + b.w), ly - (b.y + b.h)) <= grab) {
+        hit = picked
+        kind = 'size'
+      }
+    }
+    if (!hit) hit = imageAt(lx, ly)
+    picked = hit
+    onPick(!!picked)
+    redraw()
+    if (!hit) return
+    try {
+      canvas.setPointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+    const box = boxOf(hit)
+    moving = { obj: hit, kind, sx: lx, sy: ly, box, ratio: box.w / box.h, next: null }
+  }
+  const commitPicture = rafThrottle(() => {
+    if (!moving || !moving.next || indexOfStroke(moving.obj) < 0) return
+    const n = moving.next
+    yStrokes.doc.transact(() => {
+      for (const k of ['x', 'y', 'w', 'h']) if (moving.obj.get(k) !== n[k]) moving.obj.set(k, n[k])
+    })
+  })
+  function movePicture(e) {
+    const [lx, ly] = toLogical(e.clientX, e.clientY)
+    const { box, kind, sx, sy, ratio } = moving
+    const r = (v) => Math.round(v * 10) / 10
+    if (kind === 'move') moving.next = { x: r(clamp(box.x + lx - sx, -box.w + 20, LW - 20)), y: r(clamp(box.y + ly - sy, -box.h + 20, LH - 20)), w: box.w, h: box.h }
+    else {
+      // the corner keeps the picture's shape
+      const w = clamp(Math.max(lx - box.x, (ly - box.y) * ratio), 24, LW * 2)
+      moving.next = { x: box.x, y: box.y, w: r(w), h: r(w / ratio) }
+    }
+    commitPicture()
+  }
+  function endPicture(e) {
+    if (!moving) return
+    if (e) {
+      try {
+        canvas.releasePointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      if (e.type === 'pointerup') movePicture(e)
+    }
+    const m = moving
+    if (m.next && indexOfStroke(m.obj) >= 0) yStrokes.doc.transact(() => ['x', 'y', 'w', 'h'].forEach((k) => m.obj.get(k) !== m.next[k] && m.obj.set(k, m.next[k])))
+    moving = null
+  }
+  function deletePicked() {
+    const i = picked ? indexOfStroke(picked) : -1
+    if (i < 0) return false
+    yStrokes.doc.transact(() => yStrokes.delete(i, 1))
+    picked = null
+    onPick(false)
+    return true
+  }
+  const onPick = opts.onPick || (() => {})
+  const onKey = (e) => {
+    if (tool.mode !== 'select' || !picked || editing) return
+    if (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))) return
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (deletePicked()) e.preventDefault()
+    } else if (e.key === 'Escape') {
+      picked = null
+      onPick(false)
+      redraw()
+    }
+  }
+  window.addEventListener('keydown', onKey)
+  /** Put a picture on the sheet (centred, or at a client point), picked and ready to move. */
+  function addImage(src, natW, natH, at) {
+    const ratio = natW > 0 && natH > 0 ? natW / natH : 4 / 3
+    let w = Math.min(640, Math.max(120, natW || 480))
+    let h = w / ratio
+    if (h > 520) {
+      h = 520
+      w = h * ratio
+    }
+    const [cx, cy] = at ? toLogical(at.x, at.y) : [LW / 2, LH / 2]
+    const m = new Y.Map()
+    yStrokes.doc.transact(() => {
+      m.set('type', 'image')
+      m.set('src', src)
+      m.set('x', Math.round(clamp(cx - w / 2, 0, LW - w)))
+      m.set('y', Math.round(clamp(cy - h / 2, 0, LH - h)))
+      m.set('w', Math.round(w))
+      m.set('h', Math.round(h))
+      yStrokes.push([m])
+    })
+    picked = m
+    onPick(true)
+    redraw()
+    return m
+  }
+
   // ---- live drawing ----
   let active = null // { stroke: Y.Map, points: Y.Array, last:[x,y], buf:[] }
   let flushScheduled = false
@@ -285,6 +462,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
       openTextEditor(lx, ly, hit)
       return
     }
+    if (tool.mode === 'select') return startPicture(e)
 
     try {
       canvas.setPointerCapture(e.pointerId)
@@ -306,6 +484,10 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
   }
 
   function onPointerMove(e) {
+    if (moving) {
+      e.preventDefault()
+      return movePicture(e)
+    }
     if (!active) return
     e.preventDefault()
     // coalesced events give smoother lines on fast strokes
@@ -325,6 +507,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
   }
 
   function endStroke(e) {
+    if (moving && (!e || e.type !== 'pointerleave')) endPicture(e)
     if (!active) return
     if (e) {
       try {
@@ -356,7 +539,7 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
   canvas.addEventListener('pointerleave', endStroke)
 
   function applyCursor() {
-    canvas.style.cursor = tool.mode === 'text' ? 'text' : 'crosshair'
+    canvas.style.cursor = tool.mode === 'text' ? 'text' : tool.mode === 'select' ? 'default' : 'crosshair'
   }
   applyCursor()
 
@@ -377,8 +560,24 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
     setMode: (m) => {
       if (m !== 'text') closeTextEditor(true)
       tool.mode = m
+      if (m !== 'select') {
+        picked = null
+        onPick(false)
+      }
       applyCursor()
+      redraw()
     },
+    addImage,
+    // switch tool without dropping the picture that was just placed
+    setModeKeepingPick: (m) => {
+      const keep = picked
+      tool.mode = m
+      picked = m === 'select' ? keep : null
+      applyCursor()
+      redraw()
+    },
+    deletePicked,
+    hasPicked: () => !!picked && indexOfStroke(picked) >= 0,
     getTool: () => ({ ...tool }),
     clear: () => {
       closeTextEditor(false)
@@ -401,8 +600,12 @@ export function createDrawSurface(host, yStrokes, opts = {}) {
       canvas.removeEventListener('pointerup', endStroke)
       canvas.removeEventListener('pointercancel', endStroke)
       canvas.removeEventListener('pointerleave', endStroke)
+      window.removeEventListener('keydown', onKey)
       textInput.remove()
       canvas.remove()
+      under.remove()
+      delete host.dataset.pictures
+      delete host.dataset.picked
     },
   }
 }

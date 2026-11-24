@@ -28,8 +28,8 @@ export function dialog(opts) {
     let input = null
     if (opts.input) {
       input = h('input', 'dlg-input')
-      input.type = opts.input.type === 'password' ? 'password' : 'text'
-      if (input.type === 'password') input.autocomplete = opts.input.autocomplete || 'off'
+      input.type = 'text'
+      if (opts.input.type === 'password') secretInput(input)
       input.value = opts.input.value || ''
       input.placeholder = opts.input.placeholder || ''
       if (opts.input.maxLength) input.maxLength = opts.input.maxLength
@@ -200,6 +200,23 @@ export function toast(message, opts = {}) {
 }
 
 // Focus stays inside modal surfaces; the opener regains it on dismissal.
+// A field for a secret that is not a login: dots for what is typed, but kept
+// away from the browser's password manager, which would offer to save it and
+// fill the board's own password into it. Browsers that cannot draw dots in a
+// plain field get a real password field.
+export function secretInput(input) {
+  const dots = typeof CSS !== 'undefined' && CSS.supports && CSS.supports('-webkit-text-security', 'disc')
+  input.type = dots ? 'text' : 'password'
+  input.classList.add('secret-input')
+  input.autocomplete = 'off'
+  input.spellcheck = false
+  input.setAttribute('autocapitalize', 'off')
+  input.setAttribute('autocorrect', 'off')
+  input.setAttribute('data-1p-ignore', '')
+  input.setAttribute('data-lpignore', 'true')
+  return input
+}
+
 export function trapFocus(el) {
   const previous = document.activeElement
   const focusables = () => [...el.querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"], [contenteditable="true"]')].filter(n => !n.disabled && n.getClientRects().length)

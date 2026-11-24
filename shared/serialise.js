@@ -242,12 +242,19 @@ const esc = (s) =>
 const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 10) / 10 : 0)
 
 /** Strokes and text labels (a Y.Array of Y.Map, or plain arrays/objects) as an SVG document. */
-export function sketchToSvg(strokes) {
+export function sketchToSvg(strokes, { mediaPrefix = '' } = {}) {
   const arr = strokes && typeof strokes.toArray === 'function' ? strokes.toArray() : strokes || []
   const lines = []
   const texts = []
+  const images = []
   for (const s of arr) {
     const get = getter(s)
+    if (get('type') === 'image') {
+      // pictures lie under the ink, as on screen (only the board's own pictures)
+      const src = String(get('src') || '')
+      if (/^\/media\/[A-Za-z0-9_.-]+$/.test(src)) images.push(`<image href="${esc(mediaPrefix ? mediaPrefix + src.slice(7) : src)}" x="${num(get('x'))}" y="${num(get('y'))}" width="${num(get('w'))}" height="${num(get('h'))}" preserveAspectRatio="none"/>`)
+      continue
+    }
     if (get('type') === 'text') {
       const size = num(get('size')) || 24
       const x = num(get('x'))
@@ -277,6 +284,8 @@ export function sketchToSvg(strokes) {
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${LW} ${LH}" width="${LW}" height="${LH}">\n` +
     `<rect width="${LW}" height="${LH}" fill="#ffffff"/>\n` +
+    images.join('\n') +
+    (images.length ? '\n' : '') +
     lines.join('\n') +
     (lines.length ? '\n' : '') +
     texts.join('\n') +
@@ -544,7 +553,7 @@ export function buildMirror(ydoc, opts = {}) {
 
   for (const tab of tabs) {
     try {
-      if (tab.kind === 'draw') files[`${tab.dir}/sketch.svg`] = sketchToSvg(yDrawings.get(tab.id))
+      if (tab.kind === 'draw') files[`${tab.dir}/sketch.svg`] = sketchToSvg(yDrawings.get(tab.id), { mediaPrefix: opts.mediaPrefix || '' })
       // named like a note (--<id>.md) so the git history finds earlier versions
       else if (tab.kind === 'doc') files[`${tab.dir}/document--${tab.id}.md`] = pageMarkdown(ydoc, tab, opts)
       else if (tab.kind === 'mindmap') files[`${tab.dir}/mindmap--${tab.id}.md`] = pageMarkdown(ydoc, tab, opts)

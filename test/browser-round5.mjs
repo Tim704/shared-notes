@@ -241,7 +241,7 @@ try {
     await sleep(200)
   }
   const pwDlg = async (text) => {
-    check('the password field hides what is typed', (await evaluate(`document.querySelector('.dlg .dlg-input').type`)) === 'password')
+    check('the password field hides what is typed', await evaluate(`(() => { const i = document.querySelector('.dlg .dlg-input'); return i.type === 'password' || getComputedStyle(i).webkitTextSecurity === 'disc' })()`))
     await dlg(text)
     await sleep(350)
   }
@@ -276,11 +276,64 @@ try {
   await tryPw('wrong')
   check('a wrong password keeps it locked and says so', (await evaluate(`document.body.dataset.tabKind`)) === 'locked' && !(await evaluate(`document.querySelector('.lock-err').hidden`)))
   await tryPw('hunter2')
+  check('typing a tab password does not set off the browser\'s password manager (the page stays in front)', (await evaluate(`document.visibilityState`)) === 'visible')
   check('the right password opens the tab again', (await evaluate(`document.body.dataset.tabKind`)) === 'notes' && (await evaluate(`document.querySelectorAll('#board .card').length`)) > 0)
   await tabMenu('Remove lock')
   await pwDlg('hunter2')
   await sleep(400)
   check('Remove lock takes the password off', !(await evaluate(`!!document.querySelector('#tabs .tab.on .tab-lock')`)))
+
+  // ---------------------------------------------------------------- pictures on a Sketch Pad
+  await evaluate(`document.querySelector('#tabs .tab-add').click()`)
+  await sleep(60)
+  await evaluate(`[...document.querySelectorAll('.menu-item')].find((b) => /Sketch/.test(b.textContent)).click()`)
+  await sleep(80)
+  await dlg('Doodles')
+  await sleep(600)
+  // where the picture layer has paint: the centre of it in window coordinates, or null when it is bare
+  const paint = () => evaluate(`(() => {
+    const cv = document.querySelector('.draw-pics'); const r = cv.getBoundingClientRect()
+    const d = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data
+    let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1
+    for (let y = 0; y < cv.height; y += 4) for (let x = 0; x < cv.width; x += 4) if (d[(y * cv.width + x) * 4 + 3] > 0) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y) }
+    if (x1 < 0) return null
+    return { x: r.left + ((x0 + x1) / 2) * (r.width / cv.width), y: r.top + ((y0 + y1) / 2) * (r.height / cv.height), w: (x1 - x0) * (r.width / cv.width) }
+  })()`)
+  check('an empty sketch has no picture', (await paint()) === null)
+  await evaluate(`document.activeElement?.blur?.()`)
+  await pastePicture()
+  await sleep(1200)
+  const p0 = await paint()
+  check('a picture pasted on a Sketch Pad lands on the sketch', !!p0 && p0.w > 20)
+  check('and the Select tool is on, ready to move it', await evaluate(`document.querySelector('.draw-btn[data-mode="select"]').classList.contains('on')`))
+  await mouse('mouseMoved', p0.x, p0.y, { button: 'none', buttons: 0 })
+  await mouse('mousePressed', p0.x, p0.y)
+  await mouse('mouseMoved', p0.x + 150, p0.y + 20)
+  await mouse('mouseMoved', p0.x + 300, p0.y + 40)
+  await mouse('mouseReleased', p0.x + 300, p0.y + 40)
+  await sleep(300)
+  const host = () => evaluate(`({ n: Number(document.getElementById('canvas-host').dataset.pictures), box: (document.getElementById('canvas-host').dataset.picked || '').split(',').map(Number) })`)
+  const h1 = await host()
+  // 1600 logical units across the sheet; the pasted picture started centred at 800, 500
+  const k = await evaluate(`(() => { const r = document.querySelector('.draw-canvas').getBoundingClientRect(); return Math.min(r.width / 1600, r.height / 1000) })()`)
+  check('dragging moves the picture', h1.n === 1 && Math.abs(h1.box[0] + h1.box[2] / 2 - (800 + 300 / k)) < 30 && h1.box[1] > 460)
+  // the eraser cuts the ink, never a picture
+  await evaluate(`document.querySelector('.draw-btn[data-mode="erase"]').click()`)
+  await mouse('mousePressed', p0.x + 280, p0.y + 40)
+  await mouse('mouseMoved', p0.x + 300, p0.y + 40)
+  await mouse('mouseMoved', p0.x + 320, p0.y + 40)
+  await mouse('mouseReleased', p0.x + 320, p0.y + 40)
+  await sleep(200)
+  check('the eraser does not rub out a picture', (await host()).n === 1)
+  await evaluate(`[...document.querySelectorAll('.draw-btn')].find((b) => /Undo/.test(b.textContent)).click()`)
+  await sleep(100)
+  check('Undo takes back the eraser stroke, not the picture', (await host()).n === 1)
+  await evaluate(`document.querySelector('.draw-btn[data-mode="select"]').click()`)
+  await clickAt(p0.x + 300, p0.y + 40)
+  check('clicking a picture with Select picks it', (await host()).box.length === 4)
+  await key('Delete', 'Delete', 46)
+  await sleep(250)
+  check('Delete removes the picked picture', (await host()).n === 0)
 
   check('no native alert/confirm/prompt dialogs were used', h.dialogs() === 0)
   check('no console errors or uncaught exceptions', h.errors.length === 0)

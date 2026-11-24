@@ -615,10 +615,11 @@ lockView.innerHTML = `<form class="lock-card" autocomplete="off">
   <span class="lock-icon"></span>
   <h2 class="lock-title"></h2>
   <p class="lock-sub">Type its password to open it on this device.</p>
-  <div class="lock-row"><input class="lock-input" type="password" placeholder="Password" aria-label="Tab password" autocomplete="off" maxlength="200" /><button class="dlg-btn primary lock-go" type="submit">Unlock</button></div>
+  <div class="lock-row"><input class="lock-input" type="text" placeholder="Password" aria-label="Tab password" maxlength="200" /><button class="dlg-btn primary lock-go" type="submit">Unlock</button></div>
   <p class="lock-err" role="alert" hidden></p>
 </form>`
 lockView.querySelector('.lock-icon').appendChild(makeIcon('lock'))
+ui.secretInput(lockView.querySelector('.lock-input'))
 document.getElementById('page-view').after(lockView)
 let lockShown = null
 function showLockView(t) {
@@ -1590,6 +1591,14 @@ async function imageFromAddress(src) {
 const pasteSpot = () => (canvasMode && boardPointer ? toPlane(boardPointer.x, boardPointer.y) : null)
 document.addEventListener('paste', (e) => {
   if (full || overlayKind || isTypingTarget(document.activeElement)) return
+  if (drawState && viewKind(activeTab()) === 'draw') {
+    // on a Sketch Pad a pasted picture lands on the sketch
+    const pics = imageFilesOf(e.clipboardData)
+    if (!pics.length) return
+    e.preventDefault()
+    addSketchPictures(pics)
+    return
+  }
   if (!isNotesTab(activeTab())) return
   const files = imageFilesOf(e.clipboardData)
   if (files.length) {
@@ -4144,6 +4153,45 @@ function mountDraw(tabId) {
   buildDrawBar(surface)
 }
 
+// Pictures onto the Sketch Pad: uploaded like any other, then placed under the
+// ink and picked, with the Select tool on so they can be moved straight away.
+async function addSketchPictures(files, at) {
+  if (!drawState || !files.length) return
+  const tabId = drawState.tabId
+  const sizes = await Promise.all(
+    files.map(async (f) => {
+      try {
+        const bmp = await createImageBitmap(f)
+        const s = { w: bmp.width, h: bmp.height }
+        bmp.close && bmp.close()
+        return s
+      } catch {
+        return { w: 0, h: 0 }
+      }
+    })
+  )
+  const urls = await uploadImages(files)
+  if (!urls.length || !drawState || drawState.tabId !== tabId) return
+  // uploadImages drops the files that failed, so sizes only line up when all made it
+  urls.forEach((url, i) => {
+    const s = urls.length === files.length ? sizes[i] : { w: 0, h: 0 }
+    drawState.surface.addImage(url, s.w, s.h, at && i === 0 ? at : null)
+  })
+  drawTool.mode = 'select'
+  drawState.surface.setModeKeepingPick('select')
+  syncDrawBar()
+}
+canvasHost.addEventListener('dragover', (e) => {
+  if (drawState && Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault()
+})
+canvasHost.addEventListener('drop', (e) => {
+  if (!drawState) return
+  const files = imageFilesOf(e.dataTransfer)
+  if (!files.length) return
+  e.preventDefault()
+  addSketchPictures(files, { x: e.clientX, y: e.clientY })
+})
+
 function unmountDraw() {
   if (!drawState) return
   drawState.surface.destroy()
@@ -4636,6 +4684,19 @@ function buildDrawBar(surface) {
   })
   eraseBtn.dataset.mode = 'erase'
 
+  const selectBtn = drawBtn('Select', () => {
+    drawTool.mode = 'select'
+    surface.setMode('select')
+    syncDrawBar()
+  })
+  selectBtn.dataset.mode = 'select'
+  selectBtn.title = 'Pick a picture to move it, resize it by its corner, or delete it (Delete)'
+  const picBtn = drawBtn('🖼 Picture', async () => {
+    const files = await pickImages()
+    if (files.length) addSketchPictures(files)
+  })
+  picBtn.title = 'Put a picture on the sketch (or paste / drop one)'
+
   const undoBtn = drawBtn('↶ Undo', () => surface.undoLast())
   const clearBtn = drawBtn('Clear', () => {
     // no confirm: clear now, offer Undo (rebuilds the strokes from a snapshot)
@@ -4665,8 +4726,8 @@ function buildDrawBar(surface) {
   })
   clearBtn.classList.add('danger')
 
-  drawBar.append(color, swatches, width, smoothingSlider('draw-width'), penBtn, textBtn, eraseBtn, undoBtn, clearBtn)
-  drawBar._modeBtns = [penBtn, textBtn, eraseBtn]
+  drawBar.append(color, swatches, width, smoothingSlider('draw-width'), penBtn, textBtn, eraseBtn, selectBtn, picBtn, undoBtn, clearBtn)
+  drawBar._modeBtns = [penBtn, textBtn, eraseBtn, selectBtn]
   drawBar._swatches = swatchRefs
   drawBar._colorInput = color
   syncDrawBar()

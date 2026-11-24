@@ -123,6 +123,10 @@ export function referencedMedia(ydoc) {
     const nodes = p.get('nodes')
     if (nodes && typeof nodes.forEach === 'function') nodes.forEach((n) => n && typeof n.get === 'function' && scan(n.get('image')))
   })
+  // pictures placed on a Sketch Pad
+  ydoc.getMap('drawings').forEach((arr) => {
+    if (arr && typeof arr.forEach === 'function') arr.forEach((s) => s && typeof s.get === 'function' && s.get('type') === 'image' && scan(s.get('src')))
+  })
   ydoc.getArray('tabs').forEach((t) => scan(t && typeof t.get === 'function' ? t.get('wallpaper') : t && t.wallpaper))
   return out
 }

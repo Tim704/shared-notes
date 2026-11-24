@@ -2,7 +2,7 @@ import * as Y from 'yjs'
 import { connect, sleep } from './lib.mjs'
 import { linesOf, parseCrop, formatCrop, cropStyles } from '../shared/lines.js'
 import { setLineAttrs } from '../shared/lineops.js'
-import { tabRec, buildMirror, exportMarkdown } from '../shared/serialise.js'
+import { tabRec, buildMirror, exportMarkdown, sketchToSvg } from '../shared/serialise.js'
 import { smoothPoint, simplify } from '../src/stroke.js'
 import { taskTree, progress, dueState, dueLabel, dueCount, orderBetween, taskLists, taskClasses, tasksMarkdown, tasksView, MAIN_LIST } from '../shared/tasks.js'
 import { mapTree, layoutMap, fromOutline, mapMarkdown, branchToTasks } from '../shared/mindmap.js'
@@ -309,6 +309,25 @@ check(
   let p = { x: 0, y: 0 }
   for (let i = 0; i < 20; i++) p = smoothPoint(p, { x: 10, y: 10 })
   check('smoothPoint converges on the pen', Math.abs(p.x - 10) < 0.01 && Math.abs(p.y - 10) < 0.01)
+  // pictures on a Sketch Pad
+  {
+    const d = new Y.Doc()
+    const arr = new Y.Array()
+    d.getMap('drawings').set('sk', arr)
+    const pic = new Y.Map()
+    arr.push([pic])
+    const src = '/media/' + 'c'.repeat(64) + '.png'
+    for (const [k, v] of Object.entries({ type: 'image', src, x: 10, y: 20, w: 300, h: 200 })) pic.set(k, v)
+    const bad = new Y.Map()
+    arr.push([bad])
+    for (const [k, v] of Object.entries({ type: 'image', src: 'https://elsewhere.example/a.png', x: 0, y: 0, w: 10, h: 10 })) bad.set(k, v)
+    const stroke = new Y.Map()
+    arr.push([stroke])
+    stroke.set('points', [1, 1, 5, 5])
+    const svg = sketchToSvg(arr, { mediaPrefix: '../media/' })
+    check('a sketch picture is exported under the ink, from the board\'s own pictures only', svg.indexOf('<image href="../media/' + 'c'.repeat(64) + '.png" x="10" y="20" width="300" height="200"') > 0 && svg.indexOf('<image') < svg.indexOf('<polyline') && !svg.includes('elsewhere'))
+    check('a sketch picture counts as used (not swept)', referencedMedia(d).has('c'.repeat(64) + '.png'))
+  }
   // locked tabs
   {
     const d = new Y.Doc()

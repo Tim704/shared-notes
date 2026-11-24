@@ -17,6 +17,8 @@
 //         gets one the first time it is folded or linked to). Used for per-device
 //         folding, [[Note^id]] links and by the REST API to tick a todo.
 //   ew    embed width in percent (10..100) for a line that is just a media URL
+//   cr    a picture's crop: "x,y,w,h,ratio": the kept part in percent of the
+//         picture, and that part's width / height. Nothing is cut from the file.
 //
 // Inline marks: b/i/u/s are true; hl is a highlight colour (see HIGHLIGHTS);
 // href is the address of a labelled link.
@@ -29,12 +31,30 @@
 export const MARKS = ['b', 'i', 'u', 's', 'hl', 'href']
 export const BOOL_MARKS = ['b', 'i', 'u', 's']
 export const HIGHLIGHTS = ['yellow', 'green', 'blue', 'pink', 'purple']
-export const LINE_KEYS = ['lt', 'mk', 'ind', 'done', 'ts', 'co', 'al', 'bid', 'ew']
+export const LINE_KEYS = ['lt', 'mk', 'ind', 'done', 'ts', 'co', 'al', 'bid', 'ew', 'cr']
 export const MARKERS = ['disc', 'square', 'arrow', 'dash', 'decimal', 'alpha', 'roman']
 export const NUMERIC = new Set(['decimal', 'alpha', 'roman'])
 export const CALLOUTS = ['note', 'tip', 'warning', 'danger', 'quote']
 export const TODO_STATES = { '/': 'In progress', '-': 'Cancelled', '>': 'Deferred' }
 export const MAX_IND = 5
+
+/** "x,y,w,h,ratio" → { x, y, w, h, ratio }, or null when it is not a usable crop. */
+export function parseCrop(cr) {
+  if (typeof cr !== 'string') return null
+  const [x, y, w, h, ratio] = cr.split(',').map(Number)
+  if (![x, y, w, h, ratio].every(Number.isFinite)) return null
+  if (x < 0 || y < 0 || w < 1 || h < 1 || x + w > 100.01 || y + h > 100.01 || !(ratio > 0.01 && ratio < 100)) return null
+  if (w > 99.9 && h > 99.9) return null // the whole picture
+  return { x, y, w, h, ratio }
+}
+export const formatCrop = (c) => [c.x, c.y, c.w, c.h].map((n) => Math.round(n * 100) / 100).join(',') + ',' + Math.round(c.ratio * 10000) / 10000
+/** Inline styles that show a cropped picture: [the clipping box, the <img> inside it]. */
+export function cropStyles(c) {
+  return [
+    `aspect-ratio:${c.ratio}`,
+    `width:${Math.round(1000000 / c.w) / 100}%;height:${Math.round(1000000 / c.h) / 100}%;left:${Math.round((-c.x / c.w) * 10000) / 100}%;top:${Math.round((-c.y / c.h) * 10000) / 100}%`,
+  ]
+}
 
 export function pickMarks(attrs) {
   const out = {}

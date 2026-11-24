@@ -97,6 +97,9 @@ if (withBrowser) {
   console.log('\n=== browser roadmap ===')
   const code2 = await run('node', ['test/browser-roadmap.mjs'])
   if (code2 !== 0) failed++
+  console.log('\n=== browser round 5 ===')
+  const code3 = await run('node', ['test/browser-round5.mjs'])
+  if (code3 !== 0) failed++
 }
 
 console.log('\n' + (failed === 0 ? 'ALL SUITES PASSED' : failed + ' SUITE(S) FAILED'))

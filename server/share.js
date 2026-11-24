@@ -7,7 +7,7 @@
 import fs from 'fs'
 import path from 'path'
 import express from 'express'
-import { linesOf, computeMarkers, embedOf, CALLOUTS, TODO_STATES } from '../shared/lines.js'
+import { linesOf, computeMarkers, embedOf, CALLOUTS, TODO_STATES, parseCrop, cropStyles } from '../shared/lines.js'
 import { tabsOf } from '../shared/serialise.js'
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/
@@ -76,7 +76,12 @@ export function bodyHtml(ytext, mediaBase) {
     let inner
     if (emb && emb.kind === 'image') {
       const src = emb.src.startsWith('/media/') ? mediaBase + encodeURIComponent(emb.src.slice(7)) : emb.src
-      inner = `<img src="${esc(src)}" alt="" loading="lazy"${a.ew ? ` style="width:${Math.max(10, Math.min(100, Number(a.ew) || 100))}%"` : ''}>`
+      const crop = parseCrop(a.cr)
+      const width = a.ew ? `width:${Math.max(10, Math.min(100, Number(a.ew) || 100))}%` : ''
+      if (crop) {
+        const [winCss, imgCss] = cropStyles(crop)
+        inner = `<span class="crop" style="${winCss};${width}"><img src="${esc(src)}" alt="" loading="lazy" style="${imgCss}"></span>`
+      } else inner = `<img src="${esc(src)}" alt="" loading="lazy"${width ? ` style="${width}"` : ''}>`
     } else if (emb) inner = `<a href="${esc(emb.src)}" rel="noopener noreferrer nofollow" target="_blank">${emb.kind === 'youtube' ? '▶ YouTube video' : 'Instagram post'}</a>`
     else inner = L.runs.map(runHtml).join('') || '&nbsp;'
     if (a.lt === 'h') out.push(`<h2${al}>${inner}</h2>`)
@@ -113,6 +118,7 @@ p{margin:.15em 0;overflow-wrap:anywhere}
 .co-danger{border-color:#ff453a;background:rgba(255,69,58,.1)}.co-quote{border-color:var(--line);background:none;color:var(--dim);font-style:italic}
 hr{border:0;border-top:1px solid var(--line);margin:1em 0}
 img{max-width:100%;height:auto;border-radius:8px;display:block;margin:.4em 0}
+.crop{display:block;position:relative;overflow:hidden;max-width:100%;border-radius:8px;margin:.4em 0}.crop img{position:absolute;max-width:none;margin:0;border-radius:0}
 a{color:var(--link)}mark{background:#ffe066;color:#1c1c1e;border-radius:2px}
 mark.hl-green{background:#b8f2c2}mark.hl-blue{background:#bfe0ff}mark.hl-pink{background:#ffc8dd}mark.hl-purple{background:#e0ccff}
 [data-al=center]{text-align:center;justify-content:center}[data-al=right]{text-align:right;justify-content:flex-end}

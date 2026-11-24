@@ -51,6 +51,9 @@ browser at it.
   Click to see it full size, drag its corner to resize it. A YouTube or Instagram link on a
   line of its own becomes a click-to-load player (privacy-friendly: nothing loads from
   YouTube until you click).
+- **Pictures on the board**: paste a picture with no note selected, drop one on an empty
+  part of a NotePad, or press *Picture* in the ribbon, and it becomes its own picture card.
+  Its crop button crops it without changing the file.
 - **Full screen**: the expand button on a note (or double-click its header) opens it large, with its own
   live editor. The back button or Esc closes it, and `#note=<id>&full` links straight to it.
 - **Mind map tabs**: the tab's name sits in the middle. Click a node to edit it (Enter adds

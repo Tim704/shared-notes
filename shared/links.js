@@ -9,7 +9,7 @@
 // Markdown mirror and its history stay readable; renaming a note rewrites them
 // (rewriteLinks) instead of resolving through ids.
 
-import { linesOf } from './lines.js'
+import { linesOf, LINE_KEYS } from './lines.js'
 import { tabsOf } from './serialise.js'
 
 export const WIKI_RE = /\[\[([^\]\n]+)\]\]/g
@@ -101,7 +101,7 @@ function replaceKeepingMarks(ytext, start, len, str) {
     pos += l
   }
   // line attributes live on '\n' only; never copy them onto text
-  for (const k of ['lt', 'mk', 'ind', 'done', 'ts', 'co', 'al', 'bid', 'ew']) delete marks[k]
+  for (const k of LINE_KEYS) delete marks[k]
   ytext.delete(start, len)
   if (str) ytext.insert(start, str, marks)
 }

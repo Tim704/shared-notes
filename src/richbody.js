@@ -15,6 +15,8 @@ import {
   embedOf,
   pickLine,
   pickMarks,
+  parseCrop,
+  cropStyles,
   fullLine,
   isList,
   numericForLevel,
@@ -414,7 +416,17 @@ export function bindRichText(ytext, el, opts = {}) {
         e.preventDefault()
         if (onEmbedClick) onEmbedClick(emb)
       })
-      box.appendChild(img)
+      const crop = parseCrop(a.cr)
+      if (crop) {
+        // a cropped picture: the whole file, shown through a window
+        const win = document.createElement('div')
+        win.className = 'rb-crop'
+        const [winCss, imgCss] = cropStyles(crop)
+        win.style.cssText = winCss
+        img.style.cssText = imgCss
+        win.appendChild(img)
+        box.appendChild(win)
+      } else box.appendChild(img)
     } else if (emb.kind === 'youtube') {
       const thumb = document.createElement('button')
       thumb.className = 'rb-play'

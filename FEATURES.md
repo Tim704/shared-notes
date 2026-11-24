@@ -117,6 +117,11 @@ space around the notes:
 - **Size and storage:** the browser shrinks it to at most 2000 px before uploading, and the
   Pi stores it.
 - **Viewing:** click a picture to see it full size, or drag its corner to resize it.
+- **Pictures straight on the board:** paste a picture with no note selected, drop one on an
+  empty part of a NotePad, or use *Picture* in the ribbon (on phones: hold **+** → *New
+  picture*). It becomes a picture card that moves, resizes and selects like a note.
+- **Cropping:** the crop button on a picture card opens the whole picture with a frame to
+  drag. Nothing is cut from the file, so *Whole picture* always brings it back.
 - **Video:** a YouTube or Instagram link on a line of its own becomes a click-to-load
   player. Nothing loads from YouTube until you click.
 

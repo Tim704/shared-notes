@@ -3585,6 +3585,39 @@ body.phone .page-view[data-kind='doc'] .page-fmt .fmt-btn { min-width: 44px; hei
 .card.is-image .card-bodyhost, .card.is-image .card-body { padding: 0; margin: 0; overflow: hidden; }
 .card.is-image .rb-embed { margin: 0; }
 .card.is-image .rb-embed img { display: block; width: 100%; height: auto; border-radius: 0; }
+.card .card-tools .crop { display: none; }
+.card.is-image .card-tools .crop { display: inline-flex; }
+
+/* a cropped picture: the whole file behind a window (see `cr` in shared/lines.js) */
+.rb-crop { position: relative; overflow: hidden; width: 100%; border-radius: var(--r-control); background: var(--fill); }
+.rb-embed .rb-crop img, .card.is-image .rb-embed .rb-crop img { position: absolute; max-width: none; border-radius: 0; }
+.card.is-image .rb-crop { border-radius: 0; }
+
+/* the crop overlay */
+.cropper { flex-direction: column; gap: 16px; cursor: default; }
+.crop-stage { position: relative; line-height: 0; max-width: 100%; min-height: 0; flex: 0 1 auto; }
+.cropper .crop-stage img { max-width: min(100%, 86vw); max-height: 70vh; cursor: default; border-radius: 0; user-select: none; }
+.crop-frame {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  cursor: move;
+  touch-action: none;
+  outline: none;
+}
+.crop-stage { overflow: hidden; border-radius: var(--r-field); }
+.crop-frame:focus-visible { border-color: var(--accent); }
+.crop-h { position: absolute; width: 14px; height: 14px; background: #fff; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35); touch-action: none; }
+.crop-nw { left: 3px; top: 3px; cursor: nwse-resize; }
+.crop-n { left: calc(50% - 7px); top: 3px; cursor: ns-resize; }
+.crop-ne { right: 3px; top: 3px; cursor: nesw-resize; }
+.crop-e { right: 3px; top: calc(50% - 7px); cursor: ew-resize; }
+.crop-se { right: 3px; bottom: 3px; cursor: nwse-resize; }
+.crop-s { left: calc(50% - 7px); bottom: 3px; cursor: ns-resize; }
+.crop-sw { left: 3px; bottom: 3px; cursor: nesw-resize; }
+.crop-w { left: 3px; top: calc(50% - 7px); cursor: ew-resize; }
+.crop-bar { display: flex; gap: 8px; }
 
 /* ---------------------------------------------------------------- To-do tab (src/tasks.js) */
 .tab-badge {

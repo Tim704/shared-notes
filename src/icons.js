@@ -18,6 +18,7 @@ const paths = {
   pin: 'm8 3 8 0-1 7 4 4v2H5v-2l4-4-1-7ZM12 16v6',
   history: 'M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2',
   image: 'M3 3h18v18H3ZM3 17l6-6 4 4 3-3 5 5M9 7h.01',
+  crop: 'M6 2v16h16M2 6h16v16',
   play: 'm9 5 11 7-11 7V5Z', stop: 'M5 5h14v14H5Z',
   camera: 'M3 7h4l2-3h6l2 3h4v14H3ZM16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
   download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',

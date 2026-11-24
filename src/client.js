@@ -11,14 +11,15 @@ import { createDrawSurface } from './draw.js'
 import { getSettings, setSetting, onSettingChange } from './settings.js'
 import * as ui from './ui.js'
 import { snippetOf } from '../shared/serialise.js'
-import { markdownToLines, linesOf, embedOf, genLineId, HIGHLIGHTS } from '../shared/lines.js'
-import { replaceAllLines, ensureTerminator, insertLinesAt, appendLines } from '../shared/lineops.js'
+import { markdownToLines, linesOf, embedOf, genLineId, HIGHLIGHTS, parseCrop, formatCrop } from '../shared/lines.js'
+import { replaceAllLines, ensureTerminator, insertLinesAt, appendLines, setLineAttrs } from '../shared/lineops.js'
 import { normTitle, namesOf, aliasesOf, parseTarget, followRename, rewriteLinks, nameTaken, backlinks, unlinkedMentions, linkMention, tagCounts, renameTag } from '../shared/links.js'
 import { parseQuery, noteFacts, matchFacts } from '../shared/search.js'
 import { openSwitcher, rank as rankItems } from './switcher.js'
 import { initHoverPreview } from './preview.js'
 import { importFiles } from './importer.js'
 import { uploadImages, openLightbox, pickImages } from './media.js'
+import { openCrop } from './crop.js'
 import { createFoldStore } from './folds.js'
 import * as backup from './backup.js'
 import { createMindMap } from './mindmap.js'
@@ -1214,15 +1215,66 @@ const imageFilesOf = (dt) => {
   }
   return out
 }
+// Some apps copy a picture as a bit of HTML (<img src=…>) with no file. Only
+// when the picture is all there is: copied text with a picture in it stays text.
+const imageAddressOf = (dt) => {
+  const html = dt?.getData?.('text/html') || ''
+  const m = /<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/i.exec(html)
+  if (!m) return null
+  const text = (dt.getData('text/plain') || '').trim()
+  const src = m[1].replace(/&amp;/g, '&')
+  if (text && text !== src) return null
+  return /^(https?:|data:image\/)/i.test(src) ? src : null
+}
+async function imageFromAddress(src) {
+  try {
+    const r = await fetch(src)
+    const blob = await r.blob()
+    if (!r.ok || !/^image\//.test(blob.type)) return null
+    return new File([blob], 'pasted.' + blob.type.split('/')[1], { type: blob.type })
+  } catch {
+    return null // the other site does not let pages read its pictures
+  }
+}
+const pasteSpot = () => (canvasMode && boardPointer ? toPlane(boardPointer.x, boardPointer.y) : null)
 document.addEventListener('paste', (e) => {
   if (full || overlayKind || isTypingTarget(document.activeElement)) return
   if (!isNotesTab(activeTab())) return
   const files = imageFilesOf(e.clipboardData)
-  if (!files.length) return
+  if (files.length) {
+    e.preventDefault()
+    addImageCards(files, pasteSpot())
+    return
+  }
+  const src = imageAddressOf(e.clipboardData)
+  if (!src) return
   e.preventDefault()
-  const at = canvasMode && boardPointer ? toPlane(boardPointer.x, boardPointer.y) : null
-  addImageCards(files, at)
+  const at = pasteSpot()
+  imageFromAddress(src).then((file) => {
+    if (file) addImageCards([file], at)
+    else ui.toast('That picture could not be copied from its site. Save it first, then drop it on the board.')
+  })
 })
+// Crop a picture card. The crop sits on the picture's line, so everyone sees it
+// and it can be changed or taken off again.
+async function cropImageCard(id) {
+  const note = yNotes.get(id)
+  const yt = note?.get('body')
+  const L = yt && linesOf(yt)[0]
+  const emb = L && embedOf(L.text)
+  if (!emb || emb.kind !== 'image') return
+  const res = await openCrop(emb.src, parseCrop(L.attrs.cr))
+  if (res == null || !yNotes.has(id)) return
+  doc.transact(() => {
+    ensureTerminator(yt)
+    setLineAttrs(yt, 0, { cr: res === 'none' ? null : formatCrop(res) })
+  })
+}
+// the same without a clipboard: pick pictures from the device
+async function addPicturesToBoard() {
+  const files = await pickImages()
+  if (files.length) addImageCards(files, null)
+}
 board.addEventListener('dragover', (e) => {
   if (!isNotesTab(activeTab()) || e.target.closest('.card')) return
   if (Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault()
@@ -2704,7 +2756,17 @@ function createCard(id) {
     openFullscreen(id)
   })
 
-  tools.append(fold, expand, del) // the note's settings live in the ribbon
+  const cropBtn = document.createElement('button')
+  cropBtn.className = 'icon-btn crop' // picture cards only (see .card.is-image)
+  cropBtn.title = 'Crop this picture'
+  cropBtn.setAttribute('aria-label', cropBtn.title)
+  iconLabel(cropBtn, '', 'crop')
+  cropBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    cropImageCard(id)
+  })
+
+  tools.append(cropBtn, fold, expand, del) // the note's settings live in the ribbon
   top.append(presenceEl, tools)
   if (collapsed.has(id)) el.classList.add('collapsed')
 
@@ -2942,7 +3004,7 @@ function createCard(id) {
       nh = Math.round(Math.max(H_MIN, nh))
       nw = Math.round(nw)
       el.style.width = nw + 'px'
-      el.style.height = nh + 'px'
+      if (note.get('kind') !== 'image') el.style.height = nh + 'px' // a picture's height follows its width
       pendingSize = { w: nw, h: nh }
       scheduleSize()
     }
@@ -3127,7 +3189,9 @@ function mountBody(card) {
     const rich = bindRichText(ytext, bodyEl, editorOpts(note, {
       onChange: () => applyFilter(),
       onState: (marks, line) => card.fmtBar.update(marks, line),
-      editable: card.isFull || !phoneMode(),
+      // a picture card is only its picture: nothing to type, and a paste while
+      // it is selected belongs to the board
+      editable: kind !== 'image' && (card.isFull || !phoneMode()),
       getRich: () => rich,
     }))
     bodyEl.addEventListener('focus', () => {
@@ -3997,6 +4061,13 @@ ribbon.button(noteGroup, {
 })
 
 const drawGroup = ribbon.group('Draw', 'rib-draw')
+ribbon.button(drawGroup, {
+  icon: 'image',
+  text: 'Picture',
+  title: 'Put a picture on the board (or paste / drop one onto it)',
+  cls: 'rib-picture',
+  onPress: () => addPicturesToBoard(),
+})
 const ribInk = ribbon.button(drawGroup, {
   icon: 'pencil',
   text: 'Draw',
@@ -4107,6 +4178,13 @@ onSettingChange((key) => { if (key === 'ribbon') refreshRibbon() })
 
 // a click on empty board (not a note, the ribbon or one of its menus) ends editing
 document.addEventListener('pointerdown', (e) => {
+  // The board cancels this pointerdown (to pan or drag a box), which would leave
+  // the keyboard focus in the note: a picture pasted next would land in that
+  // note and not on the board.
+  if (e.target === board || e.target === plane) {
+    const a = document.activeElement
+    if (a && a !== document.body && a.closest?.('.card')) a.blur()
+  }
   if (!ribbonTarget?.card) return
   if (e.target.closest('.card, #ribbon, .menu, .card-pop, .dlg-back, .toasts, .full-back')) return
   setRibbonTarget(null)
@@ -5031,6 +5109,7 @@ function newPhoneNote(kind) {
         [
           { icon: '✎', label: 'New note', onClick: () => newPhoneNote('note') },
           { icon: '☑', label: 'New checklist', onClick: () => newPhoneNote('todo') },
+          ...(isNotesTab(activeTab()) ? [{ icon: '🖼', label: 'New picture', onClick: () => addPicturesToBoard() }] : []),
           'sep',
           { icon: '☰', label: 'New NotePad tab', onClick: () => addTab('notes') },
           { icon: 'todo', label: 'New to-do tab', onClick: () => addTab('tasks') },

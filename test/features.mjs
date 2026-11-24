@@ -1,6 +1,7 @@
 import * as Y from 'yjs'
 import { connect, sleep } from './lib.mjs'
-import { linesOf } from '../shared/lines.js'
+import { linesOf, parseCrop, formatCrop, cropStyles } from '../shared/lines.js'
+import { setLineAttrs } from '../shared/lineops.js'
 import { tabRec, buildMirror, exportMarkdown } from '../shared/serialise.js'
 import { smoothPoint, simplify } from '../src/stroke.js'
 import { taskTree, progress, dueState, dueLabel, dueCount, orderBetween } from '../shared/tasks.js'
@@ -304,6 +305,21 @@ check(
   let p = { x: 0, y: 0 }
   for (let i = 0; i < 20; i++) p = smoothPoint(p, { x: 10, y: 10 })
   check('smoothPoint converges on the pen', Math.abs(p.x - 10) < 0.01 && Math.abs(p.y - 10) < 0.01)
+  // a picture's crop
+  {
+    const c = parseCrop(formatCrop({ x: 10, y: 0, w: 50, h: 100, ratio: 0.75 }))
+    check('a crop survives being written and read', c && c.x === 10 && c.w === 50 && c.h === 100 && c.ratio === 0.75)
+    check('a crop of the whole picture, or nonsense, is no crop', parseCrop('0,0,100,100,1.5') === null && parseCrop('90,0,50,100,1') === null && parseCrop('x') === null && parseCrop(null) === null)
+    const [win, img] = cropStyles(c)
+    check('a crop is drawn as a window over the whole picture', win === 'aspect-ratio:0.75' && img === 'width:200%;height:100%;left:-20%;top:0%')
+    const d = new Y.Doc()
+    const yt = d.getText('t')
+    yt.insert(0, '/media/' + 'a'.repeat(64) + '.png\n')
+    setLineAttrs(yt, 0, { cr: formatCrop(c) })
+    check('the crop is a line attribute on the picture line', linesOf(yt)[0].attrs.cr === '10,0,50,100,0.75')
+    setLineAttrs(yt, 0, { cr: null })
+    check('and can be taken off', linesOf(yt)[0].attrs.cr == null)
+  }
   const straight = []
   for (let i = 0; i <= 50; i++) straight.push(i, i * 0.5 + (i % 2) * 0.1)
   const lean = simplify(straight, 0.5)
